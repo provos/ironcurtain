@@ -2,16 +2,13 @@
 /** Backend release-suite entrypoint. Qualification is release control, not session admission. */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runVitestQualificationSuite } from '../src/docker-workload/qualification-runner.js';
-
-const APPLE_TEST_FILES = [
-  'test/docker-manager.test.ts',
-  'test/apple-container-manager.test.ts',
-  'test/apple-container.integration.test.ts',
-] as const;
+import { getBackendQualificationPlan } from './qualify-backend-plan.js';
+import { reapSmokeProcessGroup, waitForSmokeChild } from './smoke-child-process.js';
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -22,8 +19,14 @@ async function main(): Promise<void> {
       'timeout-ms': { type: 'string' },
     },
   });
-  if (values.backend !== 'apple') {
-    process.stderr.write('usage: qualify-backend --backend apple [--report-dir <dir>] [--repository-root <path>]\n');
+  let plan;
+  try {
+    plan = getBackendQualificationPlan(values.backend);
+  } catch {
+    process.stderr.write(
+      'usage: qualify-backend --backend <apple|docker-desktop> [--report-dir <dir>] ' +
+        '[--repository-root <path>] [--timeout-ms <milliseconds>]\n',
+    );
     process.exitCode = 2;
     return;
   }
@@ -39,24 +42,90 @@ async function main(): Promise<void> {
   if (!temporary) mkdirSync(reportDirectory, { recursive: true, mode: 0o700 });
 
   process.stdout.write(
-    `running the Apple release suite from the current checkout\n` +
+    `running the ${plan.label} release suite from the current checkout\n` +
       `  repository: ${repositoryRoot}\n` +
-      `  suites:     ${APPLE_TEST_FILES.length}\n` +
+      `  suites:     ${plan.testFiles.length}\n` +
+      `  live gates: ${plan.liveSmokeArguments.length}\n` +
       (temporary ? '' : `  report:     ${reportDirectory}\n`),
   );
   try {
     const result = await runVitestQualificationSuite({
-      suiteId: 'apple',
-      testFiles: APPLE_TEST_FILES,
+      suiteId: plan.suiteId,
+      testFiles: plan.testFiles,
       repositoryRoot,
       reportDirectory,
       timeoutMs,
     });
+    for (const smokeArguments of plan.liveSmokeArguments) {
+      process.stdout.write(`\nrunning ${plan.label} live gate: ${smokeArguments.join(' ')}\n`);
+      await runLiveSmoke(repositoryRoot, smokeArguments, timeoutMs);
+    }
     process.stdout.write(
-      `\nAPPLE RELEASE SUITE PASSED: ${result.testCount} tests passed, zero reporter-visible skips.\n`,
+      `\n${plan.label.toUpperCase()} RELEASE SUITE PASSED: ${result.testCount} tests passed, ` +
+        `${plan.liveSmokeArguments.length} live gates passed, zero reporter-visible skips.\n`,
     );
   } finally {
     if (temporary) rmSync(reportDirectory, { recursive: true, force: true });
+  }
+}
+
+async function runLiveSmoke(
+  repositoryRoot: string,
+  smokeArguments: readonly string[],
+  timeoutMs: number,
+): Promise<void> {
+  const tsxPath = resolve(repositoryRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const smokePath = resolve(repositoryRoot, 'scripts', 'smoke-nested-apple.ts');
+  const child = spawn(process.execPath, [tsxPath, smokePath, ...smokeArguments], {
+    cwd: repositoryRoot,
+    env: { ...process.env, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
+    stdio: 'inherit',
+    // A live smoke launches the product CLI. Give the gate its own process
+    // group so timeout teardown reaches both processes while the detached
+    // watchdog remains alive long enough to revoke the abandoned bundle.
+    detached: true,
+  });
+  const terminateGroup = (signal: NodeJS.Signals): void => {
+    if (child.pid === undefined) return;
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  };
+  if (child.pid === undefined) {
+    // A failed spawn reports through an asynchronous `error` event. Retain a
+    // listener after this synchronous guard throws so that failure cannot
+    // surface later as an uncaught event in the qualification runner.
+    child.once('error', () => undefined);
+    throw new Error('live qualification gate has no process group ID');
+  }
+  let exit: Awaited<ReturnType<typeof waitForSmokeChild>> | undefined;
+  let waitFailure: unknown;
+  try {
+    exit = await waitForSmokeChild(child, timeoutMs, { terminate: terminateGroup });
+  } catch (error) {
+    waitFailure = error;
+  }
+  let group: Awaited<ReturnType<typeof reapSmokeProcessGroup>>;
+  try {
+    group = await reapSmokeProcessGroup(child.pid, { terminate: terminateGroup });
+  } catch (error) {
+    if (waitFailure !== undefined) {
+      throw new AggregateError([waitFailure, error], 'live qualification gate wait and process-group cleanup failed');
+    }
+    throw error;
+  }
+  if (waitFailure !== undefined) throw waitFailure;
+  if (exit === undefined) throw new Error('live qualification gate ended without an exit result');
+  if (group.leaked) {
+    throw new Error(`live qualification gate leaked a child process: ${smokeArguments.join(' ')}`);
+  }
+  if (exit.timedOut) {
+    throw new Error(`live qualification gate timed out: ${smokeArguments.join(' ')}`);
+  }
+  if (exit.code !== 0) {
+    throw new Error(`live qualification gate failed (${exit.code ?? exit.signal}): ${smokeArguments.join(' ')}`);
   }
 }
 

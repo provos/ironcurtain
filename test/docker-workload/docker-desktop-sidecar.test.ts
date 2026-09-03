@@ -41,6 +41,8 @@ const API_VOLUME_NAME = `ic-dw-daemon-api-${RESOURCE_SUFFIX}`;
 const SIDECAR_NAME = `ic-dw-nested-daemon-${RESOURCE_SUFFIX}`;
 const OWNERSHIP_LABELS = { 'com.ironcurtain.docker-workload.generation': 'gen-test' } as const;
 const OUTER_AGENT_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
+const WORKSPACE_ROOT = '/host/project';
+const WORKSPACE_MOUNT = { source: WORKSPACE_ROOT, target: '/workspace', readonly: false } as const;
 const CANARY_IMAGE_ID = `sha256:${'e'.repeat(64)}`;
 const INNER_NETWORK_ID = 'f'.repeat(64);
 const CLIENT_MANIFEST = loadClientToolchainManifest(getFrozenClientToolchainManifestPath()).manifest;
@@ -163,7 +165,9 @@ function runtimeFixture(
     readonly failBuild?: boolean;
     readonly failShim?: boolean;
     readonly wrongVolumeLabels?: boolean;
-    readonly wrongContainerProfile?: boolean;
+    readonly observedWorkspaceBind?: string;
+    readonly observedHostConfig?: Readonly<Record<string, unknown>>;
+    readonly observedNetworks?: Readonly<Record<string, unknown>>;
     readonly observedDevices?: readonly {
       readonly PathOnHost: string;
       readonly PathInContainer: string;
@@ -230,9 +234,14 @@ function runtimeFixture(
         },
         HostConfig: {
           NetworkMode: config.network,
-          Privileged: options.wrongContainerProfile === true,
+          Privileged: false,
           ReadonlyRootfs: trusted?.readOnlyRootfs === true,
           Init: true,
+          PidMode: '',
+          IpcMode: 'private',
+          UTSMode: '',
+          UsernsMode: '',
+          CgroupnsMode: 'private',
           CapDrop: ['CAP_ALL'],
           CapAdd: (config.capAdd ?? []).map((capability) => `CAP_${capability}`),
           Memory: (config.resources?.memoryMb ?? 0) * 1024 * 1024,
@@ -240,7 +249,11 @@ function runtimeFixture(
           PidsLimit: trusted?.pidsLimit,
           PortBindings: {},
           RestartPolicy: { Name: 'no' },
-          Binds: config.mounts.map((mount) => `${mount.source}:${mount.target}${mount.readonly ? ':ro' : ''}`),
+          Binds: config.mounts.map((mount) =>
+            mount.target === WORKSPACE_MOUNT.target && options.observedWorkspaceBind !== undefined
+              ? options.observedWorkspaceBind
+              : `${mount.source}:${mount.target}${mount.readonly ? ':ro' : ''}`,
+          ),
           Mounts: namedMounts.map((mount) => ({
             Type: 'volume',
             Source: mount.name,
@@ -260,13 +273,16 @@ function runtimeFixture(
               CgroupPermissions: device.permissions,
             })),
           ExtraHosts: config.network === 'none' ? null : ['host.docker.internal:host-gateway'],
+          ...options.observedHostConfig,
         },
         NetworkSettings: {
-          Networks: {
-            [config.network]: {
-              IPAMConfig: config.ipv4Address === undefined ? null : { IPv4Address: config.ipv4Address },
-            },
-          },
+          Networks:
+            options.observedNetworks ??
+            ({
+              [config.network]: {
+                IPAMConfig: config.ipv4Address === undefined ? null : { IPv4Address: config.ipv4Address },
+              },
+            } as const),
         },
         Mounts: [
           ...config.mounts.map((mount) => ({
@@ -385,6 +401,7 @@ function startOptions(fixture: RuntimeFixture): StartDockerDesktopSidecarOptions
     runtime: fixture.runtime,
     sidecarImage: 'ironcurtain-nested-daemon:latest',
     outerAgentImageId: OUTER_AGENT_IMAGE_ID,
+    workspaceRoot: WORKSPACE_ROOT,
     resources: { memoryMb: 4096, cpus: 2, pidsLimit: 512 },
     createOuterResource: resourceAuthority(events, fixture.expandedCreates),
     activation: {
@@ -398,6 +415,18 @@ function startOptions(fixture: RuntimeFixture): StartDockerDesktopSidecarOptions
       },
     },
   };
+}
+
+async function expectStoppedProfileRejection(fixture: RuntimeFixture, field: string): Promise<void> {
+  await expect(startDockerDesktopSidecar(startOptions(fixture))).rejects.toThrow(
+    `Docker Desktop sidecar effective profile mismatch: ${field}`,
+  );
+  expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
+  expect(fixture.events.slice(-3)).toEqual([
+    `container:stop:${SIDECAR_CONTAINER_ID}`,
+    `container:remove:${SIDECAR_CONTAINER_ID}`,
+    `volume:remove:${API_VOLUME_NAME}`,
+  ]);
 }
 
 describe('Docker Desktop sidecar frozen artifacts', () => {
@@ -444,6 +473,18 @@ describe('Docker Desktop sidecar frozen artifacts', () => {
 });
 
 describe('Docker Desktop sidecar lifecycle', () => {
+  it.each(['workspace', '/'])(
+    'rejects a non-canonical workspace source %s before provisioning',
+    async (workspaceRoot) => {
+      const fixture = runtimeFixture();
+
+      await expect(startDockerDesktopSidecar({ ...startOptions(fixture), workspaceRoot })).rejects.toThrow(
+        /workspace source must be a canonical absolute directory below root/u,
+      );
+      expect(fixture.events).toEqual([]);
+    },
+  );
+
   it('keeps the offline sidecar on network none with RootlessKit networking disabled', async () => {
     const fixture = runtimeFixture();
     const options = startOptions(fixture);
@@ -493,12 +534,13 @@ describe('Docker Desktop sidecar lifecycle', () => {
       '/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
       '/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000',
     ]);
-    expect(config.mounts).toEqual([]);
+    expect(config.mounts).toEqual([WORKSPACE_MOUNT]);
     expect(fixture.expandedCreates).toHaveLength(1);
     expect(fixture.expandedCreates[0]?.mounts).toEqual([
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
+      WORKSPACE_MOUNT,
     ]);
     expect(config.env).toEqual({
       DOCKER_TLS_CERTDIR: '',
@@ -566,7 +608,7 @@ describe('Docker Desktop sidecar lifecycle', () => {
     expect(config).toMatchObject({
       network: 'ic-dw-egress-test',
       ipv4Address: '172.31.44.10',
-      mounts: [CA_MOUNT],
+      mounts: [WORKSPACE_MOUNT, CA_MOUNT],
       env: {
         DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'slirp4netns',
         HTTP_PROXY: REGISTRY_PROXY_URL,
@@ -587,6 +629,7 @@ describe('Docker Desktop sidecar lifecycle', () => {
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
+      WORKSPACE_MOUNT,
       CA_MOUNT,
     ]);
   });
@@ -621,6 +664,24 @@ describe('Docker Desktop sidecar lifecycle', () => {
     ]);
   });
 
+  it.each([
+    { label: 'substituted source', bind: '/host/other:/workspace' },
+    { label: 'substituted target', bind: `${WORKSPACE_ROOT}:/other` },
+    { label: 'read-only mode', bind: `${WORKSPACE_ROOT}:/workspace:ro` },
+  ])('rejects a $label for the shared workspace before sidecar start', async ({ bind }) => {
+    const fixture = runtimeFixture({ observedWorkspaceBind: bind });
+
+    await expect(startDockerDesktopSidecar(startOptions(fixture))).rejects.toThrow(
+      /effective profile mismatch: bind mounts/u,
+    );
+    expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
+    expect(fixture.events.slice(-3)).toEqual([
+      `container:stop:${SIDECAR_CONTAINER_ID}`,
+      `container:remove:${SIDECAR_CONTAINER_ID}`,
+      `volume:remove:${API_VOLUME_NAME}`,
+    ]);
+  });
+
   it('mounts the shared package build-trust contract over the default runtime path', async () => {
     const fixture = runtimeFixture();
     await startDockerDesktopSidecar({
@@ -629,7 +690,7 @@ describe('Docker Desktop sidecar lifecycle', () => {
     });
 
     const config = fixture.configs[0];
-    expect(config.mounts).toEqual([CA_MOUNT, ...BUILD_TRUST_MOUNTS]);
+    expect(config.mounts).toEqual([WORKSPACE_MOUNT, CA_MOUNT, ...BUILD_TRUST_MOUNTS]);
     expect(config.mounts).toContainEqual({
       source: '/host/ironcurtain/build-trust/runc',
       target: DOCKER_DESKTOP_RUNC_SHIM_PATH,
@@ -646,6 +707,7 @@ describe('Docker Desktop sidecar lifecycle', () => {
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
+      WORKSPACE_MOUNT,
       CA_MOUNT,
       ...BUILD_TRUST_MOUNTS,
     ]);
@@ -704,18 +766,86 @@ describe('Docker Desktop sidecar lifecycle', () => {
     ]);
   });
 
-  it('adjudicates the stopped effective profile before starting the sidecar', async () => {
-    const fixture = runtimeFixture({ wrongContainerProfile: true });
+  it.each([
+    { label: 'memory', hostConfig: { Memory: 1024 }, field: 'memory limit' },
+    { label: 'CPU', hostConfig: { NanoCpus: 1 }, field: 'CPU limit' },
+    { label: 'PID', hostConfig: { PidsLimit: 16 }, field: 'PID limit' },
+  ])('rejects $label limit drift before sidecar start', async ({ hostConfig, field }) => {
+    await expectStoppedProfileRejection(runtimeFixture({ observedHostConfig: hostConfig }), field);
+  });
 
-    await expect(startDockerDesktopSidecar(startOptions(fixture))).rejects.toThrow(
-      /effective profile mismatch: privileged mode/u,
+  it.each([
+    { label: 'default bridge', hostConfig: { NetworkMode: 'bridge' }, field: 'network mode' },
+    {
+      label: 'published port',
+      hostConfig: { PortBindings: { '2375/tcp': [{ HostIp: '127.0.0.1', HostPort: '2375' }] } },
+      field: 'published ports',
+    },
+    {
+      label: 'host Docker socket bind',
+      hostConfig: {
+        Binds: [`${WORKSPACE_ROOT}:/workspace`, '/var/run/docker.sock:/docker.sock'],
+      },
+      field: 'bind mounts',
+    },
+    { label: 'writable root filesystem', hostConfig: { ReadonlyRootfs: false }, field: 'read-only root filesystem' },
+    { label: 'missing capability drop', hostConfig: { CapDrop: [] }, field: 'dropped capabilities' },
+    {
+      label: 'extra capability',
+      hostConfig: { CapAdd: ['CAP_SETUID', 'CAP_SETGID', 'CAP_SYS_ADMIN'] },
+      field: 'added capabilities',
+    },
+    { label: 'security option', hostConfig: { SecurityOpt: ['no-new-privileges'] }, field: 'security options' },
+    {
+      label: 'offline host-gateway alias',
+      hostConfig: { ExtraHosts: ['host.docker.internal:host-gateway'] },
+      field: 'extra hosts',
+    },
+  ])('rejects $label isolation drift before sidecar start', async ({ hostConfig, field }) => {
+    await expectStoppedProfileRejection(runtimeFixture({ observedHostConfig: hostConfig }), field);
+  });
+
+  it('rejects an extra effective network attachment before sidecar start', async () => {
+    await expectStoppedProfileRejection(
+      runtimeFixture({
+        observedNetworks: {
+          none: { IPAMConfig: null },
+          bridge: { IPAMConfig: null },
+        },
+      }),
+      'attached networks',
     );
-    expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
-    expect(fixture.events.slice(-3)).toEqual([
-      `container:stop:${SIDECAR_CONTAINER_ID}`,
-      `container:remove:${SIDECAR_CONTAINER_ID}`,
-      `volume:remove:${API_VOLUME_NAME}`,
-    ]);
+  });
+
+  it.each([
+    { fieldName: 'PidMode', field: 'PID namespace mode' },
+    { fieldName: 'IpcMode', field: 'IPC namespace mode' },
+    { fieldName: 'UTSMode', field: 'UTS namespace mode' },
+    { fieldName: 'UsernsMode', field: 'user namespace mode' },
+    { fieldName: 'CgroupnsMode', field: 'cgroup namespace mode' },
+  ])('rejects host $fieldName before sidecar start', async ({ fieldName, field }) => {
+    await expectStoppedProfileRejection(runtimeFixture({ observedHostConfig: { [fieldName]: 'host' } }), field);
+  });
+
+  it('rejects an unknown effective namespace mode before sidecar start', async () => {
+    await expectStoppedProfileRejection(
+      runtimeFixture({ observedHostConfig: { PidMode: 'unexpected-mode' } }),
+      'PID namespace mode',
+    );
+  });
+
+  it.each([
+    { fieldName: 'PidMode', value: undefined, field: 'PID namespace mode' },
+    { fieldName: 'IpcMode', value: null, field: 'IPC namespace mode' },
+  ])('rejects missing $fieldName evidence before sidecar start', async ({ fieldName, value, field }) => {
+    await expectStoppedProfileRejection(runtimeFixture({ observedHostConfig: { [fieldName]: value } }), field);
+  });
+
+  it('adjudicates the stopped effective profile before starting the sidecar', async () => {
+    await expectStoppedProfileRejection(
+      runtimeFixture({ observedHostConfig: { Privileged: true } }),
+      'privileged mode',
+    );
   });
 
   it('does not record qualified bootstrap evidence and removes the exact objects when BuildKit fails', async () => {

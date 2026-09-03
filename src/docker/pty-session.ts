@@ -23,7 +23,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
 import { loadSessionMetadata, updateSessionMetadata } from '../session/session-metadata.js';
-import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
+import { buildContainerWorkspaceMount } from './container-workspace.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import { validateResumeSession } from '../pty/session-scanner.js';
@@ -44,7 +44,10 @@ import {
   buildUdsSocketMounts,
   buildNestedDockerAgentTrustedCreateOptions,
   activateNestedDockerWorkload,
+  buildDockerOwnershipLabels,
   createLedgeredAgentContainer,
+  createDockerSessionTransportNetwork,
+  createDockerSessionTransportProxy,
   dockerWorkloadSessionMetadata,
   removeBundleRuntimeRoot,
   resolveNestedDockerAgentWiring,
@@ -58,9 +61,7 @@ import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructu
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import { errorMessage } from '../utils/error-message.js';
 import {
-  createIronCurtainInternalNetwork,
   InternalNetworkConnectivityError,
-  managedResourceLabels,
   reconcileIronCurtainDockerResourcesBestEffort,
   releaseManagedResourceLease,
   withInternalNetworkAllocationRetry,
@@ -605,10 +606,11 @@ async function runPtySessionAttempt(
     const { quote } = await import('shell-quote');
     const baseInternalNetworkName = getInternalNetworkName(shortId);
     const internalNetworkName = attempt === 1 ? baseInternalNetworkName : `${baseInternalNetworkName}-a${attempt}`;
-    const managedLabels = infra.runtimeKind === 'docker' ? managedResourceLabels(bundleId) : undefined;
-    const resourceLabels = managedLabels
-      ? Object.fromEntries(Object.entries(managedLabels).filter(([key]) => key !== 'ironcurtain.bundle'))
-      : undefined;
+    const { labels: resourceLabels } = buildDockerOwnershipLabels({
+      runtimeKind: infra.runtimeKind,
+      bundleId,
+      dockerWorkload,
+    });
     let env: Record<string, string>;
     let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
@@ -663,7 +665,7 @@ async function runPtySessionAttempt(
       networkName = infra.hostOnlyNetwork.name;
 
       mounts = [
-        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+        buildContainerWorkspaceMount(sandboxDir),
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
     } else if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
@@ -683,8 +685,12 @@ async function runPtySessionAttempt(
       const aptProxyPath = resolve(orientationDir, 'apt-proxy.conf');
       writeFileSync(aptProxyPath, renderAptProxyConfig(proxyUrl));
 
-      const allocatedNetwork = await createIronCurtainInternalNetwork(docker, internalNetworkName, bundleId, {
-        excludedSubnets,
+      const allocatedNetwork = await createDockerSessionTransportNetwork({
+        runtime: docker,
+        dockerWorkload,
+        bundleId,
+        requestedName: internalNetworkName,
+        allocation: { excludedSubnets },
       });
       retryableNetworkSubnet = allocatedNetwork.subnet;
       network = internalNetworkName;
@@ -710,32 +716,38 @@ async function runPtySessionAttempt(
       // avoid conflicts when multiple PTY sessions run concurrently.
       const containerPtyPort = ptyPort ?? DEFAULT_PTY_PORT;
       hostPtyPort = await findFreePort();
-      sidecarContainerId = await docker.create({
-        image: socatImage,
-        name: sidecarName,
-        network: 'bridge',
-        mounts: [],
-        env: {},
-        entrypoint: '/bin/sh',
-        ...buildDockerDesktopTransportCreateLimits(infra.dockerDesktopResources),
-        // PTY sessions are standalone (no workflow/scope), so only the
-        // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
-        bundleLabel: bundleId,
-        labels: resourceLabels,
-        ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
-        command: [
-          '-c',
-          quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
-            ' & ' +
-            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
-            ' & ' +
-            quote([
-              'socat',
-              `TCP-LISTEN:${containerPtyPort},fork,reuseaddr`,
-              `TCP:${mainContainerName}:${containerPtyPort}`,
-            ]) +
-            ' & wait',
-        ],
+      sidecarContainerId = await createDockerSessionTransportProxy({
+        dockerWorkload,
+        requestedName: sidecarName,
+        baseLabels: resourceLabels,
+        create: (requestedName, labels) =>
+          infra.docker.create({
+            image: socatImage,
+            name: requestedName,
+            network: 'bridge',
+            mounts: [],
+            env: {},
+            entrypoint: '/bin/sh',
+            ...buildDockerDesktopTransportCreateLimits(infra.dockerDesktopResources),
+            // PTY sessions are standalone (no workflow/scope), so only the
+            // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
+            bundleLabel: bundleId,
+            labels,
+            ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
+            command: [
+              '-c',
+              quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
+                ' & ' +
+                quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
+                ' & ' +
+                quote([
+                  'socat',
+                  `TCP-LISTEN:${containerPtyPort},fork,reuseaddr`,
+                  `TCP:${mainContainerName}:${containerPtyPort}`,
+                ]) +
+                ' & wait',
+            ],
+          }),
       });
       await docker.start(sidecarContainerId);
       await docker.connectNetwork(internalNetworkName, sidecarContainerId);
@@ -743,7 +755,7 @@ async function runPtySessionAttempt(
       extraHosts = [`host.docker.internal:${sidecarIp}`];
 
       mounts = [
-        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+        buildContainerWorkspaceMount(sandboxDir),
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
         { source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
@@ -759,7 +771,7 @@ async function runPtySessionAttempt(
       network = null;
 
       mounts = [
-        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+        buildContainerWorkspaceMount(sandboxDir),
         ...buildUdsSocketMounts(infra.runtimeKind, socketsDir),
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];

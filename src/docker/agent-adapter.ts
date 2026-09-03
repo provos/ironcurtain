@@ -17,7 +17,7 @@ import type { AuthMethod } from './oauth-credentials.js';
  * directory is bind-mounted at this path. Used for path rewriting
  * between container and host in both directions.
  */
-export const CONTAINER_WORKSPACE_DIR = '/workspace';
+export { CONTAINER_WORKSPACE_DIR } from './container-workspace.js';
 
 /** Workflow package helper scripts are mounted read-only at this path. */
 export const CONTAINER_SCRIPTS_DIR = '/workflow-scripts';

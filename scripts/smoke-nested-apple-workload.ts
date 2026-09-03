@@ -1,18 +1,41 @@
 import { isIP } from 'node:net';
-import type { DockerWorkloadRequestedConfig } from '../src/docker-workload/config.js';
+import type { DockerWorkloadNetworkAccess, DockerWorkloadRequestedConfig } from '../src/docker-workload/config.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST } from '../src/docker-workload/apple-vm-daemon.js';
 import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK,
   APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
 } from '../src/docker-workload/apple-private-docker.js';
 
-export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry' | 'docker-desktop-packages';
+export const DOCKER_DESKTOP_SMOKE_CASES = [
+  { mode: 'docker-desktop-recovery', flag: '--docker-desktop-recovery', networkAccess: 'offline' },
+  { mode: 'docker-desktop-disabled', flag: '--docker-desktop-disabled', networkAccess: null },
+  { mode: 'docker-desktop-pty', flag: '--docker-desktop-pty', networkAccess: 'offline' },
+  { mode: 'docker-desktop-offline', flag: '--docker-desktop-offline', networkAccess: 'offline' },
+  { mode: 'docker-desktop-images', flag: '--docker-desktop-images', networkAccess: 'images' },
+  { mode: 'docker-desktop-packages', flag: '--docker-desktop-packages', networkAccess: 'packages' },
+] as const satisfies readonly {
+  readonly mode: string;
+  readonly flag: string;
+  readonly networkAccess: DockerWorkloadNetworkAccess | null;
+}[];
+
+export type DockerDesktopSmokeMode = (typeof DOCKER_DESKTOP_SMOKE_CASES)[number]['mode'];
+export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry' | DockerDesktopSmokeMode;
+
+/** Recovery leads; every later gate proves that a fresh admission still works. */
+export const DOCKER_DESKTOP_QUALIFICATION_ARGUMENTS = DOCKER_DESKTOP_SMOKE_CASES.map(({ flag }) => [flag] as const);
 
 /** Small Docker Official multi-architecture image with reviewed built-in applets. */
 export const PUBLIC_REGISTRY_SMOKE_IMAGE = 'busybox:1.37.0-glibc';
 
 /** Deliberately outside the frozen registry-origin manifest. */
 export const DENIED_REGISTRY_SMOKE_IMAGE = 'example.invalid/ironcurtain/denied:latest';
+
+/** Test-only archive staged in the ordinary workspace for the Desktop Offline gate. */
+export const DOCKER_DESKTOP_OFFLINE_ARCHIVE = 'images/ironcurtain-offline-fixture.tar';
+export const DOCKER_DESKTOP_OFFLINE_MARKER = 'ironcurtain-offline-load-run-ok';
+export const DOCKER_DESKTOP_WORKSPACE_INPUT = 'ironcurtain-workspace-input.txt';
+export const DOCKER_DESKTOP_WORKSPACE_OUTPUT = 'ironcurtain-workspace-output.txt';
 
 const NETWORK_ID_ARGUMENT = '__IRONCURTAIN_SMOKE_NETWORK_ID__';
 const SERVER_IPV4_ARGUMENT = '__IRONCURTAIN_SMOKE_SERVER_IPV4__';
@@ -59,11 +82,23 @@ export function parseNestedAppleSmokeMode(argv: readonly string[]): NestedAppleS
   if (argv.length === 0) return 'batch';
   if (argv.length === 1 && argv[0] === '--pty') return 'pty';
   if (argv.length === 1 && argv[0] === '--public-registry') return 'public-registry';
-  if (argv.length === 1 && argv[0] === '--docker-desktop-packages') return 'docker-desktop-packages';
+  const desktop = argv.length === 1 ? DOCKER_DESKTOP_SMOKE_CASES.find(({ flag }) => flag === argv[0]) : undefined;
+  if (desktop !== undefined) return desktop.mode;
   throw new Error(
-    'usage: smoke-nested-apple.ts [--pty | --public-registry | --docker-desktop-packages] ' +
+    'usage: smoke-nested-apple.ts [--pty | --public-registry | ' +
+      `${DOCKER_DESKTOP_SMOKE_CASES.map(({ flag }) => flag).join(' | ')}] ` +
       '(the modes are separate acceptance gates)',
   );
+}
+
+export function isDockerDesktopSmokeMode(mode: NestedAppleSmokeMode): boolean {
+  return DOCKER_DESKTOP_SMOKE_CASES.some((candidate) => candidate.mode === mode);
+}
+
+export function dockerDesktopSmokeNetworkAccess(
+  mode: NestedAppleSmokeMode,
+): 'offline' | 'images' | 'packages' | undefined {
+  return DOCKER_DESKTOP_SMOKE_CASES.find((candidate) => candidate.mode === mode)?.networkAccess ?? undefined;
 }
 
 export function buildNestedAppleSmokeWorkloadConfig(mode: NestedAppleSmokeMode): DockerWorkloadRequestedConfig {
@@ -71,7 +106,9 @@ export function buildNestedAppleSmokeWorkloadConfig(mode: NestedAppleSmokeMode):
   // smoke's registry gate maps to Images; deterministic batch/PTY gates are
   // explicitly Offline.
   if (mode === 'public-registry') return { enabled: true, networkAccess: 'images' };
-  if (mode === 'docker-desktop-packages') return { enabled: true, networkAccess: 'packages' };
+  if (mode === 'docker-desktop-disabled') return { enabled: false };
+  const desktopNetworkAccess = dockerDesktopSmokeNetworkAccess(mode);
+  if (desktopNetworkAccess !== undefined) return { enabled: true, networkAccess: desktopNetworkAccess };
   return { enabled: true, networkAccess: 'offline' };
 }
 

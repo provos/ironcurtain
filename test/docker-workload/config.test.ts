@@ -29,7 +29,7 @@ describe('secure nested Docker configuration', () => {
     expect(dockerWorkloadConfigHash(disabled)).toBe(dockerWorkloadConfigHash(resolveDockerWorkloadConfig(undefined)));
   });
 
-  it('materializes the admitted Apple developer policy when explicitly enabled', () => {
+  it('materializes the admitted macOS developer policy when explicitly enabled', () => {
     expect(resolveDockerWorkloadConfig({ enabled: true })).toEqual({
       enabled: true,
       networkAccess: 'images',

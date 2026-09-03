@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,7 +16,8 @@ import {
   performSerializedDockerWorkloadCleanup,
   tryHeartbeatDockerWorkloadLease,
 } from '../../src/docker-workload/cleanup-ownership.js';
-import { captureCleanupProof } from '../../src/docker-workload/bundle-cleanup.js';
+import { captureCleanupProof, removeExactBundleState } from '../../src/docker-workload/bundle-cleanup.js';
+import { getBundleRuntimeRootForHome } from '../../src/config/paths.js';
 import { createMockDocker } from '../helpers/docker-mocks.js';
 
 const temporaryDirectories: string[] = [];
@@ -26,6 +27,55 @@ afterEach(() => {
 });
 
 describe('Docker-workload lifecycle ownership', () => {
+  it('cleans the deterministic runtime root for a canonical historical lease without a recorded binding', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'docker-workload-cleanup-historical-root-'));
+    temporaryDirectories.push(directory);
+    const ironCurtainHome = join(directory, 'home');
+    const leaseId = 'lease-cleanup-historical-root-001';
+    const bundleId = 'bundle-cleanup-historical-root-001';
+    const leaseDirectory = join(ironCurtainHome, 'docker-workload', 'leases', leaseId);
+    const leasePath = join(leaseDirectory, 'lease.json');
+    const stateRoot = join(ironCurtainHome, 'docker-workload', 'state', leaseId);
+    const workspaceRoot = join(directory, 'workspace');
+    const bundleRuntimeRoot = getBundleRuntimeRootForHome(ironCurtainHome, bundleId);
+    const neighborRuntimeRoot = getBundleRuntimeRootForHome(ironCurtainHome, 'neighbor-cleanup-historical-root-001');
+    mkdirSync(leaseDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(workspaceRoot, { mode: 0o700 });
+    mkdirSync(bundleRuntimeRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(neighborRuntimeRoot, { recursive: true, mode: 0o700 });
+    createDockerWorkloadLease(leasePath, {
+      leaseId,
+      bundleId,
+      generation: 'generation-cleanup-historical-root-001',
+      runtimeKind: 'docker',
+      paths: {
+        workspaceRoot,
+        stateRoot,
+        runtimeRoot: join(stateRoot, 'runtime'),
+        apiRoot: join(stateRoot, 'api'),
+        exchangeRoot: join(stateRoot, 'exchange'),
+        stagingRoot: join(stateRoot, 'staging'),
+      },
+      bindings: {
+        catalogSha256: '2'.repeat(64),
+        innerDockerCatalogSha256: '7'.repeat(64),
+        profileSha256: '3'.repeat(64),
+        watchdogPolicySha256: '5'.repeat(64),
+        toolchainDigest: '6'.repeat(64),
+      },
+      cleanupInventoryGapMs: 100,
+    });
+
+    removeExactBundleState(loadDockerWorkloadLease(leasePath), leasePath);
+
+    expect(existsSync(stateRoot)).toBe(false);
+    expect(existsSync(bundleRuntimeRoot)).toBe(false);
+    expect(existsSync(workspaceRoot)).toBe(true);
+    expect(existsSync(neighborRuntimeRoot)).toBe(true);
+    expect(existsSync(leasePath)).toBe(true);
+  });
+
   it('returns an already-closed proof even when no cleanup budget remains', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'docker-workload-cleanup-closed-budget-'));
     temporaryDirectories.push(directory);

@@ -40,7 +40,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Defaults to ~/.ironcurtain, overridable via IRONCURTAIN_HOME env var.
  */
 export function getIronCurtainHome(): string {
-  return process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain');
+  return resolve(process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain'));
 }
 
 /**
@@ -700,8 +700,14 @@ export function getBundleControlSocketPath(bundleId: BundleId): string {
  * co-located without exposing host-only sockets to the container.
  */
 export function getBundleRuntimeRoot(bundleId: BundleId): string {
+  return getBundleRuntimeRootForHome(getIronCurtainHome(), bundleId);
+}
+
+/** Derive a bundle runtime root from an explicit, already-selected IronCurtain home. */
+export function getBundleRuntimeRootForHome(ironCurtainHome: string, bundleId: string): string {
+  if (resolve(ironCurtainHome) !== ironCurtainHome) throw new Error(`Invalid IronCurtain home: ${ironCurtainHome}`);
   assertPathSafeSlug('bundle ID', bundleId);
-  return resolve(getIronCurtainHome(), 'run', toBundleSlug(bundleId));
+  return resolve(ironCurtainHome, 'run', toBundleSlug(bundleId));
 }
 
 /**

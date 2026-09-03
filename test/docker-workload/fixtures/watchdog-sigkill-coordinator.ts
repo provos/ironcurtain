@@ -12,6 +12,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getBundleRuntimeRootForHome } from '../../../src/config/paths.js';
 import {
   activateDockerWorkloadLease,
   createDockerWorkloadLease,
@@ -29,6 +30,10 @@ interface SharedFixtureConfig {
   readonly generation: string;
   readonly containerId: string;
   readonly containerName: string;
+  readonly proxyContainerId: string;
+  readonly proxyContainerName: string;
+  readonly networkId: string;
+  readonly networkName: string;
   readonly labelKey: string;
   readonly labelValue: string;
   readonly template: WatchdogPolicyTemplate;
@@ -43,7 +48,9 @@ if (sharedConfigPath === undefined || entrypointPath === undefined || resultPath
 
 try {
   const config = JSON.parse(readFileSync(sharedConfigPath, 'utf8')) as SharedFixtureConfig;
-  const stateRoot = join(config.controlDir, 'state');
+  const ironCurtainHome = process.env.IRONCURTAIN_HOME;
+  if (ironCurtainHome === undefined) throw new Error('watchdog SIGKILL coordinator requires IRONCURTAIN_HOME');
+  const stateRoot = join(ironCurtainHome, 'docker-workload', 'state', config.leaseId);
   mkdirSync(join(stateRoot, 'daemon'), { recursive: true });
   const leasePath = join(config.controlDir, 'lease.json');
   const policyPath = join(config.controlDir, 'policy.json');
@@ -59,6 +66,7 @@ try {
     paths: {
       workspaceRoot: join(config.controlDir, 'workspace'),
       stateRoot,
+      bundleRuntimeRoot: getBundleRuntimeRootForHome(ironCurtainHome, config.bundleId),
       runtimeRoot: join(stateRoot, 'runtime'),
       apiRoot: join(stateRoot, 'api'),
       exchangeRoot: join(stateRoot, 'exchange'),
@@ -81,6 +89,22 @@ try {
     ownershipLabelKey: config.labelKey,
   });
   observeDockerWorkloadOuterResource(leasePath, config.generation, 'agent-container-001', config.containerId);
+  requestDockerWorkloadOuterResource(leasePath, config.generation, {
+    requestId: 'transport-proxy-001',
+    kind: 'container',
+    role: 'proxy',
+    requestedName: config.proxyContainerName,
+    ownershipLabelKey: config.labelKey,
+  });
+  observeDockerWorkloadOuterResource(leasePath, config.generation, 'transport-proxy-001', config.proxyContainerId);
+  requestDockerWorkloadOuterResource(leasePath, config.generation, {
+    requestId: 'transport-network-001',
+    kind: 'network',
+    role: 'transport-network',
+    requestedName: config.networkName,
+    ownershipLabelKey: config.labelKey,
+  });
+  observeDockerWorkloadOuterResource(leasePath, config.generation, 'transport-network-001', config.networkId);
   activateDockerWorkloadLease(leasePath, config.generation);
 
   const launched = await launchDetachedResourceWatchdogSupervisor({

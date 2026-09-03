@@ -119,14 +119,14 @@ export const dockerWorkloadRequestedSchema = z
       context.addIssue({
         code: 'custom',
         path: ['resources', 'pids', 'required'],
-        message: 'required nested-Docker PID enforcement is not supported by the current Apple developer slice',
+        message: 'required nested-Docker PID enforcement is not supported by the current macOS developer slice',
       });
     }
     if (request.resources?.diskMb !== undefined && request.resources.diskMb !== null) {
       context.addIssue({
         code: 'custom',
         path: ['resources', 'diskMb'],
-        message: 'numeric nested-Docker disk limits are not supported by the current Apple developer slice',
+        message: 'numeric nested-Docker disk limits are not supported by the current macOS developer slice',
       });
     }
   })
@@ -184,10 +184,10 @@ export function resolveDockerWorkloadConfig(
   return {
     enabled: true,
     networkAccess: validated.networkAccess ?? 'images',
-    // The currently admitted Apple developer slice uses an observed-only
-    // disk ceiling guarded by the host watchdog. Keep that implementation
-    // detail out of the ordinary opt-in: `{ enabled: true }` must resolve to
-    // a usable configuration without requiring hidden risk-policy fields.
+    // The currently admitted macOS developer slice uses an observed-only disk
+    // ceiling guarded by the host watchdog on both backends. Keep that
+    // implementation detail out of the ordinary opt-in: `{ enabled: true }`
+    // must resolve without requiring hidden risk-policy fields.
     acceptObservedDiskRisk: true,
     resources: {
       memoryMb: inheritedMemoryMb,

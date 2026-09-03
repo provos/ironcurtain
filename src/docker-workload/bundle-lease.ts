@@ -86,6 +86,7 @@ const leaseSchema = z
       .object({
         workspaceRoot: absolutePathSchema,
         stateRoot: absolutePathSchema,
+        bundleRuntimeRoot: absolutePathSchema.optional(),
         runtimeRoot: absolutePathSchema,
         apiRoot: absolutePathSchema,
         exchangeRoot: absolutePathSchema,
@@ -135,6 +136,7 @@ const leaseSchema = z
     }
     const hostOnlyPaths = [
       lease.paths.stateRoot,
+      lease.paths.bundleRuntimeRoot,
       lease.paths.runtimeRoot,
       lease.paths.apiRoot,
       lease.paths.exchangeRoot,
@@ -142,7 +144,9 @@ const leaseSchema = z
     ];
     if (
       hostOnlyPaths.some(
-        (path) => path === lease.paths.workspaceRoot || path.startsWith(`${lease.paths.workspaceRoot}/`),
+        (path) =>
+          path !== undefined &&
+          (path === lease.paths.workspaceRoot || path.startsWith(`${lease.paths.workspaceRoot}/`)),
       )
     ) {
       context.addIssue({ code: 'custom', message: 'host-only lease paths must not be inside the workspace' });

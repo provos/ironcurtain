@@ -1,8 +1,8 @@
 # Secure Nested Runtime Package Network
 
-**Status:** governing design for the next Apple nested-Docker product slice
-**Updated:** 2026-08-22
-**Applies to:** the currently admitted Apple Container developer-only nested-Docker runtime
+**Status:** implemented macOS developer capability; Docker Desktop developer release-qualified
+**Updated:** 2026-09-01
+**Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes
 **Related:**
 [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
 [`secure-nested-runtime-handoff.md`](./secure-nested-runtime-handoff.md)
@@ -13,7 +13,7 @@ IronCurtain will expose one meaningful nested-Docker **Network access** control 
 
 | Value      | Public image pulls                             | Package network                                              | Intended use                                      |
 | ---------- | ---------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
-| `offline`  | no                                             | no                                                           | Preloaded images and hermetic builds only         |
+| `offline`  | no                                             | no                                                           | Locally loaded images and hermetic builds only    |
 | `images`   | Docker Hub and GHCR through registry mediation | no                                                           | Public image pulls with offline Dockerfile `RUN`s |
 | `packages` | Docker Hub and GHCR through registry mediation | fixed public apt, npm, PyPI, and Cargo repositories via MITM | Ordinary project package installation             |
 
@@ -74,12 +74,13 @@ instance, and daemon data root are immutable for its lifetime.
    tunnels contact no upstream.
 3. The host remains the immediate-address, request-policy, accounting, and lifecycle authority. Guest
    daemon, wrapper, image, and client observations never grant network authority.
-4. Removing proxy configuration still leaves the bundle with no direct route because the outer Apple VM
-   and RootlessKit topology remain offline.
+4. Removing proxy configuration still leaves the bundle with no direct route: Apple keeps the outer VM
+   and RootlessKit topology offline, while Docker Desktop keeps the agent/daemon off the default bridge
+   and exposes only fixed relays on the isolated egress network.
 5. IronCurtain provisions no registry, package-manager, proxy, origin, or host credential to the bundle
-   or an upstream request. Only public CA material crosses into the VM and BuildKit executor. This is not
-   an exfiltration-prevention claim: bundle data can be encoded into admitted paths, bounded request
-   metadata, and timing.
+   or an upstream request. Only public CA material crosses into the backend bundle and BuildKit executor.
+   This is not an exfiltration-prevention claim: bundle data can be encoded into admitted paths, bounded
+   request metadata, and timing.
 6. Feature-off, `offline`, and `images` sessions provision no package listener, socket mount, relay,
    package build configuration, runc injection artifact, or package-network orientation.
 7. Connections, attempts, bytes, time, parser state, redirects, logs, and cleanup are bounded in batch,
@@ -107,8 +108,8 @@ This slice does not provide:
   exposed service. IronCurtain screens the immediate peer, not every public endpoint's downstream path;
 - automatic trust support for every TLS implementation or base image. Java keystores, rustls/webpki,
   application-private stores, and other non-system trust mechanisms remain unsupported;
-- Compose builds, remote/custom BuildKit workers, Docker Desktop, native Linux, preview, or stable-tier
-  support in this slice.
+- Compose builds, remote/custom BuildKit workers, native Linux, preview, or stable-tier support in this
+  slice.
 
 Package responses and image contents are untrusted bundle state. Package policy authorizes a network
 request; it does not admit the bytes returned by that request or any image layer containing them.
@@ -136,11 +137,15 @@ proxy's request policy or create direct egress.
 
 The security boundary remains the host-enforced envelope:
 
-- the disposable outer Apple VM has `network=none`;
-- RootlessKit remains `--net=none --disable-host-loopback`;
+- the disposable outer Apple VM has `network=none`, and RootlessKit remains
+  `--net=none --disable-host-loopback`;
+- the Docker Desktop agent/private daemon join only the exact isolated bundle egress network; only
+  independently pinned fixed relays receive the default-bridge host-gateway hop;
 - dockerd remains `--iptables=false --bridge=none`;
-- the Docker API remains VM-local and no Docker-selected host port is published;
-- only exact per-bundle host UDS listeners are mounted into the VM;
+- the Docker API remains VM-local on Apple or confined to the lease-owned Desktop API volume, and no
+  Docker-selected host port is published;
+- Apple exposes only exact per-bundle host UDS listeners; Docker Desktop host TCP listeners require the
+  exact relay source and per-bundle proxy authorization;
 - the host package proxy owns CONNECT, TLS termination, HTTP parsing, repository policy, DNS resolution,
   address classification, upstream TLS, redirect validation, ceilings, logs, and shutdown;
 - leases, watchdog, immutable outer IDs, state-root ownership, and exact teardown remain the resource
@@ -151,7 +156,9 @@ friendly build wiring, wrapper interception, and CA possession are not authoriza
 
 ### 5.3 Authority granted by each mode
 
-- `offline`: selected/preloaded image bytes and bundle-private sibling networking only.
+- `offline`: locally available image bytes and bundle-private sibling networking only. Apple loads the
+  selected current-agent transport image; Docker Desktop begins empty and accepts explicit
+  `docker image load --input /workspace/<archive>.tar` imports from the shared workspace.
 - `images`: `offline` plus the existing Docker Hub/GHCR image-registry capability on `18081`.
 - `packages`: `images` plus GET/HEAD access on `18082` to the fixed package grammars in §7, mediated by
   host TLS termination and request authorization.
@@ -170,7 +177,7 @@ Network access
   Public images only
     Docker Hub and GHCR pulls work; Dockerfile RUN networking is offline.
   Offline
-    Only preloaded images and hermetic builds work.
+    Only locally loaded images and hermetic builds work.
 ```
 
 Immediately adjacent to the selector, CLI and web MUST render this exact sentence:
@@ -648,7 +655,7 @@ bundle-wide authority.
 
 ### 11.1 Topology
 
-Image registry and package traffic are separate capabilities:
+Image registry and package traffic are separate capabilities. Apple uses same-VM loopback relays:
 
 ```text
 daemon FROM/image pull
@@ -673,6 +680,23 @@ relay remains `18081` under the same constraint. Outer-agent package qualificati
 the mounted `package-egress.sock` with AF_UNIX, including explicit CONNECT and TLS; it has no loopback TCP
 fallback or URL-proxy client path.
 
+Docker Desktop reuses the same host policy engines through a different fixed transport:
+
+```text
+agent/private daemon on the isolated bundle egress network
+  -> fixed registry or package relay address
+  -> independently pinned single-target relay
+     (isolated bundle network + default bridge host-gateway hop)
+  -> source-guarded host TCP listener with per-bundle Proxy-Authorization
+  -> the same registry or package policy engine
+  -> screened, destination-bound upstream
+```
+
+The agent and private daemon never join Docker's default bridge. Only the pinned relay joins it to reach
+the Docker Desktop host gateway. This gives the relay NAT/L2 adjacency on that bridge; the accepted
+residual risk and the reason a generic relay image/configuration is forbidden are recorded in the primary
+implementation plan.
+
 One checked-in Node process serves the selected fixed profile and binds every profile listener
 all-or-rollback. Its shared connection ceiling is 32. Package connections have a 4-GiB-per-direction,
 11-minute-idle, 11-minute-absolute transport envelope outside the stricter package ledger. Registry
@@ -683,9 +707,9 @@ the complete downstream response and TCP FIN flush and the TCP socket actually c
 
 ### 11.2 Startup order
 
-For `packages`, the exact order is:
+For Apple `packages`, the exact order is:
 
-1. resolve/migrate config and admit only the Apple developer variant before feature-attributable work;
+1. resolve/migrate config and admit the Apple developer variant before feature-attributable work;
 2. acquire the lease/watchdog authority and prepare the selected-current agent artifact;
 3. load the host CA with strict private-key checks, then stage hashed public trust, apt config, static runc
    wrapper, Docker build shim/config, and orientation under exact roots;
@@ -708,16 +732,25 @@ For `packages`, the exact order is:
     Docker shim/orientation;
 11. activate the lease, then release batch/workflow execution or attach PTY.
 
+Docker Desktop follows the same host-side authority order but replaces Apple mount/RootlessKit steps with
+the shared sidecar lifecycle: create source-guarded/authenticated TCP listeners, allocate the exact
+isolated egress network, start and adjudicate the independently pinned fixed relays, create the lease-owned
+API/data volume and constrained rootless-daemon sidecar, run its activation/build canaries, start the agent
+with only the read-only API volume, attach only the exact admitted egress network, prove the fixed policy
+paths, and then activate/release the agent. An online retry never reuses an already activated workload
+lease; preserving the original connectivity failure takes precedence over masking it with a second
+precommit failure.
+
 `images` retains the registry-only sequence and has no package listener, CA-injection wrapper, package
 relay, build shim config, or package prompt. `offline` constructs neither egress listener. Feature-off
 constructs no nested-Docker lease or artifacts.
 
 Every failure after listener construction stops all constructed listeners before exact outer-resource
-rollback. Normal teardown revokes package then registry listeners, destroys the exact outer VM, verifies
-immutable-ID absence and two separated empty inventories, removes daemon state/runtime roots, and closes
-the lease. Listener stop closes active sockets and settles ledger state. Outer removal kills RootlessKit,
-dockerd, containerd, BuildKit, wrapper processes, and relays. Cleanup and crash reconciliation are
-idempotent.
+rollback. Normal teardown revokes package then registry listeners, destroys the exact Apple VM or Docker
+Desktop agent/daemon/relay containers, removes owned Desktop volumes/networks, verifies immutable-ID
+absence and two separated empty inventories, removes daemon state/runtime roots, and closes the lease.
+Listener stop closes active sockets and settles ledger state. Outer removal kills RootlessKit, dockerd,
+containerd, BuildKit, wrapper processes, and relays. Cleanup and crash reconciliation are idempotent.
 
 Batch, workflow, and PTY share the same listener collection, mount builder, bootstrap mode, version
 qualification, canary, activation, and cleanup helpers.
@@ -733,10 +766,11 @@ nonclaims:
 - imported image/cache bytes are untrusted bundle state and are never admitted by package policy;
 - package audit is not a complete inventory of dependencies present in an output image.
 
-This is acceptable only because the currently admitted Apple daemon and data root are fresh and
+This is acceptable only because the admitted Apple and Docker Desktop daemons/data roots are fresh and
 disposable per bundle session, while mode, CA generation, and policy are immutable within that session.
-A new session after configuration or CA change has a new daemon data root and cannot reuse the old local
-BuildKit cache. The production workflow must prove that lifecycle fact.
+A new session after configuration or CA change has a new VM-local data root or lease-owned Desktop data
+volume and cannot reuse the old local BuildKit cache. Backend release workflows must prove that lifecycle
+fact independently.
 
 Persistent/cross-session BuildKit cache, live package-policy mutation, or a future claim that every build
 revalidates dependencies is a new stop-gate. It requires cache-generation authority above runc or
@@ -765,24 +799,24 @@ by this design.
 
 ## 13. Deterministic acceptance
 
-The release decision uses this matrix. A partial spike result cannot satisfy a row whose gate is still
-open.
+The developer implementation has landed. This matrix records current implementation evidence separately
+from the broader preview qualification matrix.
 
-| Area                 | Release requirement                                                           | Current evidence                                                                              | Gate |
-| -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---- |
-| Product authority    | no generic CONNECT; fixed package MITM is the only `18082` authority          | design decision only                                                                          | open |
-| Package policy       | positive npm/PyPI/apt/Cargo plus exact hostile negatives                      | npm and Debian apt positives only                                                             | open |
-| Address and ledger   | all denied destinations, attempts, limits, aborts, and shutdown are hermetic  | reusable primitives exist; not integrated                                                     | open |
-| Runc seam            | static pinned wrapper, hostile-spec tests, exact version qualification        | disposable Python PATH spike                                                                  | open |
-| Ordinary Dockerfiles | no source edit for supported package managers and local-default Buildx        | npm and apt with default Docker driver                                                        | open |
-| Secret provisioning  | no host credential/private key is provisioned; credential fields are rejected | exact public-only mount evidence and CA-SPKI residue negatives implemented; live gate pending | open |
-| Cache                | fresh per-session data root and explicit no-revalidation nonclaim             | architecture supports it; live proof pending                                                  | open |
-| Residue              | successful/failed exports and snapshots contain no automatic trust residue    | merged-filesystem/metadata check only                                                         | open |
-| Lifecycle            | batch/workflow/PTY failure rollback and exact reconciliation                  | separate final spike reconciliation                                                           | open |
-| Configuration        | complete three-enum migration and CLI/web parity                              | design decision only                                                                          | open |
+| Area                 | Release requirement                                                           | Current implementation evidence                                                                                             | Status                                                  |
+| -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Product authority    | no generic CONNECT; fixed package MITM is the only `18082` authority          | generic public path removed; dedicated listener and Apple/Desktop fixed relays are product-wired                            | landed                                                  |
+| Package policy       | positive npm/PyPI/apt/Cargo plus exact hostile negatives                      | hermetic client/negative suites and deterministic Apple packages workflow; Docker Desktop release suite plus live apt build | developer-qualified; broader live client matrix remains |
+| Address and ledger   | all denied destinations, attempts, limits, aborts, and shutdown are hermetic  | package address policy, request ledger, bounded transport, abort, and shutdown suites                                       | landed                                                  |
+| Runc seam            | static pinned wrapper, hostile-spec tests, exact version qualification        | checked-in Go wrapper/runtime, generated diagnostic contract, hostile-spec tests, and startup canary                        | landed                                                  |
+| Ordinary Dockerfiles | no source edit for supported package managers and local-default Buildx        | direct/default-Buildx shim forms cover npm, pip, apt, and Cargo; Compose builds remain explicitly unsupported               | landed                                                  |
+| Secret provisioning  | no host credential/private key is provisioned; credential fields are rejected | public-only mounts, credential rejection, archive/VFS CA-SPKI residue checks, and persisted mount evidence                  | landed                                                  |
+| Cache                | fresh per-session data root and explicit no-revalidation nonclaim             | cache-hit behavior is tested; exact bundle teardown removes the private data root/volume                                    | landed                                                  |
+| Residue              | successful/failed exports and snapshots contain no automatic trust residue    | deterministic image archive and VFS graphdriver scans run in the Apple packages workflow                                    | landed; Desktop preview rerun remains                   |
+| Lifecycle            | batch/workflow/PTY failure rollback and exact reconciliation                  | shared lifecycle/failure tests plus Docker Desktop coordinator-death, exact cleanup, child reaping, and readmission gates   | developer-qualified                                     |
+| Configuration        | complete three-enum migration and CLI/web parity                              | config normalization plus CLI/web settings and warning tests cover all three modes                                          | landed                                                  |
 
-Every row must close in retained deterministic or live evidence before `packages` becomes an admitted
-product mode.
+`packages` is admitted only as developer functionality. The no-skip Docker Desktop release suite passes;
+full G1-G10/0C reruns for each macOS backend and preview qualification remain open.
 
 ### 13.1 Strict package proxy
 
@@ -1010,35 +1044,28 @@ proves both relay health contracts and the four-mode listener matrix.
 
 ## 14. Staged implementation and retirement
 
-The authority transition is atomic and fail closed. First remove all construction, relay, shim,
-orientation, settings output, and admission paths for the superseded generic `public` listener. New
-package proxy, CA, wrapper, and shim modules may then be developed and packaged behind hermetic tests, but
-they MUST remain unreachable from CLI, web, config resolution, session creation, agent execution, and PTY.
-During this interval no compatibility value may map `public` or `packages` to the old listener; a build
-that encounters either requested authority before the final gate fails with an actionable unavailable-in-
-this-build error and performs no feature-attributable work. The final integration change alone makes
-`packages` selectable and maps legacy explicit `public` to it after every gate below closes. No releasable
-or test-admitted state may expose both authorities or silently weaken a requested package mode to generic
-egress.
+The authority transition landed atomically and fail closed. The superseded generic `public` listener was
+removed before `packages` became reachable. The current tree contains only the dedicated package proxy,
+CA, wrapper, shim, and lifecycle described here; compatibility `public` narrows to `packages` and cannot
+select the removed generic authority.
 
-1. **Design and removal gate:** approve this package-only authority, remove the generic product route
-   first, and remove generic-public claims from the plan, handoff, settings copy, orientation, and tests.
-2. **Unreachable proxy core:** implement a dedicated strict package listener with fixed grammars, MITM,
-   address policy, redirect policy, ledger, and hermetic adversarial tests without a production caller.
-3. **Unreachable wrapper core:** implement the static pinned runc wrapper, OCI patcher, public trust/apt
-   artifacts, and hostile filesystem/spec tests without daemon PATH or guest mounts.
-4. **Qualification stop-gate:** reproduce npm/apt, add pip/Cargo/buildx/base-image/client cases, run the
-   load-before-canary sequence, and complete layer/snapshot residue scans on the exact pinned toolchain.
-5. **Atomic product integration:** in one gated change, expose `packages`, apply the migration matrix and
-   shared CLI/web warning, construct package UDS/relay/CA/wrapper/shim lifecycle for shared batch/PTY, and
-   keep Compose/alternate selector rejection. There is no intermediate admitted product configuration.
-6. **Acceptance:** run focused tests, web tests, typecheck, lint, cycles, packaging inspection, Apple
-   qualification, deterministic workflow, and changed PTY gates before release.
+1. **Design and removal gate — complete:** generic product construction and claims were removed.
+2. **Proxy core — complete:** fixed grammars, MITM, address/redirect policy, ledger, and adversarial tests
+   are product-wired.
+3. **Wrapper core — complete:** the static pinned Go runc wrapper, OCI patcher, public trust/apt artifacts,
+   generated diagnostics, and hostile filesystem/spec tests are checked in.
+4. **Developer qualification gate — complete:** npm/apt/pip/Cargo, direct/default-Buildx forms,
+   load-before-canary, and image/VFS residue checks are implemented in the deterministic Apple workflow.
+5. **Atomic product integration — complete:** migration, CLI/web warning, shared batch/PTY lifecycle, and
+   Compose/alternate-selector rejection landed together.
+6. **Docker Desktop developer release qualification — complete:** the fixed suite plus real built-CLI
+   feature-off, crash-recovery, PTY/Claude-TUI, offline, images, and packages gates pass with zero skips.
+7. **Preview qualification — open:** full G1-G10/0C reruns for both macOS backends remain separate.
 
 Retire the generic `public-network-proxy` product path, ClientHello-only opaque CONNECT behavior, and
 `networkAccess: "public"` output. Reusable reviewed address-policy and ledger modules may remain under
 package-specific names/contracts. The Docker Hub/GHCR listener on `18081`, selected-current image
-transport, future Docker Desktop uplink work, scanner work, and the already removed
+transport, current Docker Desktop fixed-relay work, scanner work, and the already removed
 `ironcurtain-dockerfiles` catalog/source-pin stack remain separate.
 
 No stage may temporarily expose standard `MitmProxy`, wildcard passthrough, or generic CONNECT as the
@@ -1083,34 +1110,37 @@ package authority. No live success is recorded until exact reconciliation comple
 
 ## 16. Review checklist
 
-- [ ] Canonical modes are only `offline`, `images`, and `packages`; new config never writes `public`.
-- [ ] Fresh CLI/web enable writes `packages`; no-choice disabled display does not backfill; old
+These boxes record the landed developer implementation and current-tree coverage. They do not assert
+backend 0C/G1-G10 or preview qualification; those open release gates are recorded in §13 and §14.
+
+- [x] Canonical modes are only `offline`, `images`, and `packages`; new config never writes `public`.
+- [x] Fresh CLI/web enable writes `packages`; no-choice disabled display does not backfill; old
       public-registry maps to `images`, preloaded-only to `offline`, and superseded `public` narrows to
       `packages`.
-- [ ] The exact shared package warning is adjacent to both selectors, which are noninteractive while
+- [x] The exact shared package warning is adjacent to both selectors, which are noninteractive while
       disabled.
-- [ ] `offline` and `images` have no package listener, mount, relay, wrapper, canary, shim config, or
+- [x] `offline` and `images` have no package listener, mount, relay, wrapper, canary, shim config, or
       package orientation.
-- [ ] Registry images stay on `18081`; fixed package MITM stays on `18082` with a distinct charged health
+- [x] Registry images stay on `18081`; fixed package MITM stays on `18082` with a distinct charged health
       contract.
-- [ ] The package listener has no standard-mode, wildcard, dynamic host, provider, control, credential,
+- [x] The package listener has no standard-mode, wildcard, dynamic host, provider, control, credential,
       opaque tunnel, or fallback path.
-- [ ] CONNECT, SNI, inner Host, fixed hostname, and port 443 are exactly equal; apt HTTP is the only port
+- [x] CONNECT, SNI, inner Host, fixed hostname, and port 443 are exactly equal; apt HTTP is the only port
       80 route and re-originates fixed-host HTTPS.
-- [ ] Only GET/HEAD, body-free requests with no recognized credential field and with synthesized or
+- [x] Only GET/HEAD, body-free requests with no recognized credential field and with synthesized or
       canonicalized headers matching parsed fixed package grammars reach upstream; bounded path/metadata/
       timing exfiltration remains explicit.
-- [ ] Redirect and derived metadata authority remains within exact same-ecosystem host/path templates.
-- [ ] DNS/address screening and actual connection use the same answer; special/transition/current-host
+- [x] Redirect and derived metadata authority remains within exact same-ecosystem host/path templates.
+- [x] DNS/address screening and actual connection use the same answer; special/transition/current-host
       identities and inventory failure contact no upstream; public hairpin/relay remains an explicit
       nonclaim.
-- [ ] Attempts including health and failures, concurrency, bytes, time, parser state, logs, abort, and
+- [x] Attempts including health and failures, concurrency, bytes, time, parser state, logs, abort, and
       shutdown are bounded and counted exactly once; derived requests obey the exact 2-per-client,
       8-concurrent, and 24-combined-upstream limits.
-- [ ] Concurrent CA creation/load is lock-serialized under the trusted owner-only parent, uses no-follow
+- [x] Concurrent CA creation/load is lock-serialized under the trusted owner-only parent, uses no-follow
       leaf files plus one atomically published hash manifest, and fails closed for partial, mismatched,
       unsafe, or stale generations; the same-UID host race nonclaim remains explicit.
-- [ ] Host CA private key passes certificate/key-pair validation and never crosses into guest artifacts:
+- [x] Host CA private key passes certificate/key-pair validation and never crosses into guest artifacts:
       persisted outer-create evidence admits only the exact public package-build mount allowlist and no CA
       directory/key source, the public staging contract names only cert/bundle/apt inputs, and every
       build-added layer plus every regular VFS graphdriver snapshot file observed during the bounded
@@ -1120,28 +1150,30 @@ package authority. No live success is recorded until exact reconciliation comple
       prose, malformed bodies, other incomplete text, and oversized text are outside this identity check. A closed child
       directory can change later without changing an ancestor, so this qualification does not claim a
       quiescent snapshot; unrelated keys inherited from pinned public bases are permitted.
-- [ ] Static wrapper and exact real runc are read-only, hashed, version-pinned, path-confined, collision-
+- [x] Static wrapper and exact real runc are read-only, hashed, version-pinned, path-confined, collision-
       rejecting, atomic, and fail closed for unknown BuildKit launch shapes.
-- [ ] Checked no-network and host-network OCI summaries map to all parser-enforced structural fields;
+- [x] Checked no-network and host-network OCI summaries map to all parser-enforced structural fields;
       only host mode's missing pathless `network` namespace differs, and omitted seccomp/non-`/dev`
       details are preserved without a byte-frozen claim.
-- [ ] Trust mounts live below OCI `/dev` tmpfs; representative successful/failed/exported images and
+- [x] Trust mounts live below OCI `/dev` tmpfs; representative successful/failed/exported images and
       snapshots contain no automatic injected CA, env, config, CA-matching private key, or mount-stub
       residue, with exact dynamic public-authority markers screened globally. The privileged snapshot
       scan is deterministic qualification evidence, not a quiescent or TOCTOU-free security attestation.
-- [ ] Startup version qualification, relay health, and no-network BuildKit canary pass before agent
+- [x] Startup version qualification, relay health, and no-network BuildKit canary pass before agent
       release; the canary uses exact `--pull=false --network=none --no-cache`, an immutable already-loaded
       image reference, and leaves both egress ledgers unchanged; failure never restores generic network.
-- [ ] Cache hits are explicitly outside package revalidation/audit; daemon data root is fresh per session,
+- [x] Cache hits are explicitly outside package revalidation/audit; daemon data root is fresh per session,
       and persistent cache would require a new gate.
-- [ ] Docker shim affects only supported direct/default-Buildx builds, preserves `--network=none`, and
+- [x] Docker shim affects only supported direct/default-Buildx builds, preserves `--network=none`, and
       rejects Compose and every alternate selector it receives; direct plugin/custom clients are plainly
       unsupported and uninterposed.
-- [ ] Generic public construction/admission is removed before package modules exist; package modules stay
+- [x] Generic public construction/admission is removed before package modules exist; package modules stay
       unreachable until the final gate atomically exposes them, and no compatibility path maps to the old
       listener.
-- [ ] Batch, workflow, and PTY share exact creation, canary, activation, and cleanup helpers.
-- [ ] Functional spike and later reconciliation evidence are cited separately; no raw result is called a
+- [x] Batch, workflow, and PTY share exact creation, canary, activation, and cleanup helpers.
+- [x] Functional spike and later reconciliation evidence are cited separately; no raw result is called a
       clean green run.
-- [ ] Deterministic packages/images/offline workflow, hostile proxy/wrapper tests, layer/snapshot residue
-      scans, and exact cleanup all pass before product admission.
+- [x] The deterministic Apple packages/images/offline workflow, hostile proxy/wrapper tests,
+      layer/snapshot residue scans, and exact cleanup pass for developer admission. Docker Desktop's
+      no-skip suite and feature-off/crash/offline/images/packages product-entrypoint gates pass; broader
+      preview residue and multi-client reruns remain the separate §13/§14 work.

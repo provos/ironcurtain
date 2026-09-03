@@ -125,7 +125,7 @@ describe('Settings', () => {
       screen.getByText(/Generic destinations, recognized credential fields, request bodies, and uploads/),
     ).toBeTruthy();
     expect(screen.getByText(/Changes apply to new agent sessions/)).toBeTruthy();
-    expect(screen.getByText(/macOS on Apple silicon with Apple Container installed/)).toBeTruthy();
+    expect(screen.getByText(/macOS with Docker Desktop or, on Apple silicon, Apple Container installed/)).toBeTruthy();
     expect((screen.getByTestId('save-runtime-settings') as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByText(/backend/i)).toBeNull();
   });
@@ -165,6 +165,7 @@ describe('Settings', () => {
     await vi.waitFor(() => expect(screen.getByTestId('docker-workload-network-access')).toBeTruthy());
 
     await fireEvent.change(screen.getByTestId('docker-workload-network-access'), { target: { value: 'offline' } });
+    expect(screen.getByText('Only locally loaded images and hermetic builds work.')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('save-runtime-settings'));
 
     await vi.waitFor(() =>
