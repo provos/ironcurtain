@@ -7,10 +7,6 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope-comparison.json'
-      - 'docs/designs/evidence/ca-injection-runc-path-spike.argv.json'
       - '!LICENSE'
   pull_request:
     branches: [master]
@@ -18,10 +14,6 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json'
-      - 'docs/designs/evidence/ca-injection-buildkit-oci-envelope-comparison.json'
-      - 'docs/designs/evidence/ca-injection-runc-path-spike.argv.json'
       - '!LICENSE'
   # Manual trigger: the Node 22 job is otherwise master-push-only, so a PR can
   # never validate a Node-22-specific fix before merge. Run this workflow from
