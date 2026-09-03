@@ -508,7 +508,7 @@ run
 `<executor-root>` is exactly the qualified
 `/home/codespace/.local/share/docker/buildkit/executor`; the bundle path is one direct child, and both ID
 positions are byte-for-byte equal. The checked-in
-[`redacted argv fixture`](./evidence/ca-injection-runc-path-spike.argv.json) is the test oracle. Missing,
+[`redacted argv fixture`](../../docker/build-trust-runtime/testdata/ca-injection-runc-path-spike.argv.json) is the test oracle. Missing,
 duplicated, reordered, or additional arguments, a different log path, a non-direct-child bundle, or
 unequal IDs fail before spec mutation or real runc. Non-BuildKit runc commands pass to the exact real
 binary unchanged. Any other launch shape beneath the BuildKit executor root fails closed so version drift
@@ -572,8 +572,8 @@ The wrapper:
 2. opens the executor directory and `config.json` beneath that root with no-follow/beneath semantics,
    bounded component lengths, regular-file/type/owner/mode checks, inode revalidation, and a size cap;
 3. parses strict OCI JSON and requires the security-relevant structure mapped to the checked
-   [no-network](./evidence/ca-injection-buildkit-oci-envelope.fixture.json) and
-   [host-network](./evidence/ca-injection-buildkit-oci-envelope-host.fixture.json) summaries: exact
+   [no-network](../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope.fixture.json) and
+   [host-network](../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-host.fixture.json) summaries: exact
    top/process/root/Linux key sets, OCI 1.3.0, the qualified capability/path sets, exact `/dev` mounts,
    and one of two ordered pathless namespace lists—`pid,ipc,uts,mount,network,cgroup` for no-network or
    `pid,ipc,uts,mount,cgroup` for host-network;
@@ -604,7 +604,7 @@ literal environment values/RUN commands, and non-`/dev` mount detail. The wrappe
 where applicable, and otherwise preserves those fields; it does not claim them byte-frozen. Tests map
 every summarized field the parser enforces to both fixture hashes, exercise both accepted namespace
 shapes with a separate executable synthetic spec, and pin the checked
-[comparison](./evidence/ca-injection-buildkit-oci-envelope-comparison.json) showing that removal of the
+[comparison](../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-comparison.json) showing that removal of the
 `network` namespace is the only structural host-mode delta.
 
 ### 9.4 Startup qualification canary

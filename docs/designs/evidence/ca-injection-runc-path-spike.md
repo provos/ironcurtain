@@ -37,7 +37,7 @@ metadata check identical.
 
 The wrapper observed two BuildKit executor invocations. Only the executor identifiers are redacted; argv
 order and spelling are preserved. The companion machine-readable
-[`ca-injection-runc-path-spike.argv.json`](./ca-injection-runc-path-spike.argv.json) freezes the same
+[`ca-injection-runc-path-spike.argv.json`](../../../docker/build-trust-runtime/testdata/ca-injection-runc-path-spike.argv.json) freezes the same
 single-ID pattern for qualification tests:
 
 ```json

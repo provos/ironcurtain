@@ -29,9 +29,9 @@ against a same-UID writer after validation. This wrapper is a compatibility and 
 an egress boundary. The package proxy and outer VM network policy remain the security authority.
 
 The pinned stack's no-network and host-network structural summaries are preserved in
-[`../../docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json`](../../docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json)
+[`testdata/ca-injection-buildkit-oci-envelope.fixture.json`](testdata/ca-injection-buildkit-oci-envelope.fixture.json)
 and
-[`../../docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json`](../../docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json).
+[`testdata/ca-injection-buildkit-oci-envelope-host.fixture.json`](testdata/ca-injection-buildkit-oci-envelope-host.fixture.json).
 The only qualified namespace difference is that host mode omits `network`; every remaining namespace is
 ordered and pathless. Tests map each security-relevant summary field enforced by the parser to both
 checked fixtures and exercise both shapes with an executable synthetic OCI fixture.

@@ -394,11 +394,7 @@ func readEnvelopeEvidence(t *testing.T, name, expectedDigest string) envelopeEvi
 
 func readEvidenceBytes(t *testing.T, name string) []byte {
 	t.Helper()
-	repositoryRoot := os.Getenv("IRONCURTAIN_REPOSITORY_ROOT")
-	if repositoryRoot == "" {
-		repositoryRoot = filepath.Join("..", "..")
-	}
-	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "docs", "designs", "evidence", name))
+	contents, err := os.ReadFile(testPackagePath(filepath.Join("testdata", name)))
 	if err != nil {
 		t.Fatal(err)
 	}

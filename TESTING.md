@@ -18,7 +18,8 @@ npm run format:check  # Check formatting
 | **Sandbox integration** | `sandbox-integration.test.ts` | `bubblewrap` + `socat` installed (Linux only) | Auto-skipped if unavailable |
 | **Isolated VM** | `help-integration.test.ts`, `docker-code-mode.integration.test.ts` | `isolated-vm` native module works on current Node version | Auto-skipped if unavailable |
 | **LLM integration** | `auto-approver-integration.test.ts`, `escalation-scenarios.test.ts` (Suite B), `help-llm-integration.test.ts` | `LLM_INTEGRATION_TEST=true` + `ANTHROPIC_API_KEY` | No |
-| **Docker integration** | `network-isolation.integration.test.ts`, `docker-uds-mount.spike.test.ts` | `INTEGRATION_TEST=true` + Docker + `ironcurtain-base:latest` image | No |
+| **Docker integration** | `network-isolation.integration.test.ts` | Linux + `INTEGRATION_TEST=1` + Docker + `ironcurtain-base:latest` image | No |
+| **Live registry integration** | `test/docker/registry-egress-live.integration.test.ts` | Internet access + `REGISTRY_EGRESS_LIVE_INTEGRATION=1` | No |
 | **Auth** | `test/auth/oauth-flow.test.ts`, `test/auth/oauth-token-store.test.ts` | None | Yes |
 | **Docker subsystem** | `test/docker/registry-proxy.test.ts`, `test/docker/package-validator.test.ts` | None | Yes |
 | **Signal** | `test/signal/setup-signal.test.ts`, `test/signal/markdown-to-signal.test.ts` | None | Yes |
@@ -41,13 +42,21 @@ LLM_INTEGRATION_TEST=true npm test -- test/help-llm-integration.test.ts
 Gates tests that require Docker infrastructure (containers, network isolation, MITM proxies).
 
 ```bash
-INTEGRATION_TEST=true npm test -- test/network-isolation.integration.test.ts
+INTEGRATION_TEST=1 npm test -- test/network-isolation.integration.test.ts
 ```
 
-You can set both flags simultaneously to run everything:
+### `REGISTRY_EGRESS_LIVE_INTEGRATION`
+
+Runs the production registry-egress policy against anonymous Docker Hub and GHCR pulls:
 
 ```bash
-LLM_INTEGRATION_TEST=true INTEGRATION_TEST=true npm test
+npm run test:registry-live
+```
+
+You can set both general-suite flags simultaneously:
+
+```bash
+LLM_INTEGRATION_TEST=true INTEGRATION_TEST=1 npm test
 ```
 
 ## Running Specific Tests
@@ -82,7 +91,6 @@ npm test -- --watch test/policy-engine.test.ts
 
 - `*.test.ts` — standard tests (unit, component, integration with mocked dependencies)
 - `*.integration.test.ts` — tests requiring external infrastructure (Docker, real network)
-- `*.spike.test.ts` — exploratory/spike tests (e.g., `docker-uds-mount.spike.test.ts`)
 
 ### Test subdirectories
 

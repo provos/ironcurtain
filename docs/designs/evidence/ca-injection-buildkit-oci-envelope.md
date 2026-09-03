@@ -12,12 +12,12 @@ the build succeeded, and an exact canary from the built image succeeded. Exact l
 were separately verified after the capture.
 
 The machine-readable companion
-[`ca-injection-buildkit-oci-envelope.fixture.json`](./ca-injection-buildkit-oci-envelope.fixture.json)
-is the sanitized envelope consumed by the unreachable Go wrapper prototype tests. Its SHA-256 is
+[`ca-injection-buildkit-oci-envelope.fixture.json`](../../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope.fixture.json)
+is the sanitized envelope consumed by the maintained build-trust runtime tests. Its SHA-256 is
 `af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21`.
 
 The capture observed OCI version `1.3.0`, the exact embedded-BuildKit runc argv already preserved in
-[`ca-injection-runc-path-spike.argv.json`](./ca-injection-runc-path-spike.argv.json), an absolute
+[`ca-injection-runc-path-spike.argv.json`](../../../docker/build-trust-runtime/testdata/ca-injection-runc-path-spike.argv.json), an absolute
 direct-child bundle rootfs, the six listed namespaces with no namespace paths, and the four listed `/dev`
 mounts. Ownership and mode observations are included because the Apple-mounted pinned runc is owned by
 UID/GID 65534, while the bundle, config, and rootfs appear as UID/GID 0 in the RootlessKit child namespace.

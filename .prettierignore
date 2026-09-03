@@ -2,3 +2,8 @@ dist/
 node_modules/
 *.jsonl
 src/config/generated/
+# Byte-frozen compatibility fixtures whose exact digests are runtime contracts.
+docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-comparison.json
+docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-host.fixture.json
+docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope.fixture.json
+docker/build-trust-runtime/testdata/ca-injection-runc-path-spike.argv.json
