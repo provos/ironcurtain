@@ -625,7 +625,7 @@ Do not claim per-inner-operation authorization, durable attribution, or trustwor
 
 ## 9. Phase 0: macOS falsification and qualification
 
-Phase 0 was split so harness bugs, primitive feasibility, and product qualification could not be conflated. The timeboxed 0A fake-runtime harness and completed Apple exploratory executors have since been retired: production lifecycle tests supersede the former, and this document preserves the latter's durable evidence and adjudication. The Docker Desktop stop-gate probes remain as exact replay tools for a future, explicitly reviewed profile-ceiling restart. Run tracks independently; a stop in one does not stop the other. Phase 0C may produce only an implementation-qualified candidate, never a preview-ready backend; preview requires the Phase 2 product-entrypoint rerun.
+Phase 0 was split so harness bugs, primitive feasibility, and product qualification could not be conflated. The timeboxed 0A fake-runtime harness and completed Apple and Docker Desktop exploratory executors have since been retired: production lifecycle and release-gate tests supersede them, while this document and Git history preserve their durable findings. The exact Docker Desktop profile-ceiling contract and opt-in live registry check now live in maintained tests. Run tracks independently; a stop in one does not stop the other. Phase 0C may produce only an implementation-qualified candidate, never a preview-ready backend; preview requires the Phase 2 product-entrypoint rerun.
 
 ### 9.1 Phase 0A — implement and self-test the evidence harness
 
@@ -827,11 +827,11 @@ fetches it over that inspected IPv4 address, and a second hardened sibling fetch
 `target` alias. This separates fixture/listener, bridge/L2, and embedded-DNS failures while retaining
 the name-based sibling result as a required acceptance criterion; raw-IP success is not a fallback.
 
-The Apple 0B executors were retired after these findings were captured. They used the then-current
+The 0B executors were retired after these findings were captured. They used the then-current
 CA-baked images and could not qualify the current product entrypoint or topology. Future Apple gaps
 belong in the current-tree product release suite (`npm run qualify:apple`), not a restored
-exploratory runner. The retained-script ledger and Docker Desktop replay commands are in
-[`scripts/spikes/secure-nested-docker/README.md`](../../scripts/spikes/secure-nested-docker/README.md).
+exploratory runner. Docker Desktop gaps likewise belong in `npm run qualify:docker-desktop`; the
+profile-ceiling and live-registry contracts are maintained directly under `test/`.
 
 #### Track AC stop gates
 
@@ -973,7 +973,6 @@ npx vitest run test/docker-manager.test.ts
 INTEGRATION_TEST=1 npx vitest run test/docker-resource-lifecycle.integration.test.ts
 npx vitest run test/docker-resource-limits.integration.test.ts
 INTEGRATION_TEST=1 npx vitest run test/network-isolation.integration.test.ts
-INTEGRATION_TEST=1 npx vitest run test/docker-uds-mount.spike.test.ts
 npx vitest run test/uid-remap.integration.test.ts test/uid-remap.goose.integration.test.ts
 npx vitest run test/pty-entrypoint.integration.test.ts test/skills-end-to-end.integration.test.ts
 ```
@@ -1133,9 +1132,10 @@ Each requires its own threat model and gates.
   the Docker Desktop sidecar and available as a template for future Linux work. It clears inherited
   volumes/ports and pins the private UDS runtime, identity, and toolchain; it is not used by current Apple
   production admission.
-- [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/) — retained Docker
-  Desktop stop-gate replay tools and public-registry live gate. The obsolete build-egress capture tool and
-  instructions are deleted; Git history is the record.
+- `test/docker-workload/profile-ceiling.test.ts` — exact checked-in Docker Desktop profile-ceiling contract,
+  promoted from the historical verifier.
+- `test/docker/registry-egress-live.integration.test.ts` — opt-in compatibility check against anonymous
+  Docker Hub and GHCR pulls through the production egress guard; Git history retains the exploratory tools.
 - `scripts/qualify-backend.ts` and package release commands — current-tree backend suites with zero-skip enforcement and optional generated diagnostic reports; no frozen contract or commit binding.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
 - `config/docker-workload/build-egress-manifest.json` — deleted obsolete current-Dockerfile-only artifact;

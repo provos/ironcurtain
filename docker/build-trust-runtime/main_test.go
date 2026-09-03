@@ -385,11 +385,7 @@ func TestBoundedErrorRemovesNewlinesAndBoundsOutput(t *testing.T) {
 func readArgvFixture(t *testing.T) []string {
 	t.Helper()
 	const syntheticID = "aaaaaaaaaaaaaaaaaaaaaaaaa"
-	repositoryRoot := os.Getenv("IRONCURTAIN_REPOSITORY_ROOT")
-	if repositoryRoot == "" {
-		repositoryRoot = filepath.Join("..", "..")
-	}
-	contents, err := os.ReadFile(filepath.Join(repositoryRoot, "docs", "designs", "evidence", "ca-injection-runc-path-spike.argv.json"))
+	contents, err := os.ReadFile(testPackagePath("testdata/ca-injection-runc-path-spike.argv.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

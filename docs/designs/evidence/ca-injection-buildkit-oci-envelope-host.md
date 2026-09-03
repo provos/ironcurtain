@@ -11,10 +11,10 @@ wrapper, captured the executor bundle immediately before the absolute real-runc 
 build, and passed an exact built-image canary. Exact lease and Apple VM cleanup were verified.
 
 The sanitized machine-readable fixture is
-[`ca-injection-buildkit-oci-envelope-host.fixture.json`](./ca-injection-buildkit-oci-envelope-host.fixture.json),
+[`ca-injection-buildkit-oci-envelope-host.fixture.json`](../../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-host.fixture.json),
 SHA-256 `128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58`.
 The checked comparison against the no-network capture is
-[`ca-injection-buildkit-oci-envelope-comparison.json`](./ca-injection-buildkit-oci-envelope-comparison.json),
+[`ca-injection-buildkit-oci-envelope-comparison.json`](../../../docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-comparison.json),
 SHA-256 `36e5779065479b0aaecbbc7f859f8a9f5ae16a66665a4b8bcac318f4fbcbebf1`.
 
 ## Exact structural delta

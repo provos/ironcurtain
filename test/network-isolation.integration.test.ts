@@ -1,5 +1,5 @@
 /**
- * Integration test: --network=none + UDS MITM proxy isolation.
+ * Linux integration test: --network=none + UDS MITM proxy isolation.
  *
  * Requires Docker and the ironcurtain-base:latest image to be built.
  * Skipped unless INTEGRATION_TEST=1 is set (Docker/infrastructure integration).
@@ -11,6 +11,7 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createServer, type Server } from 'node:net';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadOrCreateCA } from '../src/docker/ca.js';
@@ -61,10 +62,20 @@ async function imageExists(image: string): Promise<boolean> {
   }
 }
 
-describe.skipIf(!process.env.INTEGRATION_TEST)('Network isolation (--network=none + UDS MITM proxy)', () => {
-  let tempDir: string;
-  let proxy: MitmProxy;
-  let containerId: string;
+function startEchoServer(socketPath: string): Promise<Server> {
+  const server = createServer((socket) => socket.end('PONG\n'));
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => resolve(server));
+  });
+}
+
+const skipLinuxDockerIntegration = process.env.INTEGRATION_TEST !== '1' || process.platform !== 'linux';
+
+describe.skipIf(skipLinuxDockerIntegration)('Network isolation (--network=none + UDS MITM proxy)', () => {
+  let tempDir = '';
+  let proxy: MitmProxy | undefined;
+  let containerId = '';
 
   beforeAll(async () => {
     if (!(await isDockerAvailable())) {
@@ -95,8 +106,8 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Network isolation (--network=non
     await proxy.start();
 
     // Create and start --network=none container.
-    // Mount the parent directory (not the socket file) so the UDS is accessible
-    // on both Linux and macOS Docker Desktop (VirtioFS can't share socket files).
+    // Mount the parent directory rather than the socket leaf so socket replacement
+    // and late creation remain visible to the Linux container.
     containerId = await docker(
       'create',
       '--name',
@@ -130,18 +141,33 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Network isolation (--network=non
   }, 60_000);
 
   afterAll(async () => {
-    try {
-      await docker('rm', '-f', containerId);
-    } catch {
-      /* ignore */
+    if (containerId) {
+      try {
+        await docker('rm', '-f', containerId);
+      } catch {
+        /* ignore */
+      }
     }
-    await proxy.stop();
+    if (proxy !== undefined) await proxy.stop();
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('container uses NetworkMode=none', async () => {
     const mode = await docker('inspect', '-f', '{{.HostConfig.NetworkMode}}', containerId);
     expect(mode).toBe('none');
+  });
+
+  it('sees a host UDS created after its parent directory was mounted', async () => {
+    const server = await startEchoServer(join(tempDir, 'late.sock'));
+    try {
+      const result = await dockerExec(containerId, 'socat', '-T2', 'STDOUT', 'UNIX-CONNECT:/run/ironcurtain/late.sock');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('PONG');
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    }
   });
 
   it('allows CONNECT tunnel to api.anthropic.com', async () => {

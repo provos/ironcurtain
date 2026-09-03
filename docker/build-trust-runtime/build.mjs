@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parseGoFailureDiagnosticCodes, requireExactFailureDiagnosticCodes } from './diagnostic-codes.mjs';
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
+const testdataRoot = join(packageRoot, 'testdata');
 const outputPath = join(packageRoot, 'bin', 'linux-arm64', 'ironcurtain-build-trust-runc');
 const manifestPath = join(packageRoot, 'manifest.json');
 const runtimeContractPath = join(packageRoot, '..', '..', 'src', 'docker', 'build-trust-runtime-contract.ts');
@@ -34,7 +35,7 @@ const liveSmokeProbePath = join(
   'nested_docker_probe.py',
 );
 const mainGoPath = join(packageRoot, 'main.go');
-const contractFixturePath = join(packageRoot, 'testdata', 'synthetic-build-trust-contract.json');
+const contractFixturePath = join(testdataRoot, 'synthetic-build-trust-contract.json');
 const clientToolchainManifestPath = join(
   packageRoot,
   '..',
@@ -43,7 +44,6 @@ const clientToolchainManifestPath = join(
   'docker-workload',
   'client-toolchain.arm64.json',
 );
-const evidenceRoot = join(packageRoot, '..', '..', 'docs', 'designs', 'evidence');
 const envelopeEvidence = [
   {
     networkMode: 'none',
@@ -197,12 +197,12 @@ try {
           structuralSummariesOnly: true,
           entries: envelopeEvidence.map(({ networkMode, path }) => ({
             networkMode,
-            packagePath: `docs/designs/evidence/${path}`,
-            sha256: sha256(readFileSync(join(evidenceRoot, path))),
+            packagePath: `docker/build-trust-runtime/testdata/${path}`,
+            sha256: sha256(readFileSync(join(testdataRoot, path))),
           })),
           comparison: {
-            packagePath: `docs/designs/evidence/${envelopeComparisonPath}`,
-            sha256: sha256(readFileSync(join(evidenceRoot, envelopeComparisonPath))),
+            packagePath: `docker/build-trust-runtime/testdata/${envelopeComparisonPath}`,
+            sha256: sha256(readFileSync(join(testdataRoot, envelopeComparisonPath))),
           },
         },
       },

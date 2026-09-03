@@ -28,8 +28,8 @@
     "spec.go",
     "spec_test.go"
   ],
-  "sourceSha256": "c7416ba2b0eba82e5da82c2655724cc4715068a0009777cbcfc9f83e82ace8cd",
-  "builderSha256": "fbd45dcedd40e432d07cb0dd3000c0ce12d41066ba49ba37b51a43b5c4e42bb3",
+  "sourceSha256": "46617036a7c833aacde1652a704107fd21bd6b0fa1cb34622318b6a836c564b1",
+  "builderSha256": "e9ac567c265f91d4293a597cf0a5f9e758e0edb5ced0c4d92303e4e123db384c",
   "binary": {
     "path": "bin/linux-arm64/ironcurtain-build-trust-runc",
     "sha256": "34be777c92032e4bb63f7c467e396e0b9c35d4bf981f3b54a434d09b608c370d",
@@ -51,17 +51,17 @@
         "entries": [
           {
             "networkMode": "none",
-            "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json",
+            "packagePath": "docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope.fixture.json",
             "sha256": "af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21"
           },
           {
             "networkMode": "host",
-            "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json",
+            "packagePath": "docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-host.fixture.json",
             "sha256": "128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58"
           }
         ],
         "comparison": {
-          "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope-comparison.json",
+          "packagePath": "docker/build-trust-runtime/testdata/ca-injection-buildkit-oci-envelope-comparison.json",
           "sha256": "36e5779065479b0aaecbbc7f859f8a9f5ae16a66665a4b8bcac318f4fbcbebf1"
         }
       }
