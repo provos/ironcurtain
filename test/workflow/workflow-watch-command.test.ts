@@ -467,27 +467,34 @@ describe('workflow watch', () => {
         resolve(runDir, 'messages.jsonl'),
         `${record('state_transition', '2026-08-21T12:00:00.000Z', { from: 'work', event: 'done' })}\n`,
       );
-      setTimeout(() => {
-        writeFileSync(
-          resolve(runDir, 'checkpoint.json'),
-          JSON.stringify({
-            timestamp: '2026-08-21T12:00:01.000Z',
-            machineState: 'work',
-            finalStatus: { phase },
-          }),
-        );
-      }, 5);
+      const checkpointWritten = new Promise<void>((resolveWrite, rejectWrite) => {
+        setTimeout(() => {
+          try {
+            writeFileSync(
+              resolve(runDir, 'checkpoint.json'),
+              JSON.stringify({
+                timestamp: '2026-08-21T12:00:01.000Z',
+                machineState: 'work',
+                finalStatus: { phase },
+              }),
+            );
+            resolveWrite();
+          } catch (error) {
+            rejectWrite(error instanceof Error ? error : new Error(String(error)));
+          }
+        }, 10);
+      });
 
-      expect(
-        await runWorkflowWatch([runDir], {
-          installProcessSignals: false,
-          pollIntervalMs: 1,
-          quiescenceMs: 15,
-          drainTimeoutMs: 100,
-          writeStdout: vi.fn(),
-          writeStderr: vi.fn(),
-        }),
-      ).toBe(3);
+      const exitCode = await runWorkflowWatch([runDir], {
+        installProcessSignals: false,
+        pollIntervalMs: 1,
+        quiescenceMs: 100,
+        drainTimeoutMs: 1_000,
+        writeStdout: vi.fn(),
+        writeStderr: vi.fn(),
+      });
+      await checkpointWritten;
+      expect(exitCode).toBe(3);
     },
   );
 
