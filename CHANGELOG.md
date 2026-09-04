@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- **Developer-only nested Docker on macOS** — opt-in Docker Agent sessions can now use a private,
+  ephemeral Docker daemon on Apple Container or Docker Desktop without exposing the host Docker socket
+  or publishing nested ports to the Mac. The `offline`, `images`, and `packages` modes respectively
+  support explicit workspace image imports, mediated anonymous Docker Hub/GHCR pulls, and bounded
+  apt/npm/PyPI/Cargo downloads through the host policy engines. Both backends share admission, package
+  policy, activation, watchdog, and exact cleanup while retaining their runtime-specific UDS or fixed-relay
+  transports. This remains macOS developer functionality; Linux, persistent caches, private registries,
+  host port publication, Compose builds, and IronCurtain-in-IronCurtain are separate work (#406, #436,
+  #443, #454, #456).
 - **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
 
 ### Fixes

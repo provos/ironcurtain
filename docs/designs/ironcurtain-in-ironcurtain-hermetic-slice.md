@@ -1,7 +1,7 @@
 # Hermetic IronCurtain-in-IronCurtain Slice
 
 **Status:** proposed implementation slice
-**Updated:** 2026-09-01
+**Updated:** 2026-09-03
 **Applies to:** the supported macOS nested-Docker developer backends, with a topology contract reusable by
 future native Linux Docker
 **Related:**
@@ -16,12 +16,13 @@ Docker-enabled IronCurtain agent. The inner coordinator must create one normal b
 private daemon, carry one synthetic provider exchange through inner and outer MITMs, write through the
 exact `/workspace` bind, and clean up without a public dependency or paid provider call.
 
-This slice adds only three product mechanisms:
+Docker Desktop workspace equivalence has since landed independently. This slice adds only two product
+mechanisms:
 
 1. a read-only, bundle-visible parent-bootstrap contract that points inner IronCurtain at the exact outer
    MITM and maps inner provider credentials to outer fake sentinels;
-2. backend-neutral shared-path wiring for `/workspace` and `/run/ironcurtain-nested`; and
-3. Docker Desktop's missing exact workspace bind plus a separate lease-owned exchange volume.
+2. backend-neutral exchange-path wiring for `/run/ironcurtain-nested`, including a separate lease-owned
+   Docker Desktop volume.
 
 The fixed-parent HTTP transport already exists. This slice selects it from trusted bootstrap state; it
 does not add a generic user-configurable parent proxy. The hermetic fixture uses a small test-only image
@@ -65,14 +66,13 @@ The current tree already has:
 - a hermetic unit test for two-MITM sentinel substitution and parent-loss failure;
 - a private Docker API and managed inner network on Apple Container and Docker Desktop;
 - shared admission, outer-resource ledgering, watchdog, activation, and cleanup;
-- an exact `/workspace` mount in the outer agent; and
+- exact `/workspace` path equivalence between the outer agent and Docker Desktop daemon sidecar; and
 - an API named volume mounted read-write into the Docker Desktop daemon and read-only into the agent.
 
 It does not yet have:
 
 - product construction that selects the parent transport for an inner coordinator;
 - a bounded bootstrap representation of the outer endpoint, CA, auth kind, and fake sentinels;
-- Docker Desktop `/workspace` path equivalence between agent and daemon;
 - a writable exchange path visible at the same location in the Docker Desktop agent and daemon; or
 - a hermetic inner agent image in Docker Desktop's intentionally empty private image store.
 
@@ -81,15 +81,11 @@ Docker Desktop product path.
 
 ### Independent Docker Desktop value
 
-The `/workspace` sidecar mount is not exclusively self-hosting support. Today a Docker Desktop agent can
-stream a build context through the Docker API, but a nested command such as
-`docker run -v /workspace:/src ...` resolves `/workspace` in the daemon sidecar's mount namespace, where
-the outer workspace is absent. That breaks an ordinary Docker development pattern even when no inner
-IronCurtain process exists.
-
-If self-hosting is deferred, extract and land the exact Docker Desktop workspace-equivalence change with
-its stopped-create and cleanup tests. The exchange volume and parent-bootstrap contract may remain in the
-self-hosting slice unless another supported workload needs late-created agent/daemon-shared UDS files.
+The `/workspace` sidecar mount was extracted and landed independently because it supports ordinary nested
+commands such as `docker run -v /workspace:/src ...`, not only self-hosting. Stopped-create adjudication,
+shared batch/PTY wiring, and cleanup tests now protect that behavior. The exchange volume and
+parent-bootstrap contract remain in this self-hosting slice unless another supported workload needs
+late-created agent/daemon-shared UDS files.
 
 ## Architecture
 
@@ -227,8 +223,8 @@ VM.
 
 Extend the existing sidecar lifecycle rather than adding a parallel path:
 
-1. pass the already-canonical workspace source into sidecar construction and mount it read-write at
-   `/workspace` in both agent and daemon;
+1. reuse the already-canonical workspace source mounted read-write at `/workspace` in both agent and
+   daemon;
 2. ledger and create one generation-scoped `exchange` named volume;
 3. mount it read-write at `/run/ironcurtain-nested` in both agent and daemon;
 4. seed the target directory as UID/GID 1000, mode `0700`, in the fixed daemon image so named-volume
@@ -334,8 +330,8 @@ Keep the production delta narrow and reuse current ownership:
   passthrough and registry/package callers fail closed.
 - `src/docker/docker-infrastructure.ts` — stage the bootstrap once, select inner transport/credential input,
   and pass the common workspace/exchange contract to backend wiring.
-- `src/docker-workload/docker-desktop-sidecar.ts` — create/adjudicate the exchange volume and mount the exact
-  workspace/exchange paths.
+- `src/docker-workload/docker-desktop-sidecar.ts` — retain the exact workspace mount and add/adjudicate the
+  exchange volume and path.
 - `src/docker-workload/infrastructure.ts`, lease evidence, and revocation helpers — add the exchange volume
   as another ordinary ledgered outer resource; do not invent a second ledger.
 - `docker/nested-daemon/Dockerfile` and Apple base-image setup — create the fixed exchange target with exact
@@ -350,8 +346,8 @@ The existing nested-agent wiring and ledgered-create callbacks remain the shared
 ## Delivery sequence
 
 1. Add the strict bootstrap type and hermetic unit tests without a product caller.
-2. Add common workspace/exchange path types and Docker Desktop volume/mount lifecycle with stopped-create,
-   rollback, cleanup, and feature-off tests.
+2. Add the common exchange-path type and Docker Desktop exchange-volume lifecycle with stopped-create,
+   rollback, cleanup, and feature-off tests; reuse the landed workspace path.
 3. Select fixed-parent provider transport and nested sentinel credentials from the bootstrap; retain
    direct host transport elsewhere.
 4. Build the static fixture and inner driver, then pass the complete gate on Apple Container.

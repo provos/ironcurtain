@@ -69,7 +69,7 @@
     "check:build-trust-runtime": "cd docker/build-trust-runtime && go test ./... && node --test diagnostic-codes.test.mjs && node build.mjs --check",
     "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
     "test:registry-live": "REGISTRY_EGRESS_LIVE_INTEGRATION=1 npx vitest run test/docker/registry-egress-live.integration.test.ts",
-    "qualify:apple": "tsx scripts/qualify-backend.ts --backend apple",
+    "qualify:apple": "npm run build && tsx scripts/qualify-backend.ts --backend apple",
     "qualify:docker-desktop": "npm run build && tsx scripts/qualify-backend.ts --backend docker-desktop",
     "smoke:nested:apple": "npm run build && tsx scripts/smoke-nested-apple.ts",
     "smoke:nested:apple:pty": "npm run build && tsx scripts/smoke-nested-apple.ts --pty",
