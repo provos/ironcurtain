@@ -4,12 +4,17 @@ import { DOCKER_DESKTOP_QUALIFICATION_ARGUMENTS } from './smoke-nested-apple-wor
 
 export type QualificationBackend = 'apple' | 'docker-desktop';
 
+export interface QualificationLiveGate {
+  readonly script: 'smoke-nested-apple.ts' | 'smoke-nested-apple-workflow.ts';
+  readonly arguments: readonly string[];
+}
+
 export interface BackendQualificationPlan {
   readonly backend: QualificationBackend;
   readonly label: string;
   readonly suiteId: string;
   readonly testFiles: readonly string[];
-  readonly liveSmokeArguments: readonly (readonly string[])[];
+  readonly liveGates: readonly QualificationLiveGate[];
 }
 
 const APPLE_TEST_FILES = [
@@ -37,6 +42,18 @@ const DOCKER_DESKTOP_TEST_FILES = [
   'test/docker/resource-watchdog-supervisor.test.ts',
 ] as const;
 
+const APPLE_LIVE_GATES = [
+  { script: 'smoke-nested-apple-workflow.ts', arguments: ['--packages'] },
+  { script: 'smoke-nested-apple-workflow.ts', arguments: ['--images'] },
+  { script: 'smoke-nested-apple-workflow.ts', arguments: ['--offline'] },
+  { script: 'smoke-nested-apple.ts', arguments: ['--pty'] },
+] as const satisfies readonly QualificationLiveGate[];
+
+const DOCKER_DESKTOP_LIVE_GATES = DOCKER_DESKTOP_QUALIFICATION_ARGUMENTS.map((arguments_) => ({
+  script: 'smoke-nested-apple.ts' as const,
+  arguments: arguments_,
+}));
+
 export function getBackendQualificationPlan(backend: string | undefined): BackendQualificationPlan {
   switch (backend) {
     case 'apple':
@@ -45,7 +62,7 @@ export function getBackendQualificationPlan(backend: string | undefined): Backen
         label: 'Apple',
         suiteId: 'apple',
         testFiles: APPLE_TEST_FILES,
-        liveSmokeArguments: [],
+        liveGates: APPLE_LIVE_GATES,
       };
     case 'docker-desktop':
       return {
@@ -53,7 +70,7 @@ export function getBackendQualificationPlan(backend: string | undefined): Backen
         label: 'Docker Desktop',
         suiteId: 'docker-desktop',
         testFiles: DOCKER_DESKTOP_TEST_FILES,
-        liveSmokeArguments: DOCKER_DESKTOP_QUALIFICATION_ARGUMENTS,
+        liveGates: DOCKER_DESKTOP_LIVE_GATES,
       };
     default:
       throw new Error('backend must be apple or docker-desktop');

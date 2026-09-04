@@ -1652,7 +1652,7 @@ import runpy, subprocess, sys
 module = runpy.run_path(sys.argv[1], run_name="probe_test")
 preflight = module["Probe"]._validate_privileged_snapshot_scan_preflight
 globals = preflight.__globals__
-hostname = "ic-dw-agent-0123456789abcdef"
+hostname = "ironcurtain-0123456789ab"
 getent = ("/usr/bin/getent", "ahosts", hostname)
 sudo = (
     "/usr/bin/sudo", "-n", "--", "/usr/bin/env", "-i",
@@ -1687,11 +1687,11 @@ preflight()
 assert [call[0] for call in calls] == [getent, sudo]
 
 for unsafe_hostname in (
-    "ic-dw-agent-0123456789abcde",
-    "ic-dw-agent-0123456789abcdef0",
-    "ic-dw-agent-0123456789abcdeF",
-    "ic-dw-agent-0123456789abcde\n",
-    "ironcurtain-0123456789abcdef",
+    "ironcurtain-0123456789a",
+    "ironcurtain-0123456789abc",
+    "ironcurtain-0123456789aB",
+    "ironcurtain-0123456789a\n",
+    "ic-dw-agent-0123456789abcdef",
 ):
     calls = install(unsafe_hostname)
     try:

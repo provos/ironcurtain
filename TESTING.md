@@ -10,20 +10,21 @@ npm run format:check  # Check formatting
 
 ## Test Categories
 
-| Category | Example files | Requirements | Runs by default |
-|----------|--------------|--------------|-----------------|
-| **Unit** | `policy-engine.test.ts`, `argument-roles.test.ts`, `domain-utils.test.ts` | None | Yes |
-| **Component (mocked LLM)** | `auto-approver.test.ts`, `constitution-compiler.test.ts`, `constitution-generator.test.ts` | None (uses `MockLanguageModelV3`) | Yes |
-| **Integration (MCP servers)** | `integration.test.ts`, `mcp-proxy-server.test.ts`, `proxy-integration.test.ts` | Real MCP server processes spawn; ~30s timeout | Yes |
-| **Sandbox integration** | `sandbox-integration.test.ts` | `bubblewrap` + `socat` installed (Linux only) | Auto-skipped if unavailable |
-| **Isolated VM** | `help-integration.test.ts`, `docker-code-mode.integration.test.ts` | `isolated-vm` native module works on current Node version | Auto-skipped if unavailable |
-| **LLM integration** | `auto-approver-integration.test.ts`, `escalation-scenarios.test.ts` (Suite B), `help-llm-integration.test.ts` | `LLM_INTEGRATION_TEST=true` + `ANTHROPIC_API_KEY` | No |
-| **Docker integration** | `network-isolation.integration.test.ts` | Linux + `INTEGRATION_TEST=1` + Docker + `ironcurtain-base:latest` image | No |
-| **Live registry integration** | `test/docker/registry-egress-live.integration.test.ts` | Internet access + `REGISTRY_EGRESS_LIVE_INTEGRATION=1` | No |
-| **Auth** | `test/auth/oauth-flow.test.ts`, `test/auth/oauth-token-store.test.ts` | None | Yes |
-| **Docker subsystem** | `test/docker/registry-proxy.test.ts`, `test/docker/package-validator.test.ts` | None | Yes |
-| **Signal** | `test/signal/setup-signal.test.ts`, `test/signal/markdown-to-signal.test.ts` | None | Yes |
-| **PTY (platform-specific)** | `pty-session.test.ts` (some cases) | Linux + `socat` | Auto-skipped on non-Linux |
+| Category                              | Example files                                                                                                 | Requirements                                                                 | Runs by default             |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------- |
+| **Unit**                              | `policy-engine.test.ts`, `argument-roles.test.ts`, `domain-utils.test.ts`                                     | None                                                                         | Yes                         |
+| **Component (mocked LLM)**            | `auto-approver.test.ts`, `constitution-compiler.test.ts`, `constitution-generator.test.ts`                    | None (uses `MockLanguageModelV3`)                                            | Yes                         |
+| **Integration (MCP servers)**         | `integration.test.ts`, `mcp-proxy-server.test.ts`, `proxy-integration.test.ts`                                | Real MCP server processes spawn; ~30s timeout                                | Yes                         |
+| **Sandbox integration**               | `sandbox-integration.test.ts`                                                                                 | `bubblewrap` + `socat` installed (Linux only)                                | Auto-skipped if unavailable |
+| **Isolated VM**                       | `help-integration.test.ts`, `docker-code-mode.integration.test.ts`                                            | `isolated-vm` native module works on current Node version                    | Auto-skipped if unavailable |
+| **LLM integration**                   | `auto-approver-integration.test.ts`, `escalation-scenarios.test.ts` (Suite B), `help-llm-integration.test.ts` | `LLM_INTEGRATION_TEST=true` + `ANTHROPIC_API_KEY`                            | No                          |
+| **Docker integration**                | `network-isolation.integration.test.ts`                                                                       | Linux + `INTEGRATION_TEST=1` + Docker + `ironcurtain-base:latest` image      | No                          |
+| **Live registry integration**         | `test/docker/registry-egress-live.integration.test.ts`                                                        | Internet access + `REGISTRY_EGRESS_LIVE_INTEGRATION=1`                       | No                          |
+| **macOS nested-Docker qualification** | `scripts/qualify-backend.ts`                                                                                  | Docker Desktop or Apple Container, Go, built agent image, and public network | No                          |
+| **Auth**                              | `test/auth/oauth-flow.test.ts`, `test/auth/oauth-token-store.test.ts`                                         | None                                                                         | Yes                         |
+| **Docker subsystem**                  | `test/docker/registry-proxy.test.ts`, `test/docker/package-validator.test.ts`                                 | None                                                                         | Yes                         |
+| **Signal**                            | `test/signal/setup-signal.test.ts`, `test/signal/markdown-to-signal.test.ts`                                  | None                                                                         | Yes                         |
+| **PTY (platform-specific)**           | `pty-session.test.ts` (some cases)                                                                            | Linux + `socat`                                                              | Auto-skipped on non-Linux   |
 
 ## Environment Flags
 
@@ -52,6 +53,23 @@ Runs the production registry-egress policy against anonymous Docker Hub and GHCR
 ```bash
 npm run test:registry-live
 ```
+
+### macOS nested-Docker release qualification
+
+Run both backend gates from the exact release candidate before tagging:
+
+```bash
+npm run qualify:apple
+npm run qualify:docker-desktop
+npm run test:registry-live
+```
+
+`qualify:apple` builds the current tree, rejects any skipped/pending/todo selected test, and runs the
+production workflow separately in `packages`, `images`, and `offline` modes before the PTY transport
+gate. `qualify:docker-desktop` applies the same no-skip rule and runs coordinator-crash recovery,
+feature-off, PTY, offline, images, and packages gates. Both commands create isolated runtime resources and
+require exact cleanup; neither is part of ordinary CI. To override the 30-minute per-gate bound, append
+`-- --timeout-ms <milliseconds>` to the npm command.
 
 You can set both general-suite flags simultaneously:
 

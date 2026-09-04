@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { runVitestQualificationSuite } from '../src/docker-workload/qualification-runner.js';
-import { getBackendQualificationPlan } from './qualify-backend-plan.js';
+import { getBackendQualificationPlan, type QualificationLiveGate } from './qualify-backend-plan.js';
 import { reapSmokeProcessGroup, waitForSmokeChild } from './smoke-child-process.js';
 
 async function main(): Promise<void> {
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     `running the ${plan.label} release suite from the current checkout\n` +
       `  repository: ${repositoryRoot}\n` +
       `  suites:     ${plan.testFiles.length}\n` +
-      `  live gates: ${plan.liveSmokeArguments.length}\n` +
+      `  live gates: ${plan.liveGates.length}\n` +
       (temporary ? '' : `  report:     ${reportDirectory}\n`),
   );
   try {
@@ -56,27 +56,23 @@ async function main(): Promise<void> {
       reportDirectory,
       timeoutMs,
     });
-    for (const smokeArguments of plan.liveSmokeArguments) {
-      process.stdout.write(`\nrunning ${plan.label} live gate: ${smokeArguments.join(' ')}\n`);
-      await runLiveSmoke(repositoryRoot, smokeArguments, timeoutMs);
+    for (const gate of plan.liveGates) {
+      process.stdout.write(`\nrunning ${plan.label} live gate: ${gate.script} ${gate.arguments.join(' ')}\n`);
+      await runLiveSmoke(repositoryRoot, gate, timeoutMs);
     }
     process.stdout.write(
       `\n${plan.label.toUpperCase()} RELEASE SUITE PASSED: ${result.testCount} tests passed, ` +
-        `${plan.liveSmokeArguments.length} live gates passed, zero reporter-visible skips.\n`,
+        `${plan.liveGates.length} live gates passed, zero reporter-visible skips.\n`,
     );
   } finally {
     if (temporary) rmSync(reportDirectory, { recursive: true, force: true });
   }
 }
 
-async function runLiveSmoke(
-  repositoryRoot: string,
-  smokeArguments: readonly string[],
-  timeoutMs: number,
-): Promise<void> {
+async function runLiveSmoke(repositoryRoot: string, gate: QualificationLiveGate, timeoutMs: number): Promise<void> {
   const tsxPath = resolve(repositoryRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  const smokePath = resolve(repositoryRoot, 'scripts', 'smoke-nested-apple.ts');
-  const child = spawn(process.execPath, [tsxPath, smokePath, ...smokeArguments], {
+  const smokePath = resolve(repositoryRoot, 'scripts', gate.script);
+  const child = spawn(process.execPath, [tsxPath, smokePath, ...gate.arguments], {
     cwd: repositoryRoot,
     env: { ...process.env, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
     stdio: 'inherit',
@@ -119,13 +115,15 @@ async function runLiveSmoke(
   if (waitFailure !== undefined) throw waitFailure;
   if (exit === undefined) throw new Error('live qualification gate ended without an exit result');
   if (group.leaked) {
-    throw new Error(`live qualification gate leaked a child process: ${smokeArguments.join(' ')}`);
+    throw new Error(`live qualification gate leaked a child process: ${gate.script} ${gate.arguments.join(' ')}`);
   }
   if (exit.timedOut) {
-    throw new Error(`live qualification gate timed out: ${smokeArguments.join(' ')}`);
+    throw new Error(`live qualification gate timed out: ${gate.script} ${gate.arguments.join(' ')}`);
   }
   if (exit.code !== 0) {
-    throw new Error(`live qualification gate failed (${exit.code ?? exit.signal}): ${smokeArguments.join(' ')}`);
+    throw new Error(
+      `live qualification gate failed (${exit.code ?? exit.signal}): ${gate.script} ${gate.arguments.join(' ')}`,
+    );
   }
 }
 

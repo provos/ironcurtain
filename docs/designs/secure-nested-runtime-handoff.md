@@ -1,7 +1,7 @@
 # Secure Nested Runtime Handoff
 
-**Updated:** 2026-09-01
-**Baseline:** `master` at `f7bd3e1`
+**Updated:** 2026-09-03
+**Baseline:** `master` after PR #457 at `01d4687`
 **Primary design:** [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md)
 **Package-network design:**
 [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md)
@@ -306,6 +306,21 @@ matrix reproducible and do not rely on an agent choosing commands. PTY testing r
 the transport-specific delta (activation-before-attach, environment/orientation delivery, terminal bytes,
 signal handling, and cleanup), not for duplicating the Docker functional matrix through an LLM.
 
+### Apple Container developer release qualification
+
+On 2026-09-03, `npm run qualify:apple` passed from the release-readiness checkout:
+
+```text
+APPLE RELEASE SUITE PASSED: 172 tests passed, 4 live gates passed, zero reporter-visible skips.
+```
+
+The source-controlled gate runs `packages`, `images`, and `offline` as separate built production
+workflows. Each mode proves exact teardown and immediate same-home admission before the qualifier
+continues. The final PTY gate proves activation-before-attach, Claude-TUI output, private-Docker evidence,
+and exact cleanup. The first packages run exposed a stale pre-simplification outer-hostname invariant in
+the privileged snapshot preflight; the retained probe and hostile-name tests now require the production
+stable `ironcurtain-<12 lowercase hex>` name, and the complete qualifier passed after that correction.
+
 ### Docker Desktop developer release qualification
 
 Prerequisites are a running Docker Desktop daemon, a host Go toolchain for the deterministic scratch-image
@@ -326,7 +341,7 @@ Hello, world!
 The session pulled an absent public image through registry mediation and completed a Debian package build
 through the package policy engine.
 
-On 2026-09-01, `npm run qualify:docker-desktop` then passed from the current checkout:
+On 2026-09-03, `npm run qualify:docker-desktop` passed again from the release-readiness checkout:
 
 ```text
 DOCKER DESKTOP RELEASE SUITE PASSED: 238 tests passed, 6 live gates passed, zero reporter-visible skips.
@@ -364,8 +379,8 @@ evidence; this green merge does not substitute for the broader preview/0C gates.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
 6. **macOS developer support, not cross-platform support.** Apple Container and Docker Desktop are
    implemented independently; native Linux remains fail closed until its own proof and product slice land.
-7. **Not preview-qualified.** The no-skip Docker Desktop developer release suite passes, but the broader
-   G1-G10/0C evidence and failure-injection matrix remain incomplete.
+7. **Not preview-qualified.** The no-skip Apple Container and Docker Desktop developer release suites
+   pass, but the broader G1-G10/0C evidence and failure-injection matrix remain incomplete.
 8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session
    smoke passed on 2026-08-15. Deterministic public and offline production workflows passed on 2026-08-21
    with exact cleanup. A catalog refreeze is neither required nor a substitute for these gates.
@@ -400,10 +415,12 @@ the already-colluding bundle, not a new host authority grant.
 
 ### 2. Maintain backend qualification of the three-state package-network design
 
-Docker Desktop now has a source-controlled no-skip release command covering feature-off plus all three
-network modes and crash recovery. Keep `npm run qualify:docker-desktop` mandatory for changes to shared
-nested-Docker lifecycle, transport, workspace, resource, or package-network code. The larger preview
-G1-G10/0C matrix remains distinct from this developer gate.
+Both macOS backends now have source-controlled no-skip release commands. Apple covers all three network
+modes through separate production workflows, immediate same-home readmission after each, and PTY;
+Docker Desktop covers feature-off, all three modes, PTY, and crash recovery. Keep both
+`npm run qualify:apple` and `npm run qualify:docker-desktop` mandatory for changes to shared nested-Docker
+lifecycle, transport, workspace, resource, or package-network code. The larger preview G1-G10/0C matrix
+remains distinct from these developer gates.
 
 Registry mediation lets a nested build resolve and pull its `FROM` image. Current `master` implements
 the governing

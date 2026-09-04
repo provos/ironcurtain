@@ -916,14 +916,15 @@ skip/pending/todo in those suites. It does not predeclare a Git commit, dirty-pa
 test-name inventory, exact test count, or machine-readable N/A list. A source edit and its tests can be
 run together without first updating bookkeeping that purports to authorize the source tree.
 
-The Apple release suite currently comprises `test/docker-manager.test.ts`,
-`test/apple-container-manager.test.ts`, and `test/apple-container.integration.test.ts`. The set changes
-through normal reviewed source changes when backend behavior changes; the release command rejects every
-reporter-visible skip/pending/todo result. Normal code review remains responsible for deleted tests or
-coverage that no longer reaches an assertion. Docker Desktop is implemented but does not yet have its own
-no-skip release command; defining and running that suite is a remaining qualification gate. Linux defines
-its suite with its future implementation. Cross-backend differences and unsupported behavior remain
-explicit in this design and the support matrix, not duplicated into a generated contract. Broad
+The Apple release suite selects `test/docker-manager.test.ts`, `test/apple-container-manager.test.ts`, and
+`test/apple-container.integration.test.ts`, then runs separate built-product workflow gates for
+`packages`, `images`, and `offline` plus the PTY transport gate. Docker Desktop has an independent no-skip
+suite and built-product gates for crash recovery, feature-off, PTY, and all three network modes. These
+sets change through normal reviewed source changes when backend behavior changes; each release command
+rejects every reporter-visible skip/pending/todo result and any failed or leaked live gate. Normal code
+review remains responsible for deleted tests or coverage that no longer reaches an assertion. Linux
+defines its suite with its future implementation. Cross-backend differences and unsupported behavior
+remain explicit in this design and the support matrix, not duplicated into a generated contract. Broad
 `npm test` skips remain inventory only and do not substitute for a backend release suite.
 
 After a run, tooling may emit a simple diagnostic report containing backend/variant, current Git revision
@@ -1042,17 +1043,19 @@ unbound, or non-ready; reconciliation fencing alone is not treated as cleanup pr
 
 ### Phase 2-DD — Docker Desktop product slice (independent)
 
-The explicit-opt-in DD-STRICT developer slice is implemented with its minimal recorded profile,
+The explicit-opt-in DD-STRICT developer slice is implemented and developer release-qualified with its minimal recorded profile,
 lease-owned named-volume API/data root, `network=none`, selected-current-agent transport, and aggregate
 resource partition across the daemon, agent, ordinary session transport, and enabled fixed relays. The explicit-opt-in DD-PROXY developer slice adds only the exact TUN device required
 by rootless slirp networking plus an isolated-gateway network and independently pinned fixed relays to
-bundle-authenticated host policy engines. Both remain supported-not-qualified.
+bundle-authenticated host policy engines. Both remain not preview-qualified.
 
 **Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Desktop release suite and G1-G10 before Desktop preview. Every Phase 0 stop condition is a regression test. Failed preflight disables the capability without fallback.
 
 ### Phase 2-AC — Apple `container` product slice (independent sibling)
 
-Implement every Apple variant that passed and is approved. Rootless and rootful-in-VM are distinct backend capabilities and evidence records. Version-pin custom init/kernel artifacts if used.
+The explicit-opt-in rootless Apple developer slice is implemented and developer release-qualified.
+Rootless and any future rootful-in-VM variant remain distinct backend capabilities and evidence records.
+Version-pin custom init/kernel artifacts if used.
 
 **Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Apple release suite and G1-G10 independently for each advertised Apple variant before preview. Documentation names the VM boundary, advisory PIDs, resource/disk policy, and no result inherited from Desktop.
 
@@ -1080,8 +1083,9 @@ generic-public route was removed before the package proxy, CA, wrapper, and shim
 apt/npm/PyPI/Cargo GET/HEAD grammars, redirect/address/request-smuggling/credential/derived-request
 controls, residue checks, shared lifecycle, and live-client gates are product-wired.
 
-**Remaining exit work:** rerun the complete packages/images/offline product matrix in each backend's
-no-skip release suite before preview. Supported ordinary builds already succeed with no
+**Developer exit:** both macOS no-skip release suites rerun the complete packages/images/offline product
+matrix and pass. Preview still requires each backend's broader G1-G10/0C product-entrypoint rerun.
+Supported ordinary builds already succeed with no
 IronCurtain-provisioned credential; recognized credential fields/bodies, arbitrary destinations, opaque
 TCP, and direct routes fail. Bounded exfiltration through admitted paths, canonicalized request metadata,
 and timing remains an explicit nonclaim.

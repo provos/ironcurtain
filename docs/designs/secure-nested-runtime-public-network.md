@@ -1,7 +1,7 @@
 # Secure Nested Runtime Package Network
 
-**Status:** implemented macOS developer capability; Docker Desktop developer release-qualified
-**Updated:** 2026-09-01
+**Status:** implemented macOS developer capability; both macOS backends developer release-qualified
+**Updated:** 2026-09-03
 **Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes
 **Related:**
 [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
@@ -815,8 +815,8 @@ from the broader preview qualification matrix.
 | Lifecycle            | batch/workflow/PTY failure rollback and exact reconciliation                  | shared lifecycle/failure tests plus Docker Desktop coordinator-death, exact cleanup, child reaping, and readmission gates   | developer-qualified                                     |
 | Configuration        | complete three-enum migration and CLI/web parity                              | config normalization plus CLI/web settings and warning tests cover all three modes                                          | landed                                                  |
 
-`packages` is admitted only as developer functionality. The no-skip Docker Desktop release suite passes;
-full G1-G10/0C reruns for each macOS backend and preview qualification remain open.
+`packages` is admitted only as developer functionality. The no-skip Apple Container and Docker Desktop
+release suites pass; full G1-G10/0C reruns for each macOS backend and preview qualification remain open.
 
 ### 13.1 Strict package proxy
 
@@ -938,7 +938,7 @@ The deterministic `packages` qualification runs the snapshot-file portion throug
 internal probe because RootlessKit snapshot ownership is not readable by the outer `codespace` user. The
 ordinary probe remains unprivileged. It brackets that internal probe with the initially admitted rootless
 daemon identity, the exact fixed Docker data root, and unchanged full tracked container/image inventories;
-immediately beforehand it requires the exact bounded `ic-dw-agent-<16 lowercase hex>` hostname, a
+immediately beforehand it requires the exact bounded `ironcurtain-<12 lowercase hex>` hostname, a
 successful bounded `/usr/bin/getent ahosts` lookup for that hostname, and a silent successful
 `sudo -n -- /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/true`. The selected Apple base includes
 `libnss-myhostname` so that dynamic container hostnames resolve without a mutable per-session hosts-file
