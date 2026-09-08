@@ -106,7 +106,13 @@ async function detectCredentialState(
 
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
-    const key = resolveApiKeyForProvider(provider, config.userConfig);
+    // GooseProvider includes 'azure_openai', which is not part of the generic ProviderId type.
+    // Handle it separately rather than extending resolveApiKeyForProvider() to keep provider
+    // resolution generic and avoid polluting the LLM provider namespace.
+    const key =
+      provider === 'azure_openai'
+        ? config.userConfig.azureOpenAIApiKey
+        : resolveApiKeyForProvider(provider, config.userConfig);
     if (key) return { credKind: 'apikey', anthropicOAuthOnly: false };
 
     const auth = await detectAuthMethod(config, sources);
