@@ -24,7 +24,7 @@ import { canonicalizeDockerSaveArchive } from './oci-image-archive-canonicalizer
 import { withProvisionLock } from './provision-lock.js';
 import type { ContainerRuntime } from './types.js';
 
-export const SELECTED_AGENT_ARTIFACT_SCHEMA_VERSION = 1;
+export const SELECTED_AGENT_ARTIFACT_SCHEMA_VERSION = 2;
 const METADATA_FILE = 'artifact.json';
 const ARCHIVE_FILE = 'selected-agent.oci.tar';
 const MAX_METADATA_BYTES = 64 * 1024;
@@ -36,24 +36,33 @@ const CAPTURE_ALIAS_PATTERN =
   /^(?:localhost\/|docker\.io\/library\/)?ironcurtain-capture-p([1-9]\d{0,9})-t(\d{13})-([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}):latest$/u;
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 
-const metadataSchema = z
+const archiveMetadataSchema = z
   .object({
-    schemaVersion: z.literal(SELECTED_AGENT_ARTIFACT_SCHEMA_VERSION),
+    fileName: z.literal(ARCHIVE_FILE),
+    sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+const metadataBaseSchema = z
+  .object({
     logicalName: z.string().min(1).max(255),
     buildHash: sha256HexSchema,
     architecture: z.enum(['amd64', 'arm64']),
     appleImageId: digestSchema,
     dockerImageId: digestSchema,
     manifestDigest: digestSchema,
-    archive: z
-      .object({
-        fileName: z.literal(ARCHIVE_FILE),
-        sha256: sha256HexSchema,
-        sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      })
-      .strict(),
+    archive: archiveMetadataSchema,
   })
   .strict();
+
+const metadataSchema = z.discriminatedUnion('schemaVersion', [
+  // Version 1 stored a redundant whole-archive checksum. Read it only so
+  // existing caches can be fully reverified through their OCI descriptors.
+  metadataBaseSchema.extend({
+    schemaVersion: z.literal(1),
+    archive: archiveMetadataSchema.extend({ sha256: sha256HexSchema }),
+  }),
+  metadataBaseSchema.extend({ schemaVersion: z.literal(SELECTED_AGENT_ARTIFACT_SCHEMA_VERSION) }),
+]);
 
 type SelectedAgentArtifactMetadata = z.infer<typeof metadataSchema>;
 
@@ -66,7 +75,6 @@ export interface SelectedAgentArtifact {
   readonly dockerImageId: string;
   readonly manifestDigest: string;
   readonly archivePath: string;
-  readonly archiveSha256: string;
   readonly archiveSizeBytes: number;
 }
 
@@ -223,7 +231,6 @@ async function prepareSelectedAgentArtifactUncached(
           manifestDigest: canonical.manifestDigest,
           archive: {
             fileName: ARCHIVE_FILE,
-            sha256: canonical.archiveSha256,
             sizeBytes: canonical.sizeBytes,
           },
         };
@@ -396,7 +403,6 @@ function pruneSelectedAgentArtifactCache(cacheRoot: string, currentDirectory: st
 export async function verifySelectedAgentArtifactArchive(artifact: SelectedAgentArtifact): Promise<void> {
   const verified = await verifyOciImageArchive({
     archivePath: artifact.archivePath,
-    expectedArchiveSha256: artifact.archiveSha256,
     expectedSizeBytes: artifact.archiveSizeBytes,
     manifestDigest: artifact.manifestDigest,
     configDigest: artifact.dockerImageId,
@@ -457,7 +463,6 @@ function artifactFromMetadata(directory: string, metadata: SelectedAgentArtifact
     dockerImageId: metadata.dockerImageId,
     manifestDigest: metadata.manifestDigest,
     archivePath: resolve(directory, metadata.archive.fileName),
-    archiveSha256: metadata.archive.sha256,
     archiveSizeBytes: metadata.archive.sizeBytes,
   };
 }

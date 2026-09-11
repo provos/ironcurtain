@@ -14,6 +14,10 @@ const createContainerRuntime = vi.fn();
 const resolveRuntimeKind = vi.fn();
 const checkAppleContainerAvailable = vi.fn();
 const checkDockerAvailable = vi.fn();
+vi.mock('../../src/docker/docker-endpoint.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker/docker-endpoint.js')>()),
+  resolveDockerEndpoint: async () => ({ host: 'unix:///var/run/docker.sock' }),
+}));
 const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
 if (hostPlatformDescriptor === undefined) {
@@ -46,7 +50,18 @@ beforeEach(() => {
     throw new Error('runtime creation must not run');
   });
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
-  checkDockerAvailable.mockResolvedValue({ available: true });
+  checkDockerAvailable.mockResolvedValue({
+    available: true,
+    server: {
+      architecture: 'arm64',
+      operatingSystem: 'Docker Desktop',
+      osType: 'linux',
+      serverVersion: '29.4.1',
+      kernelVersion: '6.18',
+      cgroupVersion: '2',
+      securityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'],
+    },
+  });
 });
 
 afterEach(() => {
@@ -153,6 +168,15 @@ describe('secure nested Docker resolved-variant admission', () => {
         },
       );
       const inspectImage = vi.fn(async (reference: string) => {
+        if (reference.startsWith('docker:'))
+          return {
+            id: `sha256:${'c'.repeat(64)}`,
+            repoTags: [reference],
+            repoDigests: [`docker@sha256:${'c'.repeat(64)}`],
+            labels: {},
+            created: '',
+            architecture: 'arm64' as const,
+          };
         const buildHash = buildHashes.get(reference);
         if (buildHash === undefined) return undefined;
         if (reference === image) {

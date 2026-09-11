@@ -24,17 +24,29 @@ afterEach(() => {
 });
 
 describe('Docker-workload bundle lease', () => {
+  it('requires a captured endpoint for new Docker leases and persists its exact value', () => {
+    const { path, options } = fixture();
+    expect(() => createDockerWorkloadLease(path, { ...options, runtimeKind: 'docker' })).toThrow(
+      /captured Docker endpoint/u,
+    );
+    const dockerEndpoint = { host: 'unix:///selected.sock' };
+    createDockerWorkloadLease(path, { ...options, runtimeKind: 'docker', dockerEndpoint });
+    expect(loadDockerWorkloadLease(path)).toMatchObject({ runtimeKind: 'docker', dockerEndpoint });
+  });
+
   it('keeps legacy catalog-bearing v1 leases readable and cleanable without writing those fields to new leases', () => {
     const { path, options } = fixture();
     const created = createDockerWorkloadLease(path, options);
-    expect(created.bindings).toEqual({ watchdogPolicySha256: options.bindings.watchdogPolicySha256 });
+    expect(created).toMatchObject({ schemaVersion: 2, bindings: options.bindings });
 
     const legacy = JSON.parse(readFileSync(path, 'utf8')) as {
-      bindings: Record<string, string>;
+      schemaVersion: number;
+      bindings: Record<string, unknown>;
     };
-    legacy.bindings = { ...legacy.bindings, ...options.bindings };
+    legacy.schemaVersion = 1;
+    legacy.bindings = { watchdogPolicySha256: '5'.repeat(64), catalogSha256: '2'.repeat(64) };
     writeFileSync(path, `${stableStringify(legacy)}\n`, { mode: 0o600 });
-    expect(loadDockerWorkloadLease(path).bindings.catalogSha256).toBe(options.bindings.catalogSha256);
+    expect(loadDockerWorkloadLease(path)).toMatchObject({ schemaVersion: 1, bindings: legacy.bindings });
 
     revokeDockerWorkloadLease(path, options.generation);
     const closed = closeDockerWorkloadLease(path, options.generation, {
@@ -45,7 +57,7 @@ describe('Docker-workload bundle lease', () => {
         { capturedAt: '2026-07-20T12:00:00.200Z', ownedResourceIds: [] },
       ],
     });
-    expect(closed.status).toBe('closed');
+    expect(closed).toMatchObject({ schemaVersion: 1, status: 'closed', bindings: legacy.bindings });
   });
 
   it('durably records request before immutable observation and closes only after exact cleanup proof', () => {
@@ -145,7 +157,7 @@ describe('Docker-workload bundle lease', () => {
     ).toThrow(/not sufficiently separated/u);
   });
 
-  it('preserves a schema-v1 incident through recovery and successful close', () => {
+  it('preserves an incident through recovery and successful close', () => {
     const { path, options } = fixture();
     createDockerWorkloadLease(path, options);
     requestDockerWorkloadOuterResource(path, options.generation, {
@@ -235,11 +247,22 @@ function fixture(): {
       stagingRoot: '/private/tmp/ironcurtain-staging',
     },
     bindings: {
-      catalogSha256: '2'.repeat(64),
-      innerDockerCatalogSha256: '7'.repeat(64),
-      profileSha256: '3'.repeat(64),
-      watchdogPolicySha256: '5'.repeat(64),
-      toolchainDigest: '6'.repeat(64),
+      watchdogPolicy: {
+        schemaVersion: 1,
+        policyId: 'lease-policy-fixture',
+        targetRoot: '/private/tmp/ironcurtain-state',
+        targetDevice: 1,
+        targetInode: 1,
+        stateClasses: [{ id: 'daemon', relativePath: 'daemon', kind: 'directory', required: true }],
+        sampleIntervalMs: 100,
+        sampleTimeoutMs: 100,
+        staleAfterMs: 300,
+        softEvidenceBytes: 1024,
+        hardSafetyBytes: 2048,
+        hostReserveBytes: 1,
+        maximumOvershootBytes: 1024,
+        cleanupInventoryGapMs: 100,
+      },
     },
     cleanupInventoryGapMs: 100,
     coordinatorPid: process.pid,

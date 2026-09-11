@@ -633,6 +633,8 @@ describe('AppleContainerManager', () => {
 
     it('normalizes the top-level index digest and selects only the linux/arm64 labels', () => {
       expect(parseAppleImageInfo(appleImage)).toEqual({
+        architecture: 'arm64',
+        descriptorDigest: `sha256:${'a'.repeat(64)}`,
         id: `sha256:${'a'.repeat(64)}`,
         repoTags: ['localhost/ironcurtain-fixture:latest'],
         labels: { 'ironcurtain.build-hash': 'abc123', platform: 'right' },

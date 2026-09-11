@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -7,7 +17,6 @@ import {
   CONTAINER_RUNTIME_CA_BUNDLE,
   CONTAINER_RUNTIME_CA_CERT,
   renderAptProxyConfig,
-  RUNTIME_TRUST_METADATA_FILE,
   stageRuntimeTrust,
 } from '../../src/docker/runtime-trust.js';
 
@@ -27,38 +36,39 @@ describe('runtime trust staging', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it('stages only public, hash-bound trust material with immutable modes', () => {
-    const metadata = stageRuntimeTrust(directory, CA_ONE, [ROOT_TWO, ROOT_ONE, ROOT_ONE]);
+  it('stages exactly the normalized public certificate and deduplicated root bundle with immutable modes', () => {
+    stageRuntimeTrust(directory, `\n${CA_ONE.replaceAll('\n', '\r\n')}\r\n`, [ROOT_TWO, ROOT_ONE, ROOT_ONE]);
     const certPath = join(directory, 'ca-cert.pem');
     const bundlePath = join(directory, 'ca-bundle.pem');
-    const metadataPath = join(directory, RUNTIME_TRUST_METADATA_FILE);
 
     expect(readFileSync(certPath, 'utf8')).toBe(`${CA_ONE}\n`);
     expect(readFileSync(bundlePath, 'utf8')).toBe(`${ROOT_ONE}\n${ROOT_TWO}\n${CA_ONE}\n`);
-    expect(JSON.parse(readFileSync(metadataPath, 'utf8'))).toEqual(metadata);
-    expect(metadata.generation).toBe(`runtime-trust-v1:${metadata.caCertificateSha256}`);
-    expect(metadata.publicRootCount).toBe(2);
-    expect(metadata.containerCertificatePath).toBe(CONTAINER_RUNTIME_CA_CERT);
-    expect(metadata.containerBundlePath).toBe(CONTAINER_RUNTIME_CA_BUNDLE);
     expect(statSync(certPath).mode & 0o777).toBe(0o444);
     expect(statSync(bundlePath).mode & 0o777).toBe(0o444);
-    expect(statSync(metadataPath).mode & 0o777).toBe(0o444);
-    expect(readdirSync(directory).some((name) => /key/iu.test(name))).toBe(false);
+    expect(readdirSync(directory).sort()).toEqual(['ca-bundle.pem', 'ca-cert.pem']);
   });
 
   it('atomically replaces a prior generation without retaining the old CA', () => {
-    const first = stageRuntimeTrust(directory, CA_ONE, [ROOT_ONE]);
-    const second = stageRuntimeTrust(directory, CA_TWO, [ROOT_ONE]);
-
-    expect(second.generation).not.toBe(first.generation);
-    expect(readFileSync(join(directory, 'ca-cert.pem'), 'utf8')).toBe(`${CA_TWO}\n`);
-    expect(readFileSync(join(directory, 'ca-bundle.pem'), 'utf8')).not.toContain('SESSION-CA-ONE');
-    expect(readdirSync(directory).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    stageRuntimeTrust(directory, CA_ONE, [ROOT_ONE]);
+    const oldCertificate = openSync(join(directory, 'ca-cert.pem'), 'r');
+    const oldBundle = openSync(join(directory, 'ca-bundle.pem'), 'r');
+    try {
+      stageRuntimeTrust(directory, CA_TWO, [ROOT_TWO]);
+      expect(readFileSync(join(directory, 'ca-cert.pem'), 'utf8')).toBe(`${CA_TWO}\n`);
+      expect(readFileSync(join(directory, 'ca-bundle.pem'), 'utf8')).toBe(`${ROOT_TWO}\n${CA_TWO}\n`);
+      // Existing readers retain the complete previous files across each atomic rename.
+      expect(readFileSync(oldCertificate, 'utf8')).toBe(`${CA_ONE}\n`);
+      expect(readFileSync(oldBundle, 'utf8')).toBe(`${ROOT_ONE}\n${CA_ONE}\n`);
+      expect(readdirSync(directory).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      closeSync(oldCertificate);
+      closeSync(oldBundle);
+    }
   });
 
-  it('refuses to replace a planted trust-file symlink', () => {
+  it.each(['ca-cert.pem', 'ca-bundle.pem'])('refuses to replace a planted %s symlink', (filename) => {
     const outside = join(directory, 'outside');
-    symlinkSync(outside, join(directory, 'ca-cert.pem'));
+    symlinkSync(outside, join(directory, filename));
     expect(() => stageRuntimeTrust(directory, CA_ONE, [ROOT_ONE])).toThrow(/symlink/u);
     expect(existsSync(outside)).toBe(false);
   });

@@ -25,9 +25,9 @@ import { loadFrozenWatchdogPolicyTemplate, renderWatchdogPolicy } from '../../sr
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
 import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import type { DockerContainerInfo } from '../../src/docker/types.js';
+import { createLegacyDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
 import {
-  ADMISSION_BINDINGS,
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -55,6 +55,7 @@ function seedLease(options: {
   readonly runtimeKind?: 'docker' | 'apple-container';
   readonly resources?: readonly SeedResource[];
   readonly activate?: boolean;
+  readonly schemaVersion?: 1 | 2;
 }): { readonly leaseId: string; readonly leasePath: string; readonly generation: string } {
   const { leaseId } = options;
   const stateRoot = getDockerWorkloadStateRoot(leaseId);
@@ -65,11 +66,11 @@ function seedLease(options: {
   const leaseDir = getDockerWorkloadLeaseDir(leaseId);
   mkdirSync(leaseDir, { recursive: true, mode: 0o700 });
   const template = loadFrozenWatchdogPolicyTemplate(WATCHDOG_TEMPLATE_PATH);
-  const loadedPolicy = renderWatchdogPolicy(template.template, stateRoot, join(leaseDir, 'policy.json'));
+  const loadedPolicy = renderWatchdogPolicy(template, stateRoot, join(leaseDir, 'policy.json'));
   const generation = `gen-${leaseId}`;
   const now = new Date(options.heartbeatIso);
   const leasePath = join(leaseDir, 'lease.json');
-  createDockerWorkloadLease(leasePath, {
+  const leaseOptions = {
     leaseId,
     bundleId: `bundle-${leaseId}`,
     generation,
@@ -82,11 +83,21 @@ function seedLease(options: {
       exchangeRoot: join(stateRoot, 'exchange'),
       stagingRoot: join(stateRoot, 'staging'),
     },
-    bindings: { ...ADMISSION_BINDINGS, watchdogPolicySha256: loadedPolicy.sha256 },
     cleanupInventoryGapMs: loadedPolicy.policy.cleanupInventoryGapMs,
     coordinatorPid: process.pid,
     now,
-  });
+  };
+  if (options.schemaVersion === 1) {
+    createLegacyDockerWorkloadLease(leasePath, {
+      ...leaseOptions,
+      bindings: { watchdogPolicySha256: loadedPolicy.sha256 },
+    });
+  } else
+    createDockerWorkloadLease(leasePath, {
+      ...leaseOptions,
+      dockerEndpoint: leaseOptions.runtimeKind === 'docker' ? { host: 'unix:///var/run/docker.sock' } : undefined,
+      bindings: { watchdogPolicy: loadedPolicy.policy },
+    });
   for (const resource of options.resources ?? []) {
     requestDockerWorkloadOuterResource(
       leasePath,
@@ -125,7 +136,7 @@ function admissionOptions(runtime: EventRuntime, clock: FakeClock): DockerWorklo
     runtimeKind: 'docker',
     bundleId: 'bundle-fresh-001',
     workspaceRoot: join(getHome(), 'workspace'),
-    configHash: ADMISSION_CONFIG_HASH,
+    configuration: ADMISSION_CONFIGURATION,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     clock: clock.clock,
@@ -477,6 +488,31 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     });
   });
 
+  it('uses the recorded Docker endpoint after the selected context changes', async () => {
+    const recorded = createEventRuntime();
+    const selected = createEventRuntime();
+    const selectedRuntime = { ...selected.runtime, dockerEndpoint: { host: 'unix:///different.sock' } };
+    const stale = seedLease({ leaseId: 'dw-endpoint', heartbeatIso: '2026-07-20T09:00:00.000Z' });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+    const requests: unknown[] = [];
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: selectedRuntime,
+      runtimeKind: 'docker',
+      runtimeForKind: (kind, endpoint) => {
+        requests.push({ kind, endpoint });
+        return recorded.runtime;
+      },
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false,
+      supervisor: createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }),
+    });
+    expect(requests).toEqual([{ kind: 'docker', endpoint: { host: 'unix:///var/run/docker.sock' } }]);
+    expect(result.reconciled).toEqual(['dw-endpoint']);
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('closed');
+    expect(selected.events).toEqual([]);
+  });
+
   it('reconciles a stale lease before admitting a new bundle', async () => {
     const runtime = createEventRuntime();
     const stale = seedLease({ leaseId: 'dw-stale', heartbeatIso: '2026-07-20T10:00:00.000Z' });
@@ -550,6 +586,7 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     const result = await reconcileDockerWorkloadLeases({
       runtime: selectedRuntime.runtime,
       runtimeKind: 'apple-container',
+      runtimeForKind: () => undefined,
       clock: clock.clock,
       sleep: clock.sleep,
       pidAlive: () => false,
@@ -583,25 +620,43 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     );
   });
 
-  it('preserves a live lease whose coordinator heartbeat is fresh', async () => {
-    const runtime = createEventRuntime({ containers: [container('live-id', 'ic-live', 'gen-dw-live')] });
-    const live = seedLease({
-      leaseId: 'dw-live',
-      heartbeatIso: '2026-07-20T12:00:00.000Z',
-      resources: [
-        { requestId: 'res-a', kind: 'container', role: 'nested-daemon', name: 'ic-live', observedId: 'live-id' },
-      ],
-      activate: true,
-    });
-    const clock = createFakeClock('2026-07-20T12:00:05.000Z');
-    const result = await reconcileDockerWorkloadLeases({
-      ...reconcileOptions(runtime, clock),
-      supervisor: createFakeSupervisor({ clock: clock.clock }),
-    });
-    expect(result).toMatchObject({ preserved: ['dw-live'], reconciled: [], fenced: [] });
-    expect(loadDockerWorkloadLease(live.leasePath).status).toBe('active');
-    expect(runtime.containers.map((value) => value.id)).toEqual(['live-id']);
-  });
+  it.each([1, 2] as const)(
+    'preserves and later recovers a v%i lease without upgrading its running supervisor protocol',
+    async (schemaVersion) => {
+      const runtime = createEventRuntime({ containers: [container('live-id', 'ic-live', 'gen-dw-live')] });
+      const live = seedLease({
+        leaseId: 'dw-live',
+        schemaVersion,
+        heartbeatIso: '2026-07-20T12:00:00.000Z',
+        resources: [
+          { requestId: 'res-a', kind: 'container', role: 'nested-daemon', name: 'ic-live', observedId: 'live-id' },
+        ],
+        activate: true,
+      });
+      const clock = createFakeClock('2026-07-20T12:00:05.000Z');
+      const result = await reconcileDockerWorkloadLeases({
+        ...reconcileOptions(runtime, clock),
+        supervisor: createFakeSupervisor({ clock: clock.clock }),
+      });
+      expect(result).toMatchObject({ preserved: ['dw-live'], reconciled: [], fenced: [] });
+      expect(loadDockerWorkloadLease(live.leasePath).status).toBe('active');
+      expect(runtime.containers.map((value) => value.id)).toEqual(['live-id']);
+      const stopVersions: number[] = [];
+      clock.advance(60_000);
+      const recovered = await reconcileDockerWorkloadLeases({
+        ...reconcileOptions(runtime, clock),
+        supervisor: {
+          ...createFakeSupervisor({ clock: clock.clock }),
+          requestStop: (_path, lease) => {
+            stopVersions.push(lease.schemaVersion);
+          },
+        },
+      });
+      expect(recovered).toMatchObject({ reconciled: ['dw-live'], preserved: [], fenced: [] });
+      expect(stopVersions).toEqual([schemaVersion]);
+      expect(loadDockerWorkloadLease(live.leasePath)).toMatchObject({ schemaVersion, status: 'closed' });
+    },
+  );
 
   it('deletes only exact generation-owned resources and preserves foreign objects (observed-but-unremoved)', async () => {
     const runtime = createEventRuntime({

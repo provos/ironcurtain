@@ -1,12 +1,11 @@
-/** Trusted Docker client/daemon compatibility manifest and live preflight. */
+/** Docker client/daemon compatibility requirements and observed live versions. */
 
 import { z } from 'zod';
 import { loadImmutableHostJson } from '../hardened-fs.js';
-import { computeHash } from '../hash.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { compareDockerApiVersions } from '../docker/docker-api-version.js';
 
-export const CLIENT_TOOLCHAIN_SCHEMA_VERSION = 1;
+export const CLIENT_TOOLCHAIN_SCHEMA_VERSION = 2;
 export const MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES = 64 * 1024;
 export const DOCKER_VERSION_PREFLIGHT_ARGV = ['docker', 'version', '--format', '{{json .}}'] as const;
 export const DOCKER_BUILDX_VERSION_PREFLIGHT_ARGV = ['docker', 'buildx', 'version'] as const;
@@ -19,39 +18,13 @@ export const CLIENT_TOOLCHAIN_PREFLIGHT_ARGVS = [
 
 const versionSchema = z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u);
 const apiVersionSchema = z.string().regex(/^\d{1,3}\.\d{1,3}$/u);
-const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+const architectureSchema = z.enum(['amd64', 'arm64']);
 
 const clientToolchainManifestSchema = z
   .object({
     schemaVersion: z.literal(CLIENT_TOOLCHAIN_SCHEMA_VERSION),
     generation: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u),
     platform: z.literal('linux'),
-    architecture: z.enum(['amd64', 'arm64']),
-    realRunc: z
-      .object({
-        path: z.literal('/usr/local/lib/ironcurtain-docker/bin/runc'),
-        sha256: sha256Schema,
-        size: z
-          .number()
-          .int()
-          .positive()
-          .max(128 << 20),
-        uid: z.literal(0),
-        gid: z.literal(0),
-        mode: z.literal('0755'),
-        nlink: z.literal(1),
-        version: versionSchema,
-        commit: z.string().regex(/^[a-f0-9]{7,40}$/u),
-        specVersion: versionSchema,
-      })
-      .strict(),
-    source: z
-      .object({
-        daemonImage: z.string().regex(/^[A-Za-z0-9./_-]+@sha256:[a-f0-9]{64}$/u),
-        daemonImageId: digestSchema,
-      })
-      .strict(),
     docker: z
       .object({
         cliVersion: versionSchema,
@@ -106,12 +79,20 @@ const dockerVersionOutputSchema = z
   })
   .loose();
 
-export type ClientToolchainManifest = z.infer<typeof clientToolchainManifestSchema>;
+export type DockerToolchainArchitecture = z.infer<typeof architectureSchema>;
+export type ClientToolchainCompatibility = z.infer<typeof clientToolchainManifestSchema>;
+export type ClientToolchainManifest = ClientToolchainCompatibility & {
+  readonly architecture: DockerToolchainArchitecture;
+};
 
 export interface LoadedClientToolchainManifest {
   readonly path: string;
-  readonly sha256: string;
   readonly manifest: ClientToolchainManifest;
+}
+
+/** Versioned build input; callers resolve it once and reuse that image for both roles. */
+export function getDockerToolchainSourceReference(manifest: ClientToolchainCompatibility): string {
+  return `docker:${manifest.docker.daemonVersion}-dind-rootless`;
 }
 
 export interface ClientToolchainPreflight {
@@ -123,22 +104,28 @@ export interface ClientToolchainPreflight {
     readonly buildx: string;
     readonly compose: string;
   };
-  readonly toolchainDigest: string;
 }
 
-/** Load a host-owned, immutable compatibility matrix through one no-follow descriptor. */
-export function loadClientToolchainManifest(path: string): LoadedClientToolchainManifest {
+/** Select the shared compatibility requirements for the resolved execution architecture. */
+export function loadClientToolchainManifest(
+  path: string,
+  architecture: DockerToolchainArchitecture,
+): LoadedClientToolchainManifest {
   const loaded = loadImmutableHostJson(path, {
     label: 'client toolchain manifest',
     schema: clientToolchainManifestSchema,
     maxBytes: MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES,
   });
-  return { path: loaded.path, sha256: loaded.sha256, manifest: loaded.value };
+  return {
+    path: loaded.path,
+    manifest: { ...loaded.value, architecture: architectureSchema.parse(architecture) },
+  };
 }
 
 /**
- * Prove that the client inside the agent is connected to the intended daemon
- * and that every executable matches the compatibility manifest.
+ * Check reported client/daemon/plugin versions against the compatibility requirements.
+ * Agent-local executables and their reports are replaceable through sudo; these
+ * observations do not authenticate executable bytes or grant host authority.
  */
 export async function preflightClientToolchain(options: {
   readonly runtime: Pick<ContainerRuntime, 'exec'>;
@@ -192,14 +179,12 @@ export async function preflightClientToolchain(options: {
     buildx: buildxMatch[1],
     compose: composeVersion,
   };
-  const toolchainDigest = computeHash(toolchain);
   return {
     architecture: expected.architecture,
     dockerApi: {
       actual: actual.Server.ApiVersion,
     },
     toolchain,
-    toolchainDigest,
   };
 }
 

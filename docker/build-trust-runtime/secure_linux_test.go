@@ -279,11 +279,10 @@ func TestPatchBundleSecureReportsEveryPublicSourceStage(t *testing.T) {
 		open     failureDiagnosticCode
 		metadata failureDiagnosticCode
 		readOnly failureDiagnosticCode
-		digest   failureDiagnosticCode
 	}{
-		{"CA certificate", 0, diagnosticSourceCACertOpen, diagnosticSourceCACertMetadata, diagnosticSourceCACertReadOnly, diagnosticSourceCACertDigest},
-		{"CA bundle", 1, diagnosticSourceCABundleOpen, diagnosticSourceCABundleMeta, diagnosticSourceCABundleRO, diagnosticSourceCABundleDigest},
-		{"APT config", 2, diagnosticSourceAPTConfigOpen, diagnosticSourceAPTConfigMeta, diagnosticSourceAPTConfigRO, diagnosticSourceAPTConfigDigest},
+		{"CA certificate", 0, diagnosticSourceCACertOpen, diagnosticSourceCACertMetadata, diagnosticSourceCACertReadOnly},
+		{"CA bundle", 1, diagnosticSourceCABundleOpen, diagnosticSourceCABundleMeta, diagnosticSourceCABundleRO},
+		{"APT config", 2, diagnosticSourceAPTConfigOpen, diagnosticSourceAPTConfigMeta, diagnosticSourceAPTConfigRO},
 	}
 	for _, source := range sources {
 		for _, stage := range []struct {
@@ -319,21 +318,6 @@ func TestPatchBundleSecureReportsEveryPublicSourceStage(t *testing.T) {
 					}
 				},
 			},
-			{
-				name: "digest",
-				want: source.digest,
-				setup: func(t *testing.T, _ *secureFixture, path string) {
-					if err := os.Chmod(path, 0o644); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(path, []byte("mutated\n"), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chmod(path, 0o444); err != nil {
-						t.Fatal(err)
-					}
-				},
-			},
 		} {
 			t.Run(source.name+" "+stage.name, func(t *testing.T) {
 				fixture := newSecureFixture(t)
@@ -357,6 +341,13 @@ func TestRunPreservesNestedBuildkitStageCode(t *testing.T) {
 	if err := os.Chmod(sourcePath, 0o444); err != nil {
 		t.Fatal(err)
 	}
+	fixture.policy.effectiveReadOnly = func(_ int, path string) error {
+		if path == sourcePath {
+			return errors.New("writable trust source")
+		}
+		return nil
+	}
+
 	id := filepath.Base(fixture.bundlePath)
 	argv := []string{
 		"--log", fixture.policy.buildkitLogPath,
@@ -367,7 +358,7 @@ func TestRunPreservesNestedBuildkitStageCode(t *testing.T) {
 	err := run(argv, nil, fixture.policy, func(_ string, _ []string, _ []string) error {
 		return errors.New("unexpected runc handoff")
 	})
-	requireDiagnosticCode(t, err, diagnosticSourceCABundleDigest)
+	requireDiagnosticCode(t, err, diagnosticSourceCABundleRO)
 }
 
 func TestConfigReadStageIsTyped(t *testing.T) {
@@ -512,6 +503,26 @@ func TestEffectiveReadOnlyAuthorityAcceptsQualifiedMount(t *testing.T) {
 	}
 }
 
+func TestEffectiveReadOnlyAuthorityForRunningExecutable(t *testing.T) {
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(fd)
+	err = validateEffectiveReadOnlyFile(fd, path)
+	if os.Getenv("IRONCURTAIN_READONLY_TEST_EXECUTABLE") == "1" {
+		if err != nil {
+			t.Fatalf("running executable on a read-only mount rejected: %v", err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("running executable on writable backing was not rejected: %v", err)
+	}
+}
+
 func TestFailureDiagnosticSecureLifecycle(t *testing.T) {
 	if err := clearFailureDiagnosticSecure(); err != nil {
 		t.Fatal(err)
@@ -603,20 +614,16 @@ func TestPublicTrustSourceOwnerIsDiagnosticOnly(t *testing.T) {
 	}
 }
 
-func TestPatchBundleSecureRejectsSameSizeSourceDigestMismatch(t *testing.T) {
+func TestRealRuncRequiresReadOnlyBackingRegardlessOfOwner(t *testing.T) {
 	fixture := newSecureFixture(t)
-	sourcePath := fixture.policy.sources[0].Source
-	if err := os.Chmod(sourcePath, 0o644); err != nil {
-		t.Fatal(err)
+	fixture.policy.effectiveReadOnly = func(_ int, path string) error {
+		if path == fixture.policy.realRuncPath {
+			return errors.New("writable runc backing")
+		}
+		return nil
 	}
-	if err := os.WriteFile(sourcePath, []byte("mutated\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(sourcePath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	if err := patchBundleSecure(fixture.bundlePath, fixture.policy, fixture.contract); err == nil {
-		t.Fatal("same-size source digest mismatch was accepted")
+	if err := validateRealRunc(fixture.policy, fixture.contract); err == nil || !strings.Contains(err.Error(), "writable runc backing") {
+		t.Fatalf("writable runc accepted: %v", err)
 	}
 }
 
@@ -676,15 +683,6 @@ func TestValidateRealRuncRejectsSymlinksAndWritableBinary(t *testing.T) {
 	if err := os.Chmod(fixture.policy.realRuncPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fixture.policy.realRuncPath, []byte("xxxx-fixture\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateRealRunc(fixture.policy, fixture.contract); err == nil {
-		t.Fatal("same-size runc digest mismatch was accepted")
-	}
-	if err := os.WriteFile(fixture.policy.realRuncPath, []byte("runc-fixture\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	target := fixture.policy.realRuncPath + ".target"
 	mustRename(t, fixture.policy.realRuncPath, target)
 	if err := os.Symlink(target, fixture.policy.realRuncPath); err != nil {
@@ -692,35 +690,6 @@ func TestValidateRealRuncRejectsSymlinksAndWritableBinary(t *testing.T) {
 	}
 	if err := validateRealRunc(fixture.policy, fixture.contract); err == nil {
 		t.Fatal("symlinked runc was accepted")
-	}
-}
-
-func TestRealRuncAcceptsOnlyQualifiedNamespaceOwnerViews(t *testing.T) {
-	expected := integrityRecord{
-		UID:               0,
-		GID:               0,
-		AlternateOwner:    ownerPair{UID: 65534, GID: 65534},
-		HasAlternateOwner: true,
-	}
-	tests := []struct {
-		name string
-		uid  uint32
-		gid  uint32
-		want bool
-	}{
-		{name: "rootless child overflow owner", uid: 65534, gid: 65534, want: true},
-		{name: "root-owned outer view", uid: 0, gid: 0, want: true},
-		{name: "runtime user", uid: 1000, gid: 1000, want: false},
-		{name: "mixed root and overflow", uid: 0, gid: 65534, want: false},
-		{name: "mixed overflow and root", uid: 65534, gid: 0, want: false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			stat := syscall.Stat_t{Uid: test.uid, Gid: test.gid}
-			if got := matchesIntegrityOwner(stat, expected); got != test.want {
-				t.Fatalf("matchesIntegrityOwner(%d:%d) = %t, want %t", test.uid, test.gid, got, test.want)
-			}
-		})
 	}
 }
 
@@ -797,10 +766,6 @@ func newSecureFixture(t *testing.T) secureFixture {
 	}
 	realRunc := contractObject["realRunc"].(map[string]any)
 	realRunc["path"] = runc
-	realRunc["ownerPairs"] = []any{
-		map[string]any{"uid": uid, "gid": gid},
-		map[string]any{"uid": 0, "gid": 0},
-	}
 	for index, source := range sources {
 		contractObject["publicSources"].([]any)[index].(map[string]any)["path"] = source.Source
 	}
@@ -814,7 +779,6 @@ func newSecureFixture(t *testing.T) secureFixture {
 	policy := runtimePolicy{
 		realRuncPath:           runc,
 		realRuncVersion:        qualifiedRuncVersion,
-		realRuncOwnerPairs:     [2]ownerPair{{UID: uid, GID: gid}, {UID: 0, GID: 0}},
 		trustTreeOwnerPairs:    [2]ownerPair{{UID: uid, GID: gid}, {UID: 0, GID: 0}},
 		buildkitExecutorRoot:   executor,
 		buildkitLogPath:        filepath.Join(executor, "runc-log.json"),

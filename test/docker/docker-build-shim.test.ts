@@ -48,7 +48,13 @@ describe('Docker package-build staging contract', () => {
     expect(() => getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL)).toThrow(
       /explicit registry proxy URL/u,
     );
-    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL);
+    expect(() =>
+      getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL),
+    ).toThrow(/explicit private Docker endpoint/u);
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL, {
+      architecture: 'arm64',
+      dockerHost: PRIVATE_DOCKER_HOST,
+    });
     expect(contract).toBeDefined();
     expect(contract!.preflight).toEqual({
       executable: 'docker',
@@ -70,13 +76,8 @@ describe('Docker package-build staging contract', () => {
     );
     expect(contract!.buildTrustPreflight.trustContract.parentDirectory).toEqual({
       path: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
-      uid: 0,
-      gid: 0,
       mode: 0o755,
-      ownerPairs: [
-        { uid: 0, gid: 0 },
-        { uid: 65534, gid: 65534 },
-      ],
+      requiresEffectiveReadOnly: true,
     });
     expect(contract!.buildTrustPreflight.trustContract).not.toHaveProperty('ownerPairs');
     expect(contract!.buildTrustPreflight.trustContract.requiresEffectiveReadOnly).toBe(true);
@@ -84,8 +85,11 @@ describe('Docker package-build staging contract', () => {
 
   it('requires the immutable trust parent to be precreated only by the selected image', () => {
     const dockerfile = readFileSync('docker/Dockerfile.base.arm64', 'utf8');
-    expect(dockerfile).toContain('install -d -o root -g root -m 0755 /opt/ironcurtain-build-trust');
-    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
+    expect(dockerfile).toContain('install -d -o root -g root -m 0755 /ironcurtain-build-trust');
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL, {
+      architecture: 'arm64',
+      dockerHost: PRIVATE_DOCKER_HOST,
+    })!;
     expect(contract.writableDirectories.map(({ path }) => path)).not.toContain(DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY);
   });
 
@@ -94,6 +98,7 @@ describe('Docker package-build staging contract', () => {
       'packages',
       DESKTOP_PACKAGE_PROXY_URL,
       DESKTOP_REGISTRY_PROXY_URL,
+      { architecture: 'amd64', dockerHost: 'unix:///run/ironcurtain-docker/docker/docker.sock' },
     )!;
     expect(DOCKER_DESKTOP_SIDECAR_API_ROOT).toBe(PRIVATE_DOCKER_API_DIR);
     expect(DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY).not.toBe(PRIVATE_DOCKER_API_DIR);
@@ -153,6 +158,14 @@ describe('Docker package-build staging contract', () => {
     ).toThrow(/must be distinct/u);
   });
 
+  it.each([
+    'tcp://localhost:2375',
+    'unix:///run/ironcurtain-docker/../docker.sock',
+    'unix:///run/ironcurtain-docker/$(id)/docker.sock',
+  ])('rejects a noncanonical private Docker endpoint %j', (dockerHost) => {
+    expect(() => renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL, dockerHost)).toThrow(/private Docker socket/u);
+  });
+
   it('preserves the historical Apple proxy output when passed its loopback URL', () => {
     const content = renderDockerBuildProxyConfig(APPLE_PACKAGE_PROXY_URL);
     expect(JSON.parse(content)).toEqual({
@@ -184,6 +197,16 @@ describe('executable Docker package-build shim', () => {
   let capturedProxyEnvPath: string;
   let buildxStatePath: string;
 
+  function writeExecutableShim(dockerHost = PRIVATE_DOCKER_HOST): void {
+    const executableShim = renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL, dockerHost)
+      .replace(`REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}`, `REAL_DOCKER=${JSON.stringify(fakeDockerPath)}`)
+      .replace(
+        `BUILDX_STATE_DIR=${DOCKER_BUILDX_STATE_DIRECTORY}`,
+        `BUILDX_STATE_DIR=${JSON.stringify(buildxStatePath)}`,
+      );
+    writeFileSync(shimPath, executableShim, { mode: 0o755 });
+  }
+
   beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), 'ironcurtain-docker-build-shim-'));
     shimPath = join(directory, 'docker');
@@ -194,13 +217,7 @@ describe('executable Docker package-build shim', () => {
     buildxStatePath = join(directory, 'buildx-state');
     mkdirSync(buildxStatePath, { mode: 0o700 });
 
-    const executableShim = renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL)
-      .replace(`REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}`, `REAL_DOCKER=${JSON.stringify(fakeDockerPath)}`)
-      .replace(
-        `BUILDX_STATE_DIR=${DOCKER_BUILDX_STATE_DIRECTORY}`,
-        `BUILDX_STATE_DIR=${JSON.stringify(buildxStatePath)}`,
-      );
-    writeFileSync(shimPath, executableShim, { mode: 0o755 });
+    writeExecutableShim();
     writeFileSync(
       fakeDockerPath,
       `#!/bin/bash
@@ -289,6 +306,17 @@ exit "\${FAKE_EXIT_STATUS:-0}"
     expect(capturedEnv?.[0]).toBe(DOCKER_BUILD_PROXY_CONFIG_DIRECTORY);
     expect(capturedEnv?.[1]).toBe(buildxStatePath);
     expect(capturedEnv?.[2]).toBe(PRIVATE_DOCKER_HOST);
+  });
+
+  it('uses the admitted sidecar socket for builds and rejects the other topology socket', () => {
+    const dockerHost = 'unix:///run/ironcurtain-docker/docker/docker.sock';
+    writeExecutableShim(dockerHost);
+    const { result, capturedEnv } = run(['--host', dockerHost, 'build', '.'], { env: { DOCKER_HOST: dockerHost } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(capturedEnv?.[2]).toBe(dockerHost);
+    const rejected = run(['--host', PRIVATE_DOCKER_HOST, 'build', '.']);
+    expect(rejected.result.status).toBe(64);
+    expect(rejected.result.stderr).toContain(`--host must be ${dockerHost}`);
   });
 
   it('allows documented global options and the exact private daemon host', () => {

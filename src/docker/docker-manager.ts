@@ -1,3 +1,10 @@
+import {
+  DOCKER_ENDPOINT_ENVIRONMENT_KEYS,
+  bindDockerEndpointExec,
+  dockerEndpointEnvironment,
+  dockerEndpointSchema,
+  type DockerEndpoint,
+} from './docker-endpoint.js';
 /**
  * Docker CLI wrapper implementing the ContainerRuntime interface.
  *
@@ -27,7 +34,7 @@ import { parseDockerImageInfo } from './docker-image-inspect.js';
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from './docker-probe.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
-import { spawnWithIdleTimeout, type SpawnFn } from './spawn-with-idle-timeout.js';
+import { spawnWithIdleTimeout, type SpawnFn, type SpawnWithIdleTimeoutOptions } from './spawn-with-idle-timeout.js';
 import {
   createDockerProgressSink,
   type CreateDockerProgressSinkOptions,
@@ -238,7 +245,7 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   args.push('--init');
 
   // Custom host mappings override the default host-gateway mapping
-  if (config.extraHosts && config.extraHosts.length > 0) {
+  if (config.extraHosts !== undefined) {
     for (const entry of config.extraHosts) {
       args.push(`--add-host=${entry}`);
     }
@@ -366,6 +373,7 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
 
 /** Test seams for the streaming spawn path used by pull/build. */
 export interface CreateDockerManagerOptions {
+  endpoint?: DockerEndpoint;
   spawn?: SpawnFn;
   stdoutSink?: NodeJS.WritableStream;
   stderrSink?: NodeJS.WritableStream;
@@ -399,6 +407,7 @@ export function makeRunStreamed(
   args: readonly string[];
   idleTimeoutMs: number;
   env?: NodeJS.ProcessEnv;
+  envMode?: SpawnWithIdleTimeoutOptions['envMode'];
 }) => Promise<void> {
   return async (params) => {
     const hasInjectedSinks = streamOpts.stdoutSink !== undefined && streamOpts.stderrSink !== undefined;
@@ -410,6 +419,7 @@ export function makeRunStreamed(
         idleTimeoutMs: params.idleTimeoutMs,
         operation: params.operation,
         env: params.env,
+        envMode: params.envMode,
         spawn: streamOpts.spawn,
         stdoutSink: streamOpts.stdoutSink ?? progress?.stdout,
         stderrSink: streamOpts.stderrSink ?? progress?.stderr,
@@ -425,23 +435,42 @@ export function makeRunStreamed(
 
 export function createDockerManager(
   execFileFn?: ExecFileFn,
-  dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
+  dockerAvailabilityProbe?: () => Promise<DockerAvailability>,
   spawnOpts?: CreateDockerManagerOptions,
 ): ContainerRuntime {
-  const exec = execFileFn ?? defaultExecFile;
+  const endpoint =
+    spawnOpts?.endpoint === undefined ? undefined : Object.freeze(dockerEndpointSchema.parse(spawnOpts.endpoint));
+  const exec =
+    endpoint === undefined
+      ? (execFileFn ?? defaultExecFile)
+      : bindDockerEndpointExec(endpoint, execFileFn ?? defaultExecFile);
+  const availabilityProbe =
+    dockerAvailabilityProbe ?? (endpoint === undefined ? checkDockerAvailable : () => checkDockerAvailable(exec));
   const streamOpts = {
     spawn: spawnOpts?.spawn,
     stdoutSink: spawnOpts?.stdoutSink,
     stderrSink: spawnOpts?.stderrSink,
   };
   const progressSinkFactory = spawnOpts?.progressSinkFactory ?? createDockerProgressSink;
-  const runStreamed = makeRunStreamed('docker', streamOpts, progressSinkFactory);
+  const stream = makeRunStreamed('docker', streamOpts, progressSinkFactory);
+  const runStreamed: typeof stream = (params) =>
+    stream(
+      endpoint === undefined
+        ? params
+        : {
+            ...params,
+            args: ['--host', endpoint.host, ...params.args],
+            env: dockerEndpointEnvironment(endpoint, { ...process.env, ...params.env }),
+            envMode: 'replace',
+          },
+    );
 
   return {
     supportsImageSnapshots: true,
+    ...(endpoint === undefined ? {} : { dockerEndpoint: endpoint }),
 
     async preflight(image: string): Promise<void> {
-      const status = await dockerAvailabilityProbe();
+      const status = await availabilityProbe();
       if (!status.available) {
         throw new Error(`Docker is not available. ${status.detailedMessage}`);
       }
@@ -509,6 +538,16 @@ export function createDockerManager(
       const userArgs = resolvedUser === null ? [] : (['--user', resolvedUser] as const);
       const workdirArgs = workdir === undefined ? [] : (['--workdir', workdir] as const);
       const environmentArgs = buildContainerExecEnvironmentArgs(environment);
+      // Routing and platform settings belong to the inner exec too. The host CLI
+      // uses its captured endpoint; pass these non-secret settings as
+      // explicit container values so endpoint sanitization cannot alter them.
+      if (endpoint !== undefined && environment !== undefined) {
+        for (const key of DOCKER_ENDPOINT_ENVIRONMENT_KEYS) {
+          if (!Object.hasOwn(environment, key)) continue;
+          const index = environmentArgs.indexOf(key);
+          if (index !== -1) environmentArgs[index] = `${key}=${environment[key]}`;
+        }
+      }
       try {
         const { stdout, stderr } = await exec(
           'docker',
@@ -711,17 +750,29 @@ export function createDockerManager(
       dockerfilePath: string,
       contextDir: string,
       labels?: Record<string, string>,
+      buildArgs?: Readonly<Record<string, string>>,
     ): Promise<void> {
       // `--progress=plain` plus BuildKit gives line-oriented streamed output,
       // which (a) makes the user-visible "what's happening" question
       // answerable and (b) provides the per-step heartbeat the idle-timeout
       // watchdog needs to distinguish a quiet RUN from a hung builder.
-      const args = ['build', '--progress=plain', '-t', tag, '-f', dockerfilePath];
+      // The default builder uses the captured Docker endpoint. A caller's
+      // BUILDX_BUILDER must not send these images to a different builder.
+      const args = [
+        'build',
+        ...(endpoint === undefined ? [] : ['--builder', 'default']),
+        '--progress=plain',
+        '-t',
+        tag,
+        '-f',
+        dockerfilePath,
+      ];
       if (labels) {
         for (const [key, value] of Object.entries(labels)) {
           args.push('--label', `${key}=${value}`);
         }
       }
+      for (const [key, value] of Object.entries(buildArgs ?? {})) args.push('--build-arg', `${key}=${value}`);
       args.push(contextDir);
       await runStreamed({
         operation: 'docker build',

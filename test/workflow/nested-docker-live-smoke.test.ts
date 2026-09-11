@@ -6,9 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
 import {
   APPLE_VM_DAEMON_DOCKER_HOST,
-  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
   APPLE_VM_PACKAGE_EGRESS_SOCKET,
-  APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
   APPLE_VM_REGISTRY_EGRESS_SOCKET,
 } from '../../src/docker-workload/apple-vm-daemon.js';
 import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../../src/docker-workload/apple-private-docker.js';
@@ -22,9 +20,7 @@ import {
   DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
   DOCKER_BUILD_TRUST_CONTRACT_PATH,
   DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
-  DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
-  DOCKER_BUILD_TRUST_WRAPPER_SHA256,
   DOCKER_BUILDX_STATE_DIRECTORY,
   DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY,
 } from '../../src/docker/docker-build-shim.js';
@@ -38,11 +34,18 @@ import type { WorkflowId } from '../../src/workflow/types.js';
 import {
   assertExactWorkflowCheckInventory,
   validatePackageBuildMounts,
+  validateWorkflowAgentApiMount,
   validatePackageEgressAudit,
   withSecondaryErrors,
   type PersistedOuterMount,
 } from '../../scripts/smoke-nested-apple-workflow.js';
 import { createDeps, waitForCompletion } from './test-helpers.js';
+import {
+  WORKFLOW_STATE_TIMEOUT_MS,
+  WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS,
+  WORKFLOW_CHILD_TIMEOUT_MS,
+  WORKFLOW_CLEANUP_TIMEOUT_MS,
+} from '../../scripts/workflow-smoke-timeouts.js';
 
 const WORKFLOW_ROOT = resolve(process.cwd(), 'src', 'workflow', 'workflows', 'nested-docker-live-smoke');
 const PROBE_PATH = resolve(WORKFLOW_ROOT, 'scripts', 'nested_docker_probe.py');
@@ -151,76 +154,74 @@ describe('nested-docker-live-smoke workflow', () => {
     expect(existsSync(resolve(workspace, '.workflow', 'nested-docker-result.json'))).toBe(true);
   });
 
-  it('pins the probe to every production package artifact and relay', () => {
+  it('uses the production package artifact paths and explicit relay contracts', () => {
     const probe = readFileSync(PROBE_PATH, 'utf8');
     for (const value of [
       APPLE_VM_DAEMON_DOCKER_HOST,
       APPLE_VM_DOCKER_WORKLOAD_NETWORK,
       APPLE_VM_REGISTRY_EGRESS_SOCKET,
       APPLE_VM_PACKAGE_EGRESS_SOCKET,
-      APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
-      APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
       DOCKER_BUILD_SHIM_PATH,
       DOCKER_BUILD_TRUST_WRAPPER_PATH,
       DOCKER_BUILD_PROXY_CONFIG_PATH,
       DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
       DOCKER_BUILD_TRUST_CONTRACT_PATH,
       DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
-      DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
       DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
       DOCKER_BUILD_TRUST_CA_CERT_PATH,
       DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
       DOCKER_BUILDX_STATE_DIRECTORY,
-      DOCKER_BUILD_TRUST_WRAPPER_SHA256,
     ]) {
       expect(probe).toContain(value);
     }
     expect(probe).toContain('contract.get("caGeneration", "")');
-    expect(probe).toContain('contract_parent_stat.st_uid == 0');
-    expect(probe).toContain('contract_parent_stat.st_gid == 0');
+    expect(probe).toContain('0 <= contract_parent_stat.st_uid <= 0xFFFFFFFF');
+    expect(probe).toContain('0 <= contract_parent_stat.st_gid <= 0xFFFFFFFF');
     expect(probe).toContain('stat.S_IMODE(contract_parent_stat.st_mode) == 0o755');
     expect(probe).toContain('0 <= contract_stat.st_uid <= 0xFFFFFFFF');
     expect(probe).toContain('0 <= contract_stat.st_gid <= 0xFFFFFFFF');
     expect(probe).toContain('contract_stat.st_nlink == 1');
     expect(probe).toContain('filesystem.f_flag & os.ST_RDONLY');
-    expect(probe).toContain('[{"uid": 0, "gid": 0}, {"uid": 65534, "gid": 65534}]');
-    expect(probe).toContain('{"path", "destination", "sha256", "size", "mode"}');
-    expect(probe).toContain('mode not in MODE_CHECK_IDS');
+    expect(probe).toContain('real_runc.get("requiresEffectiveReadOnly") is True');
+    expect(probe).toContain('{"path", "destination", "size", "mode"}');
     expect(probe).not.toContain('"public"');
   });
 
-  it('ships hash/version-pinned npm, PyPI, apt, and Cargo fixtures', () => {
+  it('ships version-locked portable npm, PyPI, apt, and Cargo fixtures', () => {
     const dockerfile = readFileSync(resolve(FIXTURE_ROOT, 'Dockerfile'), 'utf8');
-    const lockfile = JSON.parse(readFileSync(resolve(FIXTURE_ROOT, 'package-lock.json'), 'utf8')) as {
-      packages: Record<string, { version?: string; integrity?: string }>;
-    };
+    const packageManifest = readFileSync(resolve(FIXTURE_ROOT, 'package.json'), 'utf8');
     const requirements = readFileSync(resolve(FIXTURE_ROOT, 'requirements.txt'), 'utf8');
-    const cargoLock = readFileSync(resolve(FIXTURE_ROOT, 'cargo', 'Cargo.lock'), 'utf8');
+    const cargoManifest = readFileSync(resolve(FIXTURE_ROOT, 'cargo', 'Cargo.toml'), 'utf8');
     const verify = readFileSync(resolve(FIXTURE_ROOT, 'verify.mjs'), 'utf8');
 
     expect(dockerfile).toContain('FROM node:22-bookworm-slim');
     expect(dockerfile).toContain('FROM python:3.13-slim-bookworm');
     expect(dockerfile).toContain('FROM rust:1.85-slim-bookworm');
+    expect(dockerfile).toContain('ARG IRONCURTAIN_ARCHITECTURE');
+    expect(dockerfile).toContain('ARG TARGETARCH');
+    expect(dockerfile).toContain('test "$TARGETARCH" = "$IRONCURTAIN_ARCHITECTURE"');
+    expect(dockerfile).toContain('test "$(dpkg --print-architecture)" = "$IRONCURTAIN_ARCHITECTURE"');
     expect(dockerfile).toContain('apt-get download curl=7.88.1-10+deb12u15');
-    expect(dockerfile).toContain('880d20cb636d2c36b2f57c58ab284b442a1680365b488d3e696c147c4d84ef25');
-    expect(dockerfile).toContain('apt-get install -y --no-install-recommends ./curl_7.88.1-10+deb12u15_arm64.deb');
-    expect(dockerfile).toContain('npm ci --ignore-scripts --no-audit --no-fund');
-    expect(dockerfile).toContain('python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes');
-    expect(dockerfile).toContain('cargo build --locked --release');
+    expect(dockerfile).toContain('curl_7.88.1-10+deb12u15_${IRONCURTAIN_ARCHITECTURE}.deb');
+    expect(dockerfile).not.toContain('sha256sum');
+    expect(dockerfile).not.toContain('_arm64.deb');
+    expect(dockerfile).not.toContain('_amd64.deb');
+    expect(dockerfile).toContain('npm install --package-lock=false --ignore-scripts --no-audit --no-fund');
+    expect(dockerfile).toContain('python -m pip install --disable-pip-version-check --no-cache-dir --target');
+    expect(dockerfile).not.toContain('--require-hashes');
+    expect(dockerfile).toContain('cargo build --release');
     expect(dockerfile).not.toContain('example.com/');
     const compose = readFileSync(resolve(FIXTURE_ROOT, 'compose.yaml'), 'utf8');
     expect(compose).toContain('develop:');
     expect(compose).toContain('action: rebuild');
-    expect(lockfile.packages['node_modules/is-number']).toEqual(
-      expect.objectContaining({
-        version: '7.0.0',
-        integrity: 'sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==',
-      }),
-    );
-    expect(requirements).toContain(
-      'idna==3.15 --hash=sha256:048adeaf8c2d788c40fee287673ccaa74c24ffd8dcf09ffa555a2fbb59f10ac8',
-    );
-    expect(cargoLock).toContain('checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"');
+    expect(packageManifest).toContain('"is-number": "7.0.0"');
+    expect(requirements).toBe('idna==3.15\n');
+    expect(cargoManifest).toContain('itoa = "=1.0.15"');
+    expect(existsSync(resolve(FIXTURE_ROOT, 'package-lock.json'))).toBe(false);
+    expect(existsSync(resolve(FIXTURE_ROOT, 'cargo', 'Cargo.lock'))).toBe(false);
+    expect(packageManifest).not.toMatch(/integrity|sha(?:256|512)/u);
+    expect(requirements).not.toContain('--hash=');
+    expect(cargoManifest).not.toContain('checksum');
     expect(verify).toContain("result.aptCurlVersion !== '7.88.1-10+deb12u15'");
     expect(verify).toContain("cargoOutput: execFileSync('/usr/local/bin/ironcurtain-cargo-smoke'");
   });
@@ -306,6 +307,129 @@ for mode in ("packages", "images", "offline", "admission"):
     expect(probeSource.indexOf('probe.validate_relay_topology(selected_image_id)')).toBeLessThan(
       probeSource.indexOf('probe.validate_packages()'),
     );
+  });
+
+  it('accepts an explicit sidecar fixture descriptor without changing legacy mode selection', () => {
+    runProbeAssertion(String.raw`
+import json, runpy, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+parse = module["parse_smoke_task"]
+for mode in ("packages", "images", "offline", "admission"):
+    assert parse(mode) == (mode, None)
+descriptor = {"schemaVersion": 1, "mode": "offline", "placement": "sidecar", "fixtureArchive": ".workflow-fixtures/python.tar", "fixtureImage": "localhost/fixture:test", "uid": 1500, "gid": 100}
+mode, settings = parse(json.dumps(descriptor))
+assert mode == "offline" and settings.uid == 1500 and settings.gid == 100
+for change in ({"schemaVersion": 2}, {"mode": "public"}, {"mode": []}, {"placement": "native"}, {"uid": 0}, {"uid": True}, {"fixtureArchive": "../outside.tar"}, {"fixtureImage": "--unsafe"}, {"extra": True}):
+    try:
+        parse(json.dumps({**descriptor, **change}))
+    except module["ProbeFailure"]:
+        pass
+    else:
+        raise AssertionError(change)
+`);
+  });
+
+  it('reuses the admitted architecture for authoritative and cached fixture builds', () => {
+    runProbeAssertion(String.raw`
+import runpy, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+probe = module["Probe"]("packages")
+probe.nonce = "a" * 32
+try:
+    probe._package_fixture_build_args("fixture:test", no_cache=True)
+except module["ProbeFailure"] as error:
+    assert str(error) == "package build uses the admitted daemon architecture"
+else:
+    raise AssertionError("package build accepted a missing admitted architecture")
+probe.daemon_architecture = "amd64"
+authoritative = probe._package_fixture_build_args("fixture:authoritative", no_cache=True)
+cached = probe._package_fixture_build_args("fixture:cached", no_cache=False)
+expected_common = (
+    "--progress=plain", "--build-arg", "IRONCURTAIN_NONCE=" + probe.nonce,
+    "--build-arg", "IRONCURTAIN_ARCHITECTURE=amd64",
+)
+assert authoritative[:3] == ("build", "--pull=false", "--no-cache")
+assert cached[:2] == ("build", "--pull=false") and "--no-cache" not in cached
+assert all(value in authoritative and value in cached for value in expected_common)
+assert authoritative[-3:] == ("--tag", "fixture:authoritative", str(module["FIXTURE_DIR"]))
+assert cached[-3:] == ("--tag", "fixture:cached", str(module["FIXTURE_DIR"]))
+`);
+  });
+
+  it('keeps cold sibling-container startup within the original finite retry budget', () => {
+    runProbeAssertion(String.raw`
+import runpy, subprocess, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+probe = module["Probe"]("packages")
+container_id = "a" * 64
+calls = []
+probe_attempts = 0
+def docker(*args, **kwargs):
+    global probe_attempts
+    calls.append((args, kwargs))
+    if args[:3] == ("container", "run", "--detach"):
+        return subprocess.CompletedProcess(args, 0, container_id + "\n", "")
+    probe_attempts += 1
+    if probe_attempts == 1:
+        raise module["ProbeFailure"]("command timed out after 30s")
+    return subprocess.CompletedProcess(args, 0, probe.nonce, "")
+probe.docker = docker
+probe._validate_sibling_dns("sha256:" + "b" * 64)
+probe_args, probe_kwargs = calls[1]
+assert str(module["PACKAGE_SIBLING_CURL_TIMEOUT_SECONDS"]) in probe_args
+assert probe_kwargs == {
+    "expect_success": None,
+    "timeout": module["PACKAGE_SIBLING_PROCESS_TIMEOUT_SECONDS"],
+}
+assert module["PACKAGE_SIBLING_PROBE_ATTEMPTS"] * module["PACKAGE_SIBLING_PROCESS_TIMEOUT_SECONDS"] == 150
+assert probe_attempts == 2
+assert probe.checks == ["packages.sibling-network"]
+`);
+  });
+
+  it('requires a fresh empty sidecar before loading only the declared workflow fixture', () => {
+    runProbeAssertion(String.raw`
+import json, os, runpy, subprocess, sys, tempfile
+from pathlib import Path
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+Probe = module["Probe"]
+settings = module["SidecarSmokeSettings"](".workflow-fixtures/python.tar", "localhost/fixture:test", os.getuid(), os.getgid())
+fixture_id = "sha256:" + "a" * 64
+os.environ["DOCKER_HOST"] = "unix:///run/ironcurtain-docker/docker/docker.sock"
+os.environ["IRONCURTAIN_DOCKER_NETWORK"] = "ironcurtain"
+with tempfile.TemporaryDirectory() as root:
+    workspace = Path(root)
+    archive = workspace / settings.fixture_archive
+    archive.parent.mkdir()
+    archive.write_bytes(b"fixture archive")
+    Probe.validate_common.__globals__["WORKSPACE"] = workspace
+    for preexisting in (False, True):
+        probe = Probe("offline", settings)
+        probe.run = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "0\n", "")
+        inventories = iter(([fixture_id],) if preexisting else ([], [fixture_id]))
+        probe._all_image_ids = lambda: next(inventories)
+        loads = []
+        def docker(*args, **kwargs):
+            if args == ("version", "--format", "{{.Server.Version}}"): output = "29.2.1"
+            elif args == ("version", "--format", "{{.Server.Arch}}"): output = "amd64"
+            elif args[0] == "info": output = json.dumps({"ID": "private", "Driver": "vfs", "DockerRootDir": str(module["DAEMON_DATA_ROOT"]), "Architecture": "amd64", "SecurityOptions": ["name=rootless"]})
+            elif args[:2] == ("network", "inspect"): output = json.dumps([{"Name": "ironcurtain", "Driver": "bridge", "Internal": True, "Containers": {}}])
+            elif args[:2] == ("container", "ls"): output = ""
+            elif args[:2] == ("image", "load"): loads.append(args); output = "loaded"
+            elif args[:2] == ("image", "inspect"): output = fixture_id
+            else: raise AssertionError(args)
+            return subprocess.CompletedProcess(args, 0, output, "")
+        probe.docker = docker
+        if preexisting:
+            try: probe.validate_common()
+            except module["ProbeFailure"]: pass
+            else: raise AssertionError("inherited image accepted")
+            assert loads == []
+        else:
+            assert probe.validate_common() == fixture_id
+            assert loads == [("image", "load", "--input", str(archive))]
+            assert probe.initial_image_ids == (fixture_id,)
+`);
   });
 
   it('rejects wrong relay status or marker and requires refusal for expected absence', () => {
@@ -1087,7 +1211,6 @@ else:
 
   it('budgets aggregate package work and cleanup below finite state and child deadlines', () => {
     const workflow = readFileSync(resolve(WORKFLOW_ROOT, 'workflow.yaml'), 'utf8');
-    const runner = readFileSync(RUNNER_PATH, 'utf8');
     const workflowTimeout = Number(/timeoutMs:\s*(\d+)/u.exec(workflow)?.[1]);
     expect(workflowTimeout).toBe(72 * 60_000);
     runProbeAssertion(String.raw`
@@ -1107,12 +1230,10 @@ critical = (
 assert critical == module["PACKAGE_CRITICAL_OPERATION_BUDGET_SECONDS"] == 2650
 assert (critical + module["PACKAGE_WORKFLOW_RESERVE_SECONDS"]) * 1000 <= ${workflowTimeout}
 `);
-    expect(runner).toContain('const WORKFLOW_STATE_TIMEOUT_MS = 72 * 60_000;');
-    expect(runner).toContain('const WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS = 20 * 60_000;');
-    expect(runner).toContain(
-      'const CHILD_TIMEOUT_MS = WORKFLOW_STATE_TIMEOUT_MS + WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS;',
-    );
-    expect(runner).toContain('const CLEANUP_TIMEOUT_MS = 10 * 60_000;');
+    expect(WORKFLOW_STATE_TIMEOUT_MS).toBe(workflowTimeout);
+    expect(WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS).toBe(20 * 60_000);
+    expect(WORKFLOW_CHILD_TIMEOUT_MS).toBe(WORKFLOW_STATE_TIMEOUT_MS + WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS);
+    expect(WORKFLOW_CLEANUP_TIMEOUT_MS).toBe(10 * 60_000);
   });
 
   it('routes all supported forms through trust checks and loads Buildx output', () => {
@@ -1134,16 +1255,48 @@ with tempfile.TemporaryDirectory() as directory:
         return context
     probe._write_generated_context = write_generated
     probe._write_form_context.__globals__["FIXTURE_DIR"] = Path(sys.argv[1]).parent / "fixtures" / "package-build"
+    probe.package_endpoint = ("172.22.163.67", 18082)
     context = probe._write_form_context("buildx-build", "local-authoritative:latest")
     dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.startswith("FROM local-authoritative:latest\n")
-    assert module["form_check_run_command"]() in dockerfile
+    assert module["form_check_run_command"](probe.package_endpoint) in dockerfile
+    assert module["form_check_run_command"](("127.0.0.1", 18082)) not in dockerfile
     assert sorted(path.name for path in context.iterdir()) == ["Dockerfile"]
     assert "/dev/ironcurtain" not in dockerfile
     assert "HTTP_PROXY" not in dockerfile
+    assert "172.22.163.67" not in dockerfile
+    for endpoint in (("packages.invalid", 18082), ("127.0.0.1;exit 0", 18082), ("::1", 18082), ("127.0.0.1", 0), ("127.0.0.1", 65536), ("127.0.0.1", True)):
+        try:
+            module["form_check_run_command"](endpoint)
+        except module["ProbeFailure"]:
+            pass
+        else:
+            raise AssertionError(endpoint)
     command = json.loads(next(line.removeprefix("CMD ") for line in dockerfile.splitlines() if line.startswith("CMD ")))
     marker = subprocess.run(command, check=True, capture_output=True, text=True)
     assert json.loads(marker.stdout) == {"form": "buildx-build"}
+`);
+  });
+
+  it('requires exactly one package-proxy placeholder in the form-check fixture', () => {
+    runProbeAssertion(String.raw`
+import runpy, sys, tempfile
+from pathlib import Path
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+with tempfile.TemporaryDirectory() as directory:
+    fixture = Path(directory)
+    module["form_check_run_command"].__globals__["FIXTURE_DIR"] = fixture
+    for contents in (
+        "#!/bin/sh\ntrue\n",
+        "#!/bin/sh\n__IRONCURTAIN_EXPECTED_PACKAGE_PROXY__\n__IRONCURTAIN_EXPECTED_PACKAGE_PROXY__\n",
+    ):
+        (fixture / "form-check.sh").write_text(contents)
+        try:
+            module["form_check_run_command"](("127.0.0.1", 18082))
+        except module["ProbeFailure"] as error:
+            assert str(error) == "form-check fixture lacks one package-proxy placeholder"
+        else:
+            raise AssertionError(contents)
 `);
   });
 
@@ -1158,7 +1311,7 @@ empty_diff = "sha256:" + hashlib.sha256(empty).hexdigest()
 assert empty_diff == module["CANONICAL_EMPTY_LAYER_DIFF_ID"]
 assert empty_diff == "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
 
-step = "#17 [2/2] " + module["form_check_run_command"]() + "\n"
+step = "#17 [2/2] " + module["form_check_run_command"](("127.0.0.1", 18082)) + "\n"
 probe = module["Probe"]("packages")
 probe._assert_form_check_executed(
     subprocess.CompletedProcess([], 0, step + "#17 DONE 0.1s\n", ""),
@@ -1782,7 +1935,7 @@ def completed(args, stdout):
 def stable_docker(*args, **kwargs):
     calls.append((args, kwargs))
     if args == ("info", "--format", "{{json .}}"):
-        return completed(args, json.dumps({"ID": "daemon-id", "DockerRootDir": daemon_root, "Driver": "vfs", "SecurityOptions": list(security_options)}))
+        return completed(args, json.dumps({"ID": "daemon-id", "DockerRootDir": daemon_root, "Driver": "vfs", "Architecture": "arm64", "SecurityOptions": list(security_options)}))
     if args == ("container", "ls", "--all", "--quiet", "--no-trunc"):
         return completed(args, container_id + "\n")
     if args == ("container", "ls", "--quiet", "--no-trunc"):
@@ -1794,7 +1947,7 @@ def stable_docker(*args, **kwargs):
 probe = module["Probe"]("packages")
 probe.container_ids = [container_id]
 probe.initial_image_ids = (image_id,)
-probe.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", security_options)
+probe.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", "arm64", security_options)
 calls = []
 probe.docker = stable_docker
 invocations = []
@@ -1814,11 +1967,11 @@ assert all(kwargs == {"timeout": 30} for args, kwargs in calls if args[0] == "in
 drift = module["Probe"]("packages")
 drift.container_ids = [container_id]
 drift.initial_image_ids = (image_id,)
-drift.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", security_options)
+drift.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", "arm64", security_options)
 drift_calls = {"running": 0}
 def drifting_docker(*args, **kwargs):
     if args == ("info", "--format", "{{json .}}"):
-        return completed(args, json.dumps({"ID": "daemon-id", "DockerRootDir": daemon_root, "Driver": "vfs", "SecurityOptions": list(security_options)}))
+        return completed(args, json.dumps({"ID": "daemon-id", "DockerRootDir": daemon_root, "Driver": "vfs", "Architecture": "arm64", "SecurityOptions": list(security_options)}))
     if args == ("container", "ls", "--all", "--quiet", "--no-trunc"):
         return completed(args, container_id + "\n")
     if args == ("container", "ls", "--quiet", "--no-trunc"):
@@ -1841,7 +1994,7 @@ else:
 daemon_failure = module["Probe"]("packages")
 daemon_failure.container_ids = [container_id]
 daemon_failure.initial_image_ids = (image_id,)
-daemon_failure.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", security_options)
+daemon_failure.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", "arm64", security_options)
 info_calls = {"count": 0}
 def failing_daemon(*args, **kwargs):
     if args == ("info", "--format", "{{json .}}"):
@@ -1867,7 +2020,7 @@ for drift_kind, expected_prefix in (
     changed = module["Probe"]("packages")
     changed.container_ids = [container_id]
     changed.initial_image_ids = (image_id,)
-    changed.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", security_options)
+    changed.admitted_daemon_identity = ("daemon-id", daemon_root, "vfs", "arm64", security_options)
     observations = {"info": 0, "image": 0}
     def changed_docker(*args, **kwargs):
         if args == ("info", "--format", "{{json .}}"):
@@ -1881,7 +2034,7 @@ for drift_kind, expected_prefix in (
             observed_security = security_options
             if drift_kind == "security" and observations["info"] == 2:
                 observed_security = ("name=rootless", "name=apparmor")
-            return completed(args, json.dumps({"ID": daemon_id, "DockerRootDir": observed_root, "Driver": "vfs", "SecurityOptions": list(observed_security)}))
+            return completed(args, json.dumps({"ID": daemon_id, "DockerRootDir": observed_root, "Driver": "vfs", "Architecture": "arm64", "SecurityOptions": list(observed_security)}))
         if args == ("container", "ls", "--all", "--quiet", "--no-trunc"):
             return completed(args, container_id + "\n")
         if args == ("container", "ls", "--quiet", "--no-trunc"):
@@ -2132,6 +2285,7 @@ daemon_info = {
     "ID": "admitted-daemon-id",
     "DockerRootDir": str(module["DAEMON_DATA_ROOT"]),
     "Driver": "vfs",
+    "Architecture": "arm64",
     "SecurityOptions": security_options,
 }
 probe = module["Probe"]("packages")
@@ -2140,6 +2294,8 @@ def completed(args, stdout):
 def docker(*args, **_kwargs):
     if args == ("version", "--format", "{{.Server.Version}}"):
         return completed(args, "28.0.0\n")
+    if args == ("version", "--format", "{{.Server.Arch}}"):
+        return completed(args, "arm64\n")
     if args == ("info", "--format", "{{json .}}"):
         return completed(args, json.dumps(daemon_info))
     if args == ("network", "inspect", module["EXPECTED_NETWORK"]):
@@ -2158,11 +2314,12 @@ os.environ["IRONCURTAIN_DOCKER_NETWORK"] = module["EXPECTED_NETWORK"]
 assert probe.validate_common() == image_id
 assert probe.initial_image_ids == (image_id,)
 assert probe.admitted_daemon_identity == (
-    "admitted-daemon-id", str(module["DAEMON_DATA_ROOT"]), "vfs", tuple(security_options)
+    "admitted-daemon-id", str(module["DAEMON_DATA_ROOT"]), "vfs", "arm64", tuple(security_options)
 )
 
 for invalid in (
     {**daemon_info, "DockerRootDir": "/wrong-root"},
+    {**daemon_info, "Architecture": "ppc64le"},
     {**daemon_info, "SecurityOptions": ["name=seccomp,profile=builtin"]},
     {**daemon_info, "SecurityOptions": ["name=rootless", 7]},
 ):
@@ -2172,6 +2329,8 @@ for invalid in (
         assert str(error) == "nested Docker daemon identity is not exact"
     else:
         raise AssertionError(f"accepted invalid daemon identity: {invalid!r}")
+assert module["Probe"]._canonical_daemon_architecture("x86_64") == "amd64"
+assert module["Probe"]._canonical_daemon_architecture("aarch64") == "arm64"
 `);
   });
 
@@ -3350,8 +3509,8 @@ assert probe.checks == ["packages.compose-denial"]
     expect(probe).toMatch(
       /selected_reference\s*=\s*self\._selected_image_reference\(selected_image_id\)[\s\S]*?_validate_fixed_package_build_failure\(\s*selected_reference,\s*"offline\.package-build-denied"/u,
     );
-    expect(probe).toContain("writeFileSync('/tmp/ironcurtain-hermetic', 'hermetic-ok')");
-    expect(probe).toContain("readFileSync('/tmp/ironcurtain-hermetic','utf8')");
+    expect(probe).toContain('RUN printf hermetic-ok > /tmp/ironcurtain-hermetic');
+    expect(probe).toContain('"/bin/cat"');
     expect(probe).toMatch(/observed\s*==\s*\(\s*\(True,\) \* len\(package_paths\)/u);
   });
 
@@ -3513,6 +3672,20 @@ assert calls == []
     expect(runner).toContain('getBundleRuntimeRoot(bundleId)');
   });
 
+  it('validates the exact leased API volume before applying host bind path checks', () => {
+    const api = { source: 'ic-daemon-volume', target: '/run/ironcurtain-docker', readonly: true };
+    const workspace = { source: '/tmp/workspace', target: '/workspace', readonly: false };
+    expect(validateWorkflowAgentApiMount([workspace, api], 'ic-daemon-volume')).toEqual([workspace]);
+    for (const mounts of [
+      [workspace],
+      [workspace, { ...api, readonly: false }],
+      [workspace, { ...api, source: 'other-volume' }],
+      [workspace, api, { ...api, target: '/extra' }],
+    ]) {
+      expect(() => validateWorkflowAgentApiMount(mounts, 'ic-daemon-volume')).toThrow('exactly the leased');
+    }
+  });
+
   it('requires the exact public-only package-build mount allowlist in persisted outer-create evidence', () => {
     const home = '/private/tmp/ic-mount-proof/home';
     const runtimeRoot = `${home}/run/bundle123`;
@@ -3530,29 +3703,16 @@ assert calls == []
         target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
         readonly: true,
       },
-      { source: `${packageRoot}/runc`, target: '/usr/local/sbin/runc', readonly: true },
-      {
-        source: `${packageRoot}/build-trust-contract.json`,
-        target: '/opt/ironcurtain-build-trust/build-trust-contract.json',
-        readonly: true,
-      },
-      {
-        source: `${packageRoot}/ca-cert.pem`,
-        target: '/opt/ironcurtain-build-trust/ca-cert.pem',
-        readonly: true,
-      },
-      {
-        source: `${packageRoot}/ca-bundle.pem`,
-        target: '/opt/ironcurtain-build-trust/ca-bundle.pem',
-        readonly: true,
-      },
-      {
-        source: `${packageRoot}/apt.conf`,
-        target: '/opt/ironcurtain-build-trust/apt.conf',
-        readonly: true,
-      },
+      { source: packageRoot, target: '/ironcurtain-build-trust', readonly: true },
+      { source: `${packageRoot}/real-runc`, target: '/ironcurtain-real-runc', readonly: true },
     ];
     expect(() => validatePackageBuildMounts('packages', home, runtimeRoot, valid)).not.toThrow();
+    const sidecarAgent = valid.slice(0, 3);
+    expect(() => validatePackageBuildMounts('packages', home, runtimeRoot, sidecarAgent, 'wsl-desktop')).not.toThrow();
+    expect(() => validatePackageBuildMounts('packages', home, runtimeRoot, valid, 'wsl-desktop')).toThrow();
+    expect(() =>
+      validatePackageBuildMounts('packages', home, runtimeRoot, sidecarAgent.slice(0, 2), 'wsl-desktop'),
+    ).toThrow();
     expect(() =>
       validatePackageBuildMounts('packages', home, runtimeRoot, [
         ...valid,
@@ -3566,14 +3726,12 @@ assert calls == []
     expect(() => validatePackageBuildMounts('offline', home, runtimeRoot, [orientation])).not.toThrow();
 
     const mutations: PersistedOuterMount[][] = [
-      valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem' ? { ...mount, readonly: false } : mount,
-      ),
+      valid.map((mount) => (mount.target === '/ironcurtain-build-trust' ? { ...mount, readonly: false } : mount)),
       [
         ...valid,
         {
           source: `${packageRoot}/extra.pem`,
-          target: '/opt/ironcurtain-build-trust/extra.pem',
+          target: '/ironcurtain-build-trust/extra.pem',
           readonly: true,
         },
       ],
@@ -3590,30 +3748,20 @@ assert calls == []
       valid.map((mount) =>
         mount.target === '/usr/local/sbin/docker' ? { ...mount, source: `${packageRoot}/docker/` } : mount,
       ),
+      valid.map((mount) => (mount.target === '/ironcurtain-build-trust' ? { ...mount, target: '/opt' } : mount)),
+      valid.map((mount) => (mount.target === '/ironcurtain-build-trust' ? { ...mount, target: '/opt/' } : mount)),
+      valid.map((mount) => (mount.target === '/ironcurtain-build-trust' ? { ...mount, target: '/' } : mount)),
       valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem' ? { ...mount, target: '/opt' } : mount,
+        mount.target === '/ironcurtain-build-trust' ? { ...mount, target: '/ironcurtain-build-trust/' } : mount,
       ),
+      valid.map((mount) => (mount.target === '/ironcurtain-build-trust' ? { ...mount, target: '/opt/../tmp' } : mount)),
       valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem' ? { ...mount, target: '/opt/' } : mount,
-      ),
-      valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem' ? { ...mount, target: '/' } : mount,
-      ),
-      valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem'
-          ? { ...mount, target: '/opt/ironcurtain-build-trust/ca-cert.pem/' }
-          : mount,
-      ),
-      valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem' ? { ...mount, target: '/opt/../tmp' } : mount,
-      ),
-      valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem'
+        mount.target === '/ironcurtain-build-trust'
           ? { ...mount, target: '/opt//ironcurtain-build-trust/ca-cert.pem' }
           : mount,
       ),
       valid.map((mount) =>
-        mount.target === '/opt/ironcurtain-build-trust/ca-cert.pem'
+        mount.target === '/ironcurtain-build-trust'
           ? { ...mount, target: 'opt/ironcurtain-build-trust/ca-cert.pem' }
           : mount,
       ),
@@ -3664,7 +3812,7 @@ assert calls == []
     const runner = readFileSync(RUNNER_PATH, 'utf8');
     const runMode = runner.indexOf('async function runMode');
     const inventory = runner.indexOf('assertExactWorkflowCheckInventory(mode, result.payload)', runMode);
-    const evidence = runner.indexOf('const evidenceFailures: Error[] = []', runMode);
+    const evidence = runner.indexOf('const evidenceFailures: Error[] =', runMode);
     const leaseList = runner.indexOf('newLeasePaths = listLeasePaths(smokeHome)', evidence);
     expect(runMode).toBeGreaterThanOrEqual(0);
     expect(inventory).toBeGreaterThan(runMode);
@@ -3837,7 +3985,7 @@ function validPackageAuditRecords(sentinels: {
       reasonCode: 'debian-curated-epoch',
       ecosystem: 'debian',
       host: 'deb.debian.org',
-      path: '/debian-security/pool/updates/main/c/curl/curl_7.88.1-10%2bdeb12u15_arm64.deb',
+      path: '/debian-security/pool/updates/main/c/curl/curl_7.88.1-10%2bdeb12u15_amd64.deb',
       routeKind: 'artifact',
       package: { name: 'curl', version: '7.88.1-10+deb12u15' },
     }),

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +62,22 @@ func TestParseConfigAcceptsOnlyFrozenDockerDesktopHostAlias(t *testing.T) {
 	}
 }
 
+func TestParseConfigUnixTargetIsFixedAndExclusive(t *testing.T) {
+	base := []string{"--listen", "172.31.44.2:8443", "--allow-cidr", "172.31.44.0/24", "--proxy-authorization", testProxyAuthorization}
+	configuration, _, err := parseConfig(append(append([]string{}, base...), "--target-unix", fixedUnixTarget))
+	if err != nil || configuration.targetNetwork != "unix" || configuration.targetAddress != fixedUnixTarget {
+		t.Fatalf("unexpected Unix target configuration: %#v err=%v", configuration, err)
+	}
+	for _, target := range []string{"", "relative.sock", "@abstract", "/run/../run/ironcurtain-upstream.sock", "/run/arbitrary.sock"} {
+		if _, _, err := parseConfig(append(append([]string{}, base...), "--target-unix", target)); err == nil {
+			t.Fatalf("expected rejection of Unix target %q", target)
+		}
+	}
+	if _, _, err := parseConfig(append(base, "--target", "192.168.65.2:9443", "--target-unix", fixedUnixTarget)); err == nil {
+		t.Fatal("expected ambiguous upstream rejection")
+	}
+}
+
 func TestParseConfigRejectsHostnameAndGenericOrInvalidAuthority(t *testing.T) {
 	tests := [][]string{
 		{"--listen", "172.31.44.2:8443", "--target", "example.test:9443", "--allow-cidr", "172.31.44.0/24"},
@@ -102,7 +120,22 @@ func TestSourceAllowedUsesOnlyFrozenCIDR(t *testing.T) {
 }
 
 func TestRelayForwardsBytesOnlyToConfiguredTarget(t *testing.T) {
-	target, err := net.Listen("tcp4", "127.0.0.1:0")
+	for _, network := range []string{"tcp4", "unix"} {
+		t.Run(network, func(t *testing.T) { testRelayForwarding(t, network) })
+	}
+}
+
+func testRelayForwarding(t *testing.T, network string) {
+	address := "127.0.0.1:0"
+	if network == "unix" {
+		root, err := os.MkdirTemp("/tmp", "ic-relay-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+		address = filepath.Join(root, "policy.sock")
+	}
+	target, err := net.Listen(network, address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +171,7 @@ func TestRelayForwardsBytesOnlyToConfiguredTarget(t *testing.T) {
 	_, allowed, _ := net.ParseCIDR("127.0.0.0/8")
 	r := &relay{config: config{
 		targetAddress:      target.Addr().String(),
+		targetNetwork:      network,
 		allowedCIDR:        allowed,
 		maxConcurrent:      2,
 		maxBytes:           1024,

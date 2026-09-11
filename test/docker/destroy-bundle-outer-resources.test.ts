@@ -16,7 +16,7 @@ import {
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { join } from 'node:path';
 import {
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -41,7 +41,7 @@ async function admitWithAgent(
     runtimeKind: 'docker',
     bundleId: 'bundle-destroy-001',
     workspaceRoot: join(getHome(), 'workspace'),
-    configHash: ADMISSION_CONFIG_HASH,
+    configuration: ADMISSION_CONFIGURATION,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     clock: clock.clock,

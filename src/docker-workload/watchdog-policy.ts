@@ -5,16 +5,14 @@
  * freezes every measurement threshold and state class but deliberately omits the
  * per-session `targetRoot`/`targetDevice`/`targetInode`. `renderWatchdogPolicy`
  * stamps those from the concrete state root and writes the immutable
- * `LoadedResourceWatchdogPolicy` the supervisor and lease then bind to.
- *
- * Attestation binding: `lease.bindings.watchdogPolicySha256` is the sha256 of the
- * RENDERED file; the frozen TEMPLATE sha256 is recorded separately in
- * audit/evidence.
+ * policy snapshot copied into the lease. The supervisor compares full validated
+ * values, then samples its private in-memory copy for the generation's lifetime.
  */
 
 import { lstatSync } from 'node:fs';
 import { posix } from 'node:path';
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import { assertCanonicalHostPath, loadImmutableHostJson, writeStableJsonAtomic } from '../hardened-fs.js';
 import { identifierSchema } from '../zod-helpers.js';
 import {
@@ -22,6 +20,7 @@ import {
   RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION,
   type LoadedResourceWatchdogPolicy,
 } from '../docker/resource-watchdog.js';
+import type { DockerWorkloadLease } from './bundle-lease.js';
 
 export const WATCHDOG_POLICY_TEMPLATE_SCHEMA_VERSION = 1;
 export const MAX_WATCHDOG_POLICY_TEMPLATE_BYTES = 256 * 1024;
@@ -92,27 +91,19 @@ const watchdogPolicyTemplateSchema = z
 
 export type WatchdogPolicyTemplate = z.infer<typeof watchdogPolicyTemplateSchema>;
 
-export interface LoadedWatchdogPolicyTemplate {
-  readonly path: string;
-  readonly sha256: string;
-  readonly sizeBytes: number;
-  readonly template: WatchdogPolicyTemplate;
-}
-
-/** Load the checked-in frozen template through one no-follow descriptor and hash its exact bytes. */
-export function loadFrozenWatchdogPolicyTemplate(path: string): LoadedWatchdogPolicyTemplate {
-  const loaded = loadImmutableHostJson(path, {
+/** Read and validate the bounded frozen template through one no-follow descriptor. */
+export function loadFrozenWatchdogPolicyTemplate(path: string): WatchdogPolicyTemplate {
+  return loadImmutableHostJson(path, {
     label: 'watchdog policy template',
     schema: watchdogPolicyTemplateSchema,
     maxBytes: MAX_WATCHDOG_POLICY_TEMPLATE_BYTES,
-  });
-  return { path: loaded.path, sha256: loaded.sha256, sizeBytes: loaded.sizeBytes, template: loaded.value };
+  }).value;
 }
 
 /**
  * Stamp the concrete state root's device/inode onto the frozen template, write
- * the immutable per-session policy `0o400`, and return the loaded policy whose
- * sha256 the lease binds. The state root must already exist as a real directory.
+ * immutable per-session policy `0o400`. The lease owns a complete snapshot;
+ * this launch input must compare equal. The state root must already exist.
  */
 export function renderWatchdogPolicy(
   template: WatchdogPolicyTemplate,
@@ -143,4 +134,21 @@ export function renderWatchdogPolicy(
   };
   writeStableJsonAtomic(outputPath, rendered, { mode: 0o400 });
   return loadResourceWatchdogPolicy(outputPath);
+}
+
+/** Validate launch/recovery input against the original generation's contract. */
+export function loadLeaseWatchdogPolicy(lease: DockerWorkloadLease, path: string): LoadedResourceWatchdogPolicy {
+  const loaded = loadResourceWatchdogPolicy(path);
+  const matches =
+    lease.schemaVersion === 1
+      ? loaded.sha256 === lease.bindings.watchdogPolicySha256
+      : isDeepStrictEqual(loaded.policy, lease.bindings.watchdogPolicy);
+  if (!matches) throw new Error('watchdog policy does not match the bundle lease');
+  if (
+    loaded.policy.targetRoot !== lease.paths.stateRoot ||
+    loaded.policy.cleanupInventoryGapMs !== lease.cleanupInventoryGapMs
+  ) {
+    throw new Error('watchdog policy target or cleanup interval does not match the bundle lease');
+  }
+  return loaded;
 }

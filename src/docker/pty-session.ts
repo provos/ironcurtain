@@ -37,12 +37,12 @@ import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
+  buildAgentContainerConfig,
   buildAgentUidRemap,
   buildDockerDesktopTransportCreateLimits,
   buildDockerBuildShimMounts,
   buildDockerWorkloadEgressMounts,
   buildUdsSocketMounts,
-  buildNestedDockerAgentTrustedCreateOptions,
   activateNestedDockerWorkload,
   buildDockerOwnershipLabels,
   createLedgeredAgentContainer,
@@ -52,7 +52,6 @@ import {
   removeBundleRuntimeRoot,
   resolveNestedDockerAgentWiring,
   resolveNestedDockerOuterAgentImage,
-  selectOuterContainerResources,
   stopDockerWorkloadEgress,
   type AgentImageResolution,
 } from './docker-infrastructure.js';
@@ -473,13 +472,8 @@ async function runPtySessionAttempt(
     // soon as preparation returns, before any PTY-specific callback can fail.
     const resolvedDockerWorkload = sessionConfig.userConfig.dockerWorkload;
     if (dockerWorkload && !isResume && resolvedDockerWorkload?.enabled === true) {
-      const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
       updateSessionMetadata(effectiveSessionId, {
-        dockerWorkload: dockerWorkloadSessionMetadata(
-          dockerWorkload,
-          dockerWorkloadConfigHash(resolvedDockerWorkload),
-          infra.runtimeKind,
-        ),
+        dockerWorkload: dockerWorkloadSessionMetadata(dockerWorkload, resolvedDockerWorkload, infra.runtimeKind),
       });
     }
 
@@ -846,58 +840,30 @@ async function runPtySessionAttempt(
       env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
     }
 
-    // Linux-only UID-remap wiring (issue #232). Matches the parallel
-    // setup in `docker-infrastructure.ts::createSessionContainers`;
-    // when adding fields here, mirror the change there. macOS skips
-    // the remap because VirtioFS translates UIDs transparently.
-    const uidRemap = buildAgentUidRemap(infra.runtimeKind === 'apple-container' || useTcp);
-
-    // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
-    // are clamped to fit the host. `null` in either field is preserved as
-    // "no flag emitted" (see clampDockerResources docs).
-    const ptyResources = infra.dockerDesktopResources?.agent ?? selectOuterContainerResources(sessionConfig.userConfig);
-
     // Build the PTY agent container create args for a given name + resolved
     // labels. `labels` is the base resource labels in the ordinary case and the
     // base merged with the generation ownership label when the create is
     // ledgered — the merge lives in createLedgeredAgentContainer.
     const createPtyContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
-      infra.docker.create({
-        image: outerAgentImage,
-        name,
-        network: network ?? 'none',
-        mounts,
-        env: { ...env, ...uidRemap.env },
-        user: uidRemap.user,
-        command: ptyCommand,
-        // PTY sessions are standalone (no workflow/scope), so only the
-        // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
-        bundleLabel: bundleId,
-        labels,
-        resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
-        extraHosts,
-        publishSockets,
-        capAdd: [
-          'SETUID', // sudo setuid
-          'SETGID', // sudo setgid
-          'CHOWN', // apt-get chown on installed files
-          'FOWNER', // apt-get set permissions on files it doesn't own
-          'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
-          'AUDIT_WRITE', // sudo audit logging
-        ],
-        // Only an admitted nested-Docker bundle opts out of the OCI
-        // masked/read-only path sets; a fully visible /proc is what lets the
-        // nested daemon boot AND lets its runc mount procfs for inner
-        // containers.
-        fullyVisibleProc: nestedDaemon !== undefined,
-        trustedCreateOptions: buildNestedDockerAgentTrustedCreateOptions(
-          nestedDockerWiring.namedVolumeMounts,
-          infra.dockerDesktopResources,
-        ),
-        // Apple Container allocates the agent TTY on `container exec -it`;
-        // the outer `sleep infinity` process does not need a second TTY.
-        tty: nativePtyCommand === undefined,
-      });
+      infra.docker.create(
+        buildAgentContainerConfig(infra, sessionConfig.userConfig, {
+          image: outerAgentImage,
+          name,
+          network: network ?? 'none',
+          mounts,
+          env,
+          command: ptyCommand,
+          // PTY sessions are standalone (no workflow/scope), so only the
+          // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
+          bundleLabel: bundleId,
+          labels,
+          extraHosts,
+          publishSockets,
+          // Apple Container allocates the agent TTY on `container exec -it`;
+          // the outer `sleep infinity` process does not need a second TTY.
+          tty: nativePtyCommand === undefined,
+        }),
+      );
 
     // §8.2 step 1: ledger the agent container before create when a
     // Docker-workload bundle is admitted; ordinary sessions create directly.
@@ -1028,7 +994,9 @@ async function runPtySessionAttempt(
       // exec'ing the agent, so socat — and therefore the UDS — appears
       // 25–30s later than the no-remap case. Stretch the readiness
       // budget so PTY sessions on non-1000 hosts don't flap.
-      const readinessTimeoutMs = uidRemap.user ? PTY_READINESS_TIMEOUT_REMAP_MS : PTY_READINESS_TIMEOUT_MS;
+      const readinessTimeoutMs = buildAgentUidRemap(infra.runtimeKind === 'apple-container' || useTcp).user
+        ? PTY_READINESS_TIMEOUT_REMAP_MS
+        : PTY_READINESS_TIMEOUT_MS;
       await waitForPtyReady(ptyTarget, readinessTimeoutMs);
       logger.info('PTY readiness check passed');
     }

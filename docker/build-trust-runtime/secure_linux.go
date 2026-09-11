@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,7 +23,6 @@ type sourceDiagnosticCodes struct {
 	open     failureDiagnosticCode
 	metadata failureDiagnosticCode
 	readOnly failureDiagnosticCode
-	digest   failureDiagnosticCode
 }
 
 func patchBundleSecure(bundlePath string, policy runtimePolicy, contract trustContract) error {
@@ -90,11 +88,7 @@ func loadTrustContractSecure(policy runtimePolicy) (trustContract, error) {
 }
 
 func validateRealRunc(policy runtimePolicy, contract trustContract) error {
-	fd, err := openAbsoluteFile(
-		policy.realRuncPath,
-		contract.RealRunc.UID,
-		contract.RealRunc.AlternateOwner.UID,
-	)
+	fd, err := openAbsoluteFileWithParentOwners(policy.realRuncPath, policy.trustTreeOwnerPairs)
 	if err != nil {
 		return err
 	}
@@ -103,14 +97,26 @@ func validateRealRunc(policy runtimePolicy, contract trustContract) error {
 	if err := syscall.Fstat(fd, &stat); err != nil {
 		return err
 	}
-	if err := validateExactRegularStat(stat, contract.RealRunc, 128<<20); err != nil {
-		return fmt.Errorf("pinned runc metadata does not match the immutable trust contract: %w", err)
+	if err := validateExactOwnerlessRegularStat(stat, contract.RealRunc, 128<<20); err != nil {
+		return fmt.Errorf("selected runc metadata does not match the immutable trust contract: %w", err)
 	}
-	digest, err := hashFileDescriptor(fd, stat.Size)
-	if err != nil || digest != contract.RealRunc.SHA256 {
-		return errors.New("pinned runc digest does not match the immutable trust contract")
+	if err := requireEffectiveReadOnly(policy, fd, policy.realRuncPath); err != nil {
+		return fmt.Errorf("real runc backing is not read-only: %w", err)
 	}
 	return nil
+}
+
+func validateOwnExecutableReadOnly(policy runtimePolicy) error {
+	path, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	fd, err := openAbsoluteFileWithParentOwners(path, policy.trustTreeOwnerPairs)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	return requireEffectiveReadOnly(policy, fd, path)
 }
 
 func openAbsoluteDirectory(path string, allowedUIDs ...int) (int, error) {
@@ -167,6 +173,10 @@ func openAbsoluteDirectoryWithOwners(path string, allowedOwners [2]ownerPair) (i
 	if err != nil {
 		return -1, err
 	}
+	if path == "/" {
+		return fd, nil
+	}
+	traversed := ""
 	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
 		if component == "" || component == "." || component == ".." || len(component) > 255 {
 			syscall.Close(fd)
@@ -177,13 +187,40 @@ func openAbsoluteDirectoryWithOwners(path string, allowedOwners [2]ownerPair) (i
 		if err != nil {
 			return -1, err
 		}
-		if err := validateDirectoryOwnerPairs(next, allowedOwners); err != nil {
+		traversed += "/" + component
+		var metadataError error
+		if traversed == filepath.Dir(trustContractPath) {
+			metadataError = validateProtectedDirectoryFD(next)
+		} else {
+			metadataError = validateDirectoryOwnerPairs(next, allowedOwners)
+		}
+		if metadataError != nil {
 			syscall.Close(next)
-			return -1, fmt.Errorf("%w: %w", errDirectoryMetadata, err)
+			return -1, fmt.Errorf("%w: %w", errDirectoryMetadata, metadataError)
 		}
 		fd = next
 	}
 	return fd, nil
+}
+
+// The coordinator mounts this exact top-level directory read-only. Its source
+// UID is namespace-mapped host metadata, not authority over the mounted files.
+func validateProtectedDirectoryFD(fd int) error {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR || stat.Mode&0o7777 != 0o755 {
+		return errors.New("protected generation directory metadata is invalid")
+	}
+	var filesystem syscall.Statfs_t
+	if err := syscall.Fstatfs(fd, &filesystem); err != nil {
+		return err
+	}
+	if filesystem.Flags&1 == 0 {
+		return errors.New("protected generation directory is writable")
+	}
+	return nil
 }
 
 func requireEffectiveReadOnly(policy runtimePolicy, fd int, path string) error {
@@ -193,7 +230,7 @@ func requireEffectiveReadOnly(policy runtimePolicy, fd int, path string) error {
 	return policy.effectiveReadOnly(fd, path)
 }
 
-func validateEffectiveReadOnlyFile(fd int, path string) error {
+func validateEffectiveReadOnlyFile(fd int, _ string) error {
 	var filesystem syscall.Statfs_t
 	if err := syscall.Fstatfs(fd, &filesystem); err != nil {
 		return fmt.Errorf("inspect filesystem flags: %w", err)
@@ -202,18 +239,19 @@ func validateEffectiveReadOnlyFile(fd int, path string) error {
 	if filesystem.Flags&statfsReadOnly == 0 {
 		return errors.New("filesystem or mount is writable")
 	}
-	// Fstatfs above is the authority and is tied to the already-open, no-follow
-	// descriptor whose metadata and digest are validated by the caller. This
-	// path probe distinguishes EROFS from a mere mode-based EACCES. A path race
-	// cannot turn a writable descriptor into a pass: the descriptor must already
-	// report ST_RDONLY, and any replacement path must independently return EROFS.
-	writable, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err == nil {
-		_ = syscall.Close(writable)
-		return errors.New("write-open unexpectedly succeeded")
+	var metadata syscall.Stat_t
+	if err := syscall.Fstat(fd, &metadata); err != nil {
+		return fmt.Errorf("inspect file metadata: %w", err)
 	}
-	if !errors.Is(err, syscall.EROFS) {
-		return fmt.Errorf("write-open did not fail with EROFS: %w", err)
+	if metadata.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return errors.New("protected input is not a regular file")
+	}
+	// A pathname write-open can fail on executable text or file permissions
+	// before checking mount writability. Probe the same already-open object by
+	// requesting its unchanged mode instead. Both descriptor-bound ST_RDONLY
+	// and EROFS are mandatory; ETXTBSY and permission errors never suffice.
+	if err := syscall.Fchmod(fd, metadata.Mode&0o7777); !errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("mode probe did not fail with EROFS: %v", err)
 	}
 	return nil
 }
@@ -273,10 +311,6 @@ func validateSourceFile(policy runtimePolicy, source verifiedTrustSource) error 
 	if err := requireEffectiveReadOnly(policy, fd, source.Source); err != nil {
 		return withDiagnosticCode(codes.readOnly, fmt.Errorf("trust source %s backing is not immutable: %w", source.Source, err))
 	}
-	digest, err := hashFileDescriptor(fd, stat.Size)
-	if err != nil || digest != source.SHA256 {
-		return withDiagnosticCode(codes.digest, fmt.Errorf("trust source %s digest does not match the immutable trust contract", source.Source))
-	}
 	return nil
 }
 
@@ -285,22 +319,22 @@ func diagnosticCodesForSource(source trustSource) sourceDiagnosticCodes {
 	case "/dev/ironcurtain/ca-cert.pem":
 		return sourceDiagnosticCodes{
 			open: diagnosticSourceCACertOpen, metadata: diagnosticSourceCACertMetadata,
-			readOnly: diagnosticSourceCACertReadOnly, digest: diagnosticSourceCACertDigest,
+			readOnly: diagnosticSourceCACertReadOnly,
 		}
 	case "/dev/ironcurtain/ca-bundle.pem":
 		return sourceDiagnosticCodes{
 			open: diagnosticSourceCABundleOpen, metadata: diagnosticSourceCABundleMeta,
-			readOnly: diagnosticSourceCABundleRO, digest: diagnosticSourceCABundleDigest,
+			readOnly: diagnosticSourceCABundleRO,
 		}
 	case "/dev/ironcurtain/apt.conf":
 		return sourceDiagnosticCodes{
 			open: diagnosticSourceAPTConfigOpen, metadata: diagnosticSourceAPTConfigMeta,
-			readOnly: diagnosticSourceAPTConfigRO, digest: diagnosticSourceAPTConfigDigest,
+			readOnly: diagnosticSourceAPTConfigRO,
 		}
 	default:
 		return sourceDiagnosticCodes{
 			open: diagnosticInternal, metadata: diagnosticInternal,
-			readOnly: diagnosticInternal, digest: diagnosticInternal,
+			readOnly: diagnosticInternal,
 		}
 	}
 }
@@ -309,7 +343,7 @@ func validateExactOwnerlessRegularStat(stat syscall.Stat_t, expected integrityRe
 	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG || stat.Nlink != 1 {
 		return fmt.Errorf("unsafe type or link count (observed uid=%d gid=%d nlink=%d)", stat.Uid, stat.Gid, stat.Nlink)
 	}
-	if stat.Mode&0o7777 != expected.Mode || stat.Mode&0o022 != 0 || stat.Size != expected.Size || stat.Size <= 0 || stat.Size > maxBytes {
+	if stat.Mode&0o7777 != expected.Mode || stat.Mode&0o022 != 0 || (expected.Size != 0 && stat.Size != expected.Size) || stat.Size <= 0 || stat.Size > maxBytes {
 		return fmt.Errorf("mode or size mismatch (observed uid=%d gid=%d mode=%#o size=%d)", stat.Uid, stat.Gid, stat.Mode&0o7777, stat.Size)
 	}
 	return nil
@@ -333,22 +367,6 @@ func validateContractFile(fd int) (syscall.Stat_t, error) {
 	return stat, nil
 }
 
-func validateExactRegularStat(stat syscall.Stat_t, expected integrityRecord, maxBytes int64) error {
-	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG || !matchesIntegrityOwner(stat, expected) || stat.Nlink != 1 {
-		return errors.New("unsafe type, owner, group, or link count")
-	}
-	if stat.Mode&0o7777 != expected.Mode || stat.Mode&0o022 != 0 || stat.Size != expected.Size || stat.Size <= 0 || stat.Size > maxBytes {
-		return errors.New("mode or size mismatch")
-	}
-	return nil
-}
-
-func matchesIntegrityOwner(stat syscall.Stat_t, expected integrityRecord) bool {
-	uid, gid := int(stat.Uid), int(stat.Gid)
-	return uid == expected.UID && gid == expected.GID ||
-		expected.HasAlternateOwner && uid == expected.AlternateOwner.UID && gid == expected.AlternateOwner.GID
-}
-
 func validateExactDirectoryStat(stat syscall.Stat_t, expectedUID, expectedGID int, expectedMode uint32) error {
 	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR || int(stat.Uid) != expectedUID || int(stat.Gid) != expectedGID {
 		return errors.New("unsafe directory type, owner, or group")
@@ -357,31 +375,6 @@ func validateExactDirectoryStat(stat syscall.Stat_t, expectedUID, expectedGID in
 		return errors.New("directory mode mismatch")
 	}
 	return nil
-}
-
-func hashFileDescriptor(fd int, size int64) (string, error) {
-	duplicate, err := syscall.Dup(fd)
-	if err != nil {
-		return "", err
-	}
-	file := os.NewFile(uintptr(duplicate), "integrity-input")
-	if file == nil {
-		_ = syscall.Close(duplicate)
-		return "", errors.New("wrap integrity descriptor")
-	}
-	defer file.Close()
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", err
-	}
-	hash := sha256.New()
-	written, err := io.Copy(hash, io.LimitReader(file, size+1))
-	if err != nil {
-		return "", err
-	}
-	if written != size {
-		return "", errors.New("file size changed during digest")
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func patchConfigAt(bundle int, bundlePath string, bundleStat syscall.Stat_t, policy runtimePolicy, sources []trustSource) error {

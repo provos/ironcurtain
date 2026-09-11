@@ -47,7 +47,6 @@ import {
   createMockDocker,
   createMockMitmProxy,
   createMockProxy,
-  createMockRuntimeTrust,
   scriptedExec,
 } from '../helpers/docker-mocks.js';
 
@@ -618,7 +617,6 @@ describe('OpenRouter — D6 authoritative-cost accumulation', () => {
       docker: createMockDocker({ exec }),
       adapter: createClaudeCodeAdapter(),
       ca: createMockCA(tempDir),
-      runtimeTrust: createMockRuntimeTrust(),
       fakeKeys: openrouterFakeKeys(),
       orientationDir: join(sessionDir, 'orientation'),
       systemPrompt: 'You are a test agent.',

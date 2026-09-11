@@ -8,6 +8,8 @@ import { resolve } from 'node:path';
 import { saveSessionMetadata, loadSessionMetadata, updateSessionMetadata } from '../src/session/session-metadata.js';
 import { getSessionMetadataPath } from '../src/config/paths.js';
 import type { SessionMetadata } from '../src/session/types.js';
+import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
+import { loadFrozenWatchdogPolicyTemplate } from '../src/docker-workload/watchdog-policy.js';
 
 const TEST_HOME = `/tmp/ironcurtain-metadata-test-${process.pid}`;
 const TEST_SESSION_ID = 'test-session-001';
@@ -150,7 +152,7 @@ describe('loadSessionMetadata', () => {
 });
 
 describe('updateSessionMetadata', () => {
-  it('atomically adds post-admission fields without losing creation metadata', () => {
+  it('preserves historical hash-shaped workload metadata without losing creation metadata', () => {
     saveSessionMetadata(TEST_SESSION_ID, {
       createdAt: '2026-03-08T12:00:00.000Z',
       persona: 'coder',
@@ -172,6 +174,33 @@ describe('updateSessionMetadata', () => {
       workspacePath: '/workspace',
       dockerWorkload,
     });
+  });
+
+  it('persists the complete current workload configuration and watchdog snapshot', () => {
+    saveSessionMetadata(TEST_SESSION_ID, { createdAt: '2026-09-10T12:00:00.000Z', persona: 'coder' });
+    const dockerWorkload = {
+      leaseId: 'lease-current',
+      generation: 'generation-current',
+      configuration: resolveDockerWorkloadConfig(
+        { enabled: true, networkAccess: 'packages' },
+        { memoryMb: 8192, cpus: 4 },
+      ),
+      watchdogPolicy: {
+        ...loadFrozenWatchdogPolicyTemplate(resolve('config/docker-workload/resource-watchdog-policy.json')),
+        targetRoot: '/state',
+        targetDevice: 1,
+        targetInode: 2,
+      },
+      backend: 'docker' as const,
+    };
+    updateSessionMetadata(TEST_SESSION_ID, { dockerWorkload });
+    expect(loadSessionMetadata(TEST_SESSION_ID)).toEqual({
+      createdAt: '2026-09-10T12:00:00.000Z',
+      persona: 'coder',
+      dockerWorkload,
+    });
+    expect(loadSessionMetadata(TEST_SESSION_ID)?.dockerWorkload).not.toHaveProperty('configHash');
+    expect(loadSessionMetadata(TEST_SESSION_ID)?.dockerWorkload).not.toHaveProperty('watchdogPolicySha256');
   });
 
   it('refuses to fabricate metadata when the create-once record is absent', () => {

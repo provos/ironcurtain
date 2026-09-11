@@ -1,10 +1,10 @@
 /** Trusted zero-skip Vitest runner for a backend release suite. */
 
-import { execFile as execFileCallback } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { assertCanonicalHostPath } from '../hardened-fs.js';
+import { waitForQualificationProcess } from './qualification-process.js';
 
 export interface QualificationCommandExecution {
   readonly exitCode: number;
@@ -17,6 +17,7 @@ export type QualificationCommandExecutor = (options: {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly timeoutMs: number;
+  readonly environment?: Readonly<Record<string, string>>;
 }) => Promise<QualificationCommandExecution>;
 
 export interface RunVitestQualificationSuiteOptions {
@@ -25,6 +26,8 @@ export interface RunVitestQualificationSuiteOptions {
   readonly repositoryRoot: string;
   readonly reportDirectory: string;
   readonly timeoutMs: number;
+  /** Explicitly enable opt-in live tests selected by this release suite. */
+  readonly environment?: Readonly<Record<string, string>>;
   readonly execute?: QualificationCommandExecutor;
 }
 
@@ -35,12 +38,15 @@ export interface RunVitestQualificationSuiteResult {
 
 interface VitestAssertionResult {
   readonly status?: unknown;
+  readonly fullName?: unknown;
+  readonly failureMessages?: unknown;
 }
 
 interface VitestTestResult {
   readonly name?: unknown;
   readonly status?: unknown;
   readonly assertionResults?: unknown;
+  readonly message?: unknown;
 }
 
 interface VitestQualificationReport {
@@ -58,6 +64,7 @@ interface VitestQualificationReport {
 
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_CHILD_OUTPUT_BYTES = 50 * 1024 * 1024;
+const MAX_FAILURE_DETAIL_CHARS = 8000;
 
 /**
  * Run a source-controlled backend suite from the current checkout and reject weak results.
@@ -91,11 +98,14 @@ export async function runVitestQualificationSuite(
     args,
     cwd: repositoryRoot,
     timeoutMs: options.timeoutMs,
+    environment: options.environment,
   });
   validateExitCode(execution.exitCode);
   if (execution.exitCode !== 0) {
-    const detail = execution.stderr.trim() || execution.stdout.trim();
-    throw new Error(`qualification suite exited nonzero (${execution.exitCode})${detail === '' ? '' : `: ${detail}`}`);
+    const detail = failureDetails(reportPath, options.suiteId, execution);
+    throw new Error(
+      `qualification suite exited nonzero (${execution.exitCode}); report: ${reportPath}${detail === '' ? '' : `\n${detail}`}`,
+    );
   }
   // The report is a diagnostic artifact this runner asked our own Vitest to
   // write; everything that matters is adjudicated from its contents below.
@@ -104,30 +114,81 @@ export async function runVitestQualificationSuite(
   return { reportPath, testCount };
 }
 
+/** Prefer assertion failures over noisy build logs, without trusting a failed report as a pass. */
+function failureDetails(path: string, suiteId: string, execution: QualificationCommandExecution): string {
+  try {
+    const report = loadReport(path, suiteId);
+    const failures: string[] = [];
+    if (Array.isArray(report.testResults)) {
+      for (const value of report.testResults) {
+        if (typeof value !== 'object' || value === null) continue;
+        const result = value as VitestTestResult;
+        const suite = typeof result.name === 'string' ? result.name : 'unknown suite';
+        const previousCount = failures.length;
+        if (Array.isArray(result.assertionResults)) {
+          for (const value of result.assertionResults) {
+            if (typeof value !== 'object' || value === null) continue;
+            const assertion = value as VitestAssertionResult;
+            if (assertion.status !== 'failed' || !Array.isArray(assertion.failureMessages)) continue;
+            const name = typeof assertion.fullName === 'string' ? assertion.fullName : 'failed assertion';
+            for (const message of assertion.failureMessages) {
+              if (typeof message === 'string' && message.trim() !== '') failures.push(`${suite}: ${name}\n${message}`);
+              if (failures.length >= 5) return failures.join('\n\n').slice(0, MAX_FAILURE_DETAIL_CHARS);
+            }
+          }
+        }
+        if (failures.length === previousCount && typeof result.message === 'string' && result.message.trim() !== '') {
+          failures.push(`${suite}\n${result.message}`);
+        }
+        if (failures.length >= 5) break;
+      }
+    }
+    if (failures.length > 0) return failures.join('\n\n').slice(0, MAX_FAILURE_DETAIL_CHARS);
+  } catch {
+    // A crash may leave no complete report. Preserve the nonzero exit and both output streams.
+  }
+  return (['stdout', 'stderr'] as const)
+    .filter((stream) => execution[stream].trim() !== '')
+    .map((stream) => `${stream} (tail):\n${execution[stream].trim().slice(-MAX_FAILURE_DETAIL_CHARS / 2)}`)
+    .join('\n\n');
+}
+
 async function defaultQualificationExecutor(options: {
   readonly executable: string;
   readonly args: readonly string[];
   readonly cwd: string;
   readonly timeoutMs: number;
+  readonly environment?: Readonly<Record<string, string>>;
 }): Promise<QualificationCommandExecution> {
-  const execFile = promisify(execFileCallback);
-  try {
-    const result = await execFile(options.executable, [...options.args], {
-      cwd: options.cwd,
-      timeout: options.timeoutMs,
-      maxBuffer: MAX_CHILD_OUTPUT_BYTES,
-      env: { ...process.env, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
-    });
-    return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
-  } catch (error) {
-    const failure = error as Error & { readonly code?: unknown; readonly stdout?: unknown; readonly stderr?: unknown };
-    if (typeof failure.code !== 'number') throw error;
-    return {
-      exitCode: Math.min(255, Math.max(1, failure.code)),
-      stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
-      stderr: typeof failure.stderr === 'string' ? failure.stderr : '',
-    };
-  }
+  const child = spawn(options.executable, [...options.args], {
+    cwd: options.cwd,
+    env: { ...process.env, ...options.environment, CI: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  const cancellation = new AbortController();
+  let outputBytes = 0;
+  const capture = (chunks: Buffer[], chunk: Buffer): void => {
+    outputBytes += chunk.length;
+    if (outputBytes > MAX_CHILD_OUTPUT_BYTES) {
+      cancellation.abort(new Error('qualification child exceeded its output bound'));
+    } else {
+      chunks.push(chunk);
+    }
+  };
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on('data', (chunk: Buffer) => capture(stdout, chunk));
+  child.stderr.on('data', (chunk: Buffer) => capture(stderr, chunk));
+  // Drain both pipes before examining diagnostics, including their final bytes.
+  const closed = new Promise<void>((resolvePromise) => child.once('close', () => resolvePromise()));
+  const exit = await waitForQualificationProcess(child, options.timeoutMs, { signal: cancellation.signal });
+  await closed;
+  return {
+    exitCode: exit.code ?? 1,
+    stdout: Buffer.concat(stdout).toString('utf8'),
+    stderr: Buffer.concat(stderr).toString('utf8'),
+  };
 }
 
 function validateSuiteId(suiteId: string): void {

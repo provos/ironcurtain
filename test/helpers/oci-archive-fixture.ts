@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 export interface OciArchiveFixtureOptions {
   readonly directory: string;
@@ -21,6 +22,8 @@ export interface OciArchiveFixtureOptions {
   readonly indexMediaType?: string;
   readonly descriptorMediaType?: string;
   readonly duplicateLayer?: boolean;
+  readonly layers?: readonly Buffer[];
+  readonly gzipLayers?: boolean;
   /** Apple `container image save --platform` wraps the selected manifest in a nested index. */
   readonly nestedIndex?: boolean;
 }
@@ -49,14 +52,15 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
   } as const;
 
   const emptyLayerTar = Buffer.alloc(1024);
-  const layerDigest = digest(emptyLayerTar);
-  const diffId = digest(emptyLayerTar);
+  const rawLayers = options.layers ?? (options.duplicateLayer ? [emptyLayerTar, emptyLayerTar] : [emptyLayerTar]);
+  const layers = rawLayers.map((raw) => ({ raw, content: options.gzipLayers ? gzipSync(raw) : raw }));
+  const layerMediaType = 'application/vnd.oci.image.layer.v1.tar' + (options.gzipLayers ? '+gzip' : '');
   const config = Buffer.from(
     JSON.stringify({
       architecture: options.architecture,
       os: 'linux',
       config: { Labels: labels },
-      rootfs: { type: 'layers', diff_ids: options.duplicateLayer ? [diffId, diffId] : [diffId] },
+      rootfs: { type: 'layers', diff_ids: layers.map(({ raw }) => digest(raw)) },
       history: [{ created: createdAt, created_by: 'fixture' }],
     }),
   );
@@ -70,10 +74,10 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
         digest: configDigest,
         size: config.length,
       },
-      layers: (options.duplicateLayer ? [0, 1] : [0]).map(() => ({
-        mediaType: 'application/vnd.oci.image.layer.v1.tar',
-        digest: layerDigest,
-        size: emptyLayerTar.length,
+      layers: layers.map(({ content }) => ({
+        mediaType: layerMediaType,
+        digest: digest(content),
+        size: content.length,
       })),
     }),
   );
@@ -121,14 +125,13 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
       {
         Config: blobPath(configDigest),
         RepoTags: [options.sourceReference ?? options.logicalName],
-        Layers: (options.duplicateLayer ? [0, 1] : [0]).map(() => blobPath(layerDigest)),
-        LayerSources: {
-          [layerDigest]: {
-            mediaType: 'application/vnd.oci.image.layer.v1.tar',
-            size: emptyLayerTar.length,
-            digest: layerDigest,
-          },
-        },
+        Layers: layers.map(({ content }) => blobPath(digest(content))),
+        LayerSources: Object.fromEntries(
+          layers.map(({ content }) => [
+            digest(content),
+            { mediaType: layerMediaType, size: content.length, digest: digest(content) },
+          ]),
+        ),
       },
     ]),
   );
@@ -139,7 +142,9 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
       ? []
       : [tarFile(blobPath(nestedIndexDigest), nestedIndex)]),
     tarFile(blobPath(configDigest), config),
-    tarFile(blobPath(layerDigest), emptyLayerTar),
+    ...[...new Map(layers.map(({ content }) => [digest(content), content])).entries()].map(([id, content]) =>
+      tarFile(blobPath(id), content),
+    ),
     tarFile(blobPath(manifestDigest), manifest),
     // Docker's native save manifest points at the same OCI config/layers.
     tarFile('manifest.json', dockerManifest),
@@ -163,17 +168,17 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
   };
 }
 
-function tarFile(name: string, content: Buffer): Buffer {
+export function tarFile(name: string, content: Buffer, type = 48, mode = 0o444): Buffer {
   if (Buffer.byteLength(name) > 100) throw new Error(`fixture tar path is too long: ${name}`);
   const header = Buffer.alloc(512);
   header.write(name, 0, 'utf8');
-  writeOctal(header, 100, 8, 0o444);
+  writeOctal(header, 100, 8, mode);
   writeOctal(header, 108, 8, 0);
   writeOctal(header, 116, 8, 0);
   writeOctal(header, 124, 12, content.length);
   writeOctal(header, 136, 12, 0);
   header.fill(32, 148, 156);
-  header[156] = 48;
+  header[156] = type;
   header.write('ustar\0', 257, 'ascii');
   header.write('00', 263, 'ascii');
   let checksum = 0;

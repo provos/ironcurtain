@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	realRuncPath                  = "/usr/local/lib/ironcurtain-docker/bin/runc"
+	realRuncPath                  = "/ironcurtain-real-runc"
 	buildkitExecutorRoot          = "/home/codespace/.local/share/docker/buildkit/executor"
 	buildkitLogPath               = buildkitExecutorRoot + "/runc-log.json"
 	failureExitCode               = 125
@@ -28,33 +28,30 @@ type failureDiagnosticCode string
 
 const (
 	// ironcurtain:failure-diagnostic-code-values:begin
-	diagnosticRuncGrammar           failureDiagnosticCode = "ICBT-RUNC-GRAMMAR-V1"
-	diagnosticContractLoad          failureDiagnosticCode = "ICBT-CONTRACT-LOAD-V1"
-	diagnosticExecutorOpen          failureDiagnosticCode = "ICBT-EXECUTOR-OPEN-V1"
-	diagnosticExecutorMetadata      failureDiagnosticCode = "ICBT-EXECUTOR-METADATA-V1"
-	diagnosticBundleOpen            failureDiagnosticCode = "ICBT-BUNDLE-OPEN-V1"
-	diagnosticBundleMetadata        failureDiagnosticCode = "ICBT-BUNDLE-METADATA-V1"
-	diagnosticSourceCACertOpen      failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-OPEN-V1"
-	diagnosticSourceCACertMetadata  failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-METADATA-V1"
-	diagnosticSourceCACertReadOnly  failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-READONLY-V1"
-	diagnosticSourceCACertDigest    failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-DIGEST-V1"
-	diagnosticSourceCABundleOpen    failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-OPEN-V1"
-	diagnosticSourceCABundleMeta    failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-METADATA-V1"
-	diagnosticSourceCABundleRO      failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-READONLY-V1"
-	diagnosticSourceCABundleDigest  failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-DIGEST-V1"
-	diagnosticSourceAPTConfigOpen   failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-OPEN-V1"
-	diagnosticSourceAPTConfigMeta   failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-METADATA-V1"
-	diagnosticSourceAPTConfigRO     failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-READONLY-V1"
-	diagnosticSourceAPTConfigDigest failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-DIGEST-V1"
-	diagnosticConfigOpen            failureDiagnosticCode = "ICBT-CONFIG-OPEN-V1"
-	diagnosticConfigMetadata        failureDiagnosticCode = "ICBT-CONFIG-METADATA-V1"
-	diagnosticConfigRead            failureDiagnosticCode = "ICBT-CONFIG-READ-V1"
-	diagnosticConfigStrictEnvelope  failureDiagnosticCode = "ICBT-CONFIG-STRICT-ENVELOPE-V1"
-	diagnosticConfigPatch           failureDiagnosticCode = "ICBT-CONFIG-PATCH-V1"
-	diagnosticConfigAtomicCommit    failureDiagnosticCode = "ICBT-CONFIG-ATOMIC-COMMIT-V1"
-	diagnosticRealRunc              failureDiagnosticCode = "ICBT-REAL-RUNC-VALIDATION-V1"
-	diagnosticRuncHandoff           failureDiagnosticCode = "ICBT-REAL-RUNC-HANDOFF-V1"
-	diagnosticInternal              failureDiagnosticCode = "ICBT-INTERNAL-ERROR-V1"
+	diagnosticRuncGrammar          failureDiagnosticCode = "ICBT-RUNC-GRAMMAR-V1"
+	diagnosticContractLoad         failureDiagnosticCode = "ICBT-CONTRACT-LOAD-V1"
+	diagnosticExecutorOpen         failureDiagnosticCode = "ICBT-EXECUTOR-OPEN-V1"
+	diagnosticExecutorMetadata     failureDiagnosticCode = "ICBT-EXECUTOR-METADATA-V1"
+	diagnosticBundleOpen           failureDiagnosticCode = "ICBT-BUNDLE-OPEN-V1"
+	diagnosticBundleMetadata       failureDiagnosticCode = "ICBT-BUNDLE-METADATA-V1"
+	diagnosticSourceCACertOpen     failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-OPEN-V1"
+	diagnosticSourceCACertMetadata failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-METADATA-V1"
+	diagnosticSourceCACertReadOnly failureDiagnosticCode = "ICBT-SOURCE-CA-CERT-READONLY-V1"
+	diagnosticSourceCABundleOpen   failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-OPEN-V1"
+	diagnosticSourceCABundleMeta   failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-METADATA-V1"
+	diagnosticSourceCABundleRO     failureDiagnosticCode = "ICBT-SOURCE-CA-BUNDLE-READONLY-V1"
+	diagnosticSourceAPTConfigOpen  failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-OPEN-V1"
+	diagnosticSourceAPTConfigMeta  failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-METADATA-V1"
+	diagnosticSourceAPTConfigRO    failureDiagnosticCode = "ICBT-SOURCE-APT-CONFIG-READONLY-V1"
+	diagnosticConfigOpen           failureDiagnosticCode = "ICBT-CONFIG-OPEN-V1"
+	diagnosticConfigMetadata       failureDiagnosticCode = "ICBT-CONFIG-METADATA-V1"
+	diagnosticConfigRead           failureDiagnosticCode = "ICBT-CONFIG-READ-V1"
+	diagnosticConfigStrictEnvelope failureDiagnosticCode = "ICBT-CONFIG-STRICT-ENVELOPE-V1"
+	diagnosticConfigPatch          failureDiagnosticCode = "ICBT-CONFIG-PATCH-V1"
+	diagnosticConfigAtomicCommit   failureDiagnosticCode = "ICBT-CONFIG-ATOMIC-COMMIT-V1"
+	diagnosticRealRunc             failureDiagnosticCode = "ICBT-REAL-RUNC-VALIDATION-V1"
+	diagnosticRuncHandoff          failureDiagnosticCode = "ICBT-REAL-RUNC-HANDOFF-V1"
+	diagnosticInternal             failureDiagnosticCode = "ICBT-INTERNAL-ERROR-V1"
 	// ironcurtain:failure-diagnostic-code-values:end
 )
 
@@ -69,15 +66,12 @@ var failureDiagnosticCodeCatalog = [...]failureDiagnosticCode{
 	diagnosticSourceCACertOpen,
 	diagnosticSourceCACertMetadata,
 	diagnosticSourceCACertReadOnly,
-	diagnosticSourceCACertDigest,
 	diagnosticSourceCABundleOpen,
 	diagnosticSourceCABundleMeta,
 	diagnosticSourceCABundleRO,
-	diagnosticSourceCABundleDigest,
 	diagnosticSourceAPTConfigOpen,
 	diagnosticSourceAPTConfigMeta,
 	diagnosticSourceAPTConfigRO,
-	diagnosticSourceAPTConfigDigest,
 	diagnosticConfigOpen,
 	diagnosticConfigMetadata,
 	diagnosticConfigRead,
@@ -103,7 +97,6 @@ var buildkitIDPattern = regexp.MustCompile(`^[a-z0-9]{25}$`)
 type runtimePolicy struct {
 	realRuncPath           string
 	realRuncVersion        string
-	realRuncOwnerPairs     [2]ownerPair
 	trustTreeOwnerPairs    [2]ownerPair
 	executorTreeOwnerPairs [2]ownerPair
 	buildkitExecutorRoot   string
@@ -137,7 +130,6 @@ func productionPolicy() runtimePolicy {
 	return runtimePolicy{
 		realRuncPath:           realRuncPath,
 		realRuncVersion:        qualifiedRuncVersion,
-		realRuncOwnerPairs:     [2]ownerPair{{UID: 0, GID: 0}, {UID: 65534, GID: 65534}},
 		trustTreeOwnerPairs:    [2]ownerPair{{UID: 0, GID: 0}, {UID: 65534, GID: 65534}},
 		executorTreeOwnerPairs: [2]ownerPair{{UID: 0, GID: 0}, {UID: 65534, GID: 65534}},
 		buildkitExecutorRoot:   buildkitExecutorRoot,
@@ -200,6 +192,14 @@ func validateContractMetadata(observed contractFileMetadata) error {
 
 func main() {
 	policy := productionPolicy()
+	if len(os.Args) == 2 && os.Args[1] == "--ironcurtain-verify-protected-inputs-v2" {
+		if err := verifyProtectedInputs(policy); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, boundedError(err))
+			os.Exit(failureExitCode)
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "ironcurtain-build-trust-inputs/2")
+		return
+	}
 	if handled, exitCode, output := dispatchFailureDiagnosticCommand(os.Args[1:]); handled {
 		if output != "" {
 			_, _ = fmt.Fprintln(os.Stdout, output)
@@ -214,6 +214,22 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "ironcurtain build runtime: %s\n", boundedError(err))
 		os.Exit(failureExitCode)
 	}
+}
+
+func verifyProtectedInputs(policy runtimePolicy) error {
+	contract, err := loadTrustContractSecure(policy)
+	if err != nil {
+		return err
+	}
+	for _, source := range contract.PublicSources {
+		if err := validateSourceFile(policy, source); err != nil {
+			return err
+		}
+	}
+	if err := validateRealRunc(policy, contract); err != nil {
+		return err
+	}
+	return validateOwnExecutableReadOnly(policy)
 }
 
 type codedRuntimeError struct {
@@ -303,9 +319,9 @@ func handoffRunc(argv, env []string, policy runtimePolicy, exec execFunc) error 
 	execArgv = append(execArgv, argv...)
 	execArgv = ensureNoNewKeyring(execArgv)
 	if err := exec(policy.realRuncPath, execArgv, env); err != nil {
-		return fmt.Errorf("exec pinned runc: %w", err)
+		return fmt.Errorf("exec selected runc: %w", err)
 	}
-	return errors.New("pinned runc unexpectedly returned")
+	return errors.New("selected runc unexpectedly returned")
 }
 
 // Keep the compatibility behavior in the common build-trust runtime so every

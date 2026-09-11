@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ContainerRuntime } from '../src/docker/types.js';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
   DOCKER_DESKTOP_OFFLINE_ARCHIVE,
@@ -19,9 +20,86 @@ import {
   isDockerDesktopSmokeMode,
   isExactSmokeNonceResponse,
   parseNestedAppleSmokeMode,
+  parseNestedSmokeInvocation,
+  expectedDockerSmokeTopology,
+  verifyAgentDirectEgressDenied,
 } from '../scripts/smoke-nested-apple-workload.js';
 
+describe('agent direct-egress denial', () => {
+  it('checks tool readiness and direct TCP denial as the agent and through passwordless sudo', async () => {
+    const exec = vi.fn<ContainerRuntime['exec']>().mockImplementation(async (_id, args) => ({
+      exitCode: args.includes('-V') ? 0 : 1,
+      stdout: '',
+      stderr: '',
+    }));
+    await verifyAgentDirectEgressDenied({ exec }, 'outer-agent');
+    expect(exec.mock.calls).toEqual([
+      ['outer-agent', ['/usr/bin/socat', '-V'], 5_000, 'codespace'],
+      ['outer-agent', ['/usr/bin/socat', '-u', '/dev/null', 'TCP:1.1.1.1:443,connect-timeout=3'], 5_000, 'codespace'],
+      ['outer-agent', ['sudo', '-n', '/usr/bin/socat', '-V'], 5_000, 'codespace'],
+      [
+        'outer-agent',
+        ['sudo', '-n', '/usr/bin/socat', '-u', '/dev/null', 'TCP:1.1.1.1:443,connect-timeout=3'],
+        5_000,
+        'codespace',
+      ],
+    ]);
+  });
+
+  it.each([false, true])('rejects direct egress when sudo=%s', async (sudo) => {
+    const exec = vi.fn<ContainerRuntime['exec']>().mockImplementation(async (_id, args) => ({
+      exitCode: args.includes('-V') || args.includes('sudo') === sudo ? 0 : 1,
+      stdout: '',
+      stderr: '',
+    }));
+    await expect(verifyAgentDirectEgressDenied({ exec }, 'outer-agent')).rejects.toThrow(/unexpectedly reached/);
+  });
+
+  it.each([false, true])('does not mistake an unavailable probe for denial when sudo=%s', async (sudo) => {
+    const exec = vi.fn<ContainerRuntime['exec']>().mockImplementation(async (_id, args) => ({
+      exitCode: args.includes('-V') && args.includes('sudo') !== sudo ? 0 : 1,
+      stdout: '',
+      stderr: '',
+    }));
+    await expect(verifyAgentDirectEgressDenied({ exec }, 'outer-agent')).rejects.toThrow(/probe is unavailable/);
+  });
+});
+
 describe('nested Apple smoke invocation', () => {
+  it('preserves legacy flags while separating WSL environment from Docker scenarios', () => {
+    expect(parseNestedSmokeInvocation(['--docker-desktop-images', '--environment', 'wsl-desktop'])).toEqual({
+      mode: 'docker-desktop-images',
+      target: 'wsl-desktop',
+    });
+    expect(parseNestedSmokeInvocation(['--docker-desktop-recovery'])).toEqual({
+      mode: 'docker-desktop-recovery',
+      target: 'docker-desktop',
+    });
+    expect(parseNestedSmokeInvocation(['--pty'])).toEqual({ mode: 'pty', target: 'apple' });
+    expect(() => parseNestedSmokeInvocation(['--pty', '--environment', 'wsl-desktop'])).toThrow(/does not match/);
+    expect(() => parseNestedSmokeInvocation(['--docker-desktop-offline', '--environment', 'apple'])).toThrow(
+      /does not match/,
+    );
+  });
+
+  it.each([
+    ['offline', 0, 0],
+    ['images', 1, 1],
+    ['packages', 1, 2],
+  ] as const)('requires WSL %s without any ordinary transport or relay uplink', (mode, networks, relays) => {
+    expect(expectedDockerSmokeTopology('wsl-desktop', mode)).toEqual({
+      ordinaryTransportCount: 0,
+      egressNetworkCount: networks,
+      relayCount: relays,
+      relayBridgeUplink: false,
+    });
+    expect(expectedDockerSmokeTopology('docker-desktop', mode)).toEqual({
+      ordinaryTransportCount: 1,
+      egressNetworkCount: networks,
+      relayCount: relays,
+      relayBridgeUplink: true,
+    });
+  });
   it('selects each acceptance gate with one unambiguous argument', () => {
     expect(parseNestedAppleSmokeMode([])).toBe('batch');
     expect(parseNestedAppleSmokeMode(['--pty'])).toBe('pty');

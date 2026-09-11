@@ -13,6 +13,10 @@ export function parseDockerImageInfo(raw: unknown): DockerImageInfo {
     ? raw.RepoTags.filter((tag): tag is string => typeof tag === 'string')
     : [];
   return {
+    ...(raw.Architecture === 'amd64' || raw.Architecture === 'arm64' ? { architecture: raw.Architecture } : {}),
+    ...(Array.isArray(raw.RepoDigests)
+      ? { repoDigests: raw.RepoDigests.filter((item): item is string => typeof item === 'string') }
+      : {}),
     id: typeof raw.Id === 'string' ? raw.Id : '',
     repoTags,
     labels,

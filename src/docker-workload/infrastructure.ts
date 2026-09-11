@@ -1,3 +1,5 @@
+import { dockerEndpointSchema, type DockerEndpoint } from '../docker/docker-endpoint.js';
+import { createContainerRuntime } from '../docker/container-runtime.js';
 /**
  * Common secure nested Docker-workload lifecycle orchestration.
  *
@@ -10,7 +12,8 @@
  *
  * It deliberately does NOT consult the temporary implementation fuse in
  * `config.ts`: this is the mechanism the product wiring calls only after that
- * fuse has already admitted the session. A guard test enforces the non-import.
+ * fuse has already admitted the session. A guard test permits only type imports
+ * from that module, so lifecycle code cannot call its admission functions.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -26,7 +29,8 @@ import {
 } from '../config/paths.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
-import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
+import type { LoadedResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
+import type { ResolvedDockerWorkloadConfig } from './config.js';
 // Type-only: daemon observations are deliberately field-compatible with the
 // lifecycle evidence payloads, and a type import adds no runtime edge.
 import type { PrivateDockerBootstrapObservation, PrivateDockerDaemonReadiness } from './private-docker.js';
@@ -56,6 +60,7 @@ import {
   DOCKER_WORKLOAD_STALE_HEARTBEAT_MS,
   DOCKER_WORKLOAD_WATCHDOG_STARTUP_TIMEOUT_MS,
   loadFrozenWatchdogPolicyTemplate,
+  loadLeaseWatchdogPolicy,
   renderWatchdogPolicy,
 } from './watchdog-policy.js';
 import {
@@ -63,6 +68,7 @@ import {
   launchDetachedResourceWatchdogSupervisor,
   loadResourceWatchdogSupervisorStatus,
   requestResourceWatchdogSupervisorStop,
+  watchdogSupervisorPolicyBinding,
   type LaunchDetachedResourceWatchdogSupervisorOptions,
   type ResourceWatchdogSupervisorStatus,
 } from './resource-watchdog-supervisor.js';
@@ -98,7 +104,8 @@ export type OuterResourceRole =
   | 'fixed-relay'
   | 'proxy'
   | 'network'
-  | 'transport-network';
+  | 'transport-network'
+  | 'qualification-observer';
 
 /**
  * A precommitted outer-resource ledger entry. The caller creates the runtime
@@ -148,7 +155,7 @@ export interface WatchdogSupervisorController {
   readStatus(statusPath: string): ResourceWatchdogSupervisorStatus | undefined;
   requestStop(
     stopRequestPath: string,
-    lease: { readonly leaseId: string; readonly generation: string },
+    lease: { readonly leaseId: string; readonly generation: string; readonly schemaVersion: 1 | 2 },
     cleanup: DockerWorkloadCleanupProof,
     now: Date,
   ): void;
@@ -160,8 +167,8 @@ export interface DockerWorkloadAdmissionOptions {
   readonly runtimeKind: DockerWorkloadRuntimeKind;
   readonly bundleId: string;
   readonly workspaceRoot: string;
-  /** The resolved capability config hash recorded in the admission audit event. */
-  readonly configHash: string;
+  /** Complete resolved configuration recorded in the admission audit event. */
+  readonly configuration: ResolvedDockerWorkloadConfig;
   readonly watchdogPolicyTemplatePath: string;
   readonly watchdogSupervisorEntrypointPath: string;
   readonly leaseId?: string;
@@ -174,7 +181,7 @@ export interface DockerWorkloadAdmissionOptions {
   /** Test seam for cross-process lock identity; production reads the host process table. */
   readonly processIdentityForPid?: ProcessIdentityResolver;
   /** Resolve the runtime recorded by an older lease when backend selection changed. */
-  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind) => ContainerRuntime;
+  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind, endpoint?: DockerEndpoint) => ContainerRuntime;
   readonly supervisor?: WatchdogSupervisorController;
   /** Off for tests that must not leave a real host heartbeat interval running. */
   readonly startHeartbeat?: boolean;
@@ -190,7 +197,7 @@ export interface ReconcileDockerWorkloadOptions {
   /** Test seam for cross-process lock identity; production reads the host process table. */
   readonly processIdentityForPid?: ProcessIdentityResolver;
   /** Resolve the runtime recorded by an older lease when backend selection changed. */
-  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind) => ContainerRuntime;
+  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind, endpoint?: DockerEndpoint) => ContainerRuntime;
   readonly supervisor?: WatchdogSupervisorController;
   readonly recoveryBoundMs?: number;
   readonly staleHeartbeatMs?: number;
@@ -235,6 +242,7 @@ export interface DockerWorkloadTeardownResult {
 export async function admitDockerWorkloadBundle(
   options: DockerWorkloadAdmissionOptions,
 ): Promise<DockerWorkloadBundleHandle> {
+  if (options.runtimeKind === 'docker') dockerEndpointSchema.parse(options.runtime.dockerEndpoint);
   const clock = options.clock ?? defaultClock;
   const sleep = options.sleep ?? defaultSleep;
   const pidAlive = options.pidAlive ?? defaultPidAlive;
@@ -266,7 +274,7 @@ export async function admitDockerWorkloadBundle(
     mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
 
     const policyPath = join(leaseDir, POLICY_FILE);
-    const loadedPolicy = renderWatchdogPolicy(template.template, stateRoot, policyPath);
+    const loadedPolicy = renderWatchdogPolicy(template, stateRoot, policyPath);
 
     const leasePath = join(leaseDir, LEASE_FILE);
     createDockerWorkloadLease(leasePath, {
@@ -274,8 +282,9 @@ export async function admitDockerWorkloadBundle(
       bundleId: options.bundleId,
       generation,
       runtimeKind: options.runtimeKind,
+      dockerEndpoint: options.runtimeKind === 'docker' ? options.runtime.dockerEndpoint : undefined,
       paths: leasePathsFor(options.workspaceRoot, stateRoot, options.bundleId),
-      bindings: { watchdogPolicySha256: loadedPolicy.sha256 },
+      bindings: { watchdogPolicy: loadedPolicy.policy },
       cleanupInventoryGapMs: loadedPolicy.policy.cleanupInventoryGapMs,
       coordinatorPid: process.pid,
       now: clock(),
@@ -286,9 +295,8 @@ export async function admitDockerWorkloadBundle(
       decision: 'admitting',
       bundleId: options.bundleId,
       runtimeKind: options.runtimeKind,
-      configHash: options.configHash,
-      watchdogPolicySha256: loadedPolicy.sha256,
-      watchdogTemplateSha256: template.sha256,
+      configuration: options.configuration,
+      watchdogPolicy: loadedPolicy.policy,
       detail: 'reconciled outstanding leases and created a fresh admitting lease',
     });
 
@@ -303,7 +311,6 @@ export async function admitDockerWorkloadBundle(
       statusPath: join(leaseDir, STATUS_FILE),
       stopRequestPath: join(leaseDir, STOP_REQUEST_FILE),
       loadedPolicy,
-      templateSha256: template.sha256,
       ownershipLabelKey,
       supervisorEntrypointPath: options.watchdogSupervisorEntrypointPath,
       auditSink: options.auditSink,
@@ -339,7 +346,6 @@ interface DockerWorkloadBundleHandleContext {
   readonly statusPath: string;
   readonly stopRequestPath: string;
   readonly loadedPolicy: LoadedResourceWatchdogPolicy;
-  readonly templateSha256: string;
   readonly ownershipLabelKey: string;
   readonly supervisorEntrypointPath: string;
   readonly auditSink: DockerWorkloadAuditSink | undefined;
@@ -490,8 +496,7 @@ export class DockerWorkloadBundleHandle {
     this.emit({
       kind: 'watchdog-attested',
       supervisorPid: launched.pid,
-      policySha256: this.loadedPolicy.sha256,
-      templateSha256: this.context.templateSha256,
+      policy: this.loadedPolicy.policy,
       firstSample,
     });
     this.startSupervisorMonitor();
@@ -523,7 +528,6 @@ export class DockerWorkloadBundleHandle {
     this.emit({
       kind: 'private-docker-bootstrap',
       attestation: DAEMON_READY_ATTESTATION,
-      toolchainDigest: observation.preflight.toolchainDigest,
       toolchain: observation.preflight.toolchain,
       image: observation.image,
       network: {
@@ -673,7 +677,7 @@ export class DockerWorkloadBundleHandle {
     const lease = loadDockerWorkloadLease(this.leasePath);
     this.context.supervisor.requestStop(
       this.context.stopRequestPath,
-      { leaseId: lease.leaseId, generation: lease.generation },
+      { leaseId: lease.leaseId, generation: lease.generation, schemaVersion: lease.schemaVersion },
       cleanup,
       this.context.clock(),
     );
@@ -746,7 +750,7 @@ export class DockerWorkloadBundleHandle {
   private assertSupervisorStatus(status: ResourceWatchdogSupervisorStatus): void {
     assertResourceWatchdogSupervisorFresh(
       status,
-      { leaseId: this.leaseId, generation: this.generation, policySha256: this.loadedPolicy.sha256 },
+      { leaseId: this.leaseId, generation: this.generation, policy: this.loadedPolicy.policy },
       this.loadedPolicy.policy.staleAfterMs,
       this.context.clock(),
     );
@@ -887,10 +891,10 @@ function isLeaseLive(
   try {
     const status = supervisor.readStatus(join(leaseDir, STATUS_FILE));
     if (status === undefined) return false;
-    const supervisorStaleAfterMs = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE)).policy.staleAfterMs;
+    const supervisorStaleAfterMs = loadLeaseWatchdogPolicy(lease, join(leaseDir, POLICY_FILE)).policy.staleAfterMs;
     assertResourceWatchdogSupervisorFresh(
       status,
-      { leaseId: lease.leaseId, generation: lease.generation, policySha256: lease.bindings.watchdogPolicySha256 },
+      { leaseId: lease.leaseId, generation: lease.generation, ...watchdogSupervisorPolicyBinding(lease) },
       supervisorStaleAfterMs,
       now,
     );
@@ -912,17 +916,23 @@ async function recoverStaleLease(context: {
   readonly staleHeartbeatMs: number;
 }): Promise<void> {
   const { leaseDir, leasePath, lease, options, clock, sleep, supervisor, recoveryBoundMs } = context;
+  const endpoint = lease.schemaVersion === 2 ? lease.dockerEndpoint : undefined;
   const runtime =
-    lease.runtimeKind === options.runtimeKind ? options.runtime : options.runtimeForKind?.(lease.runtimeKind);
+    lease.runtimeKind === options.runtimeKind &&
+    (endpoint === undefined || endpoint.host === options.runtime.dockerEndpoint?.host)
+      ? options.runtime
+      : endpoint === undefined
+        ? options.runtimeForKind?.(lease.runtimeKind)
+        : (options.runtimeForKind ?? createContainerRuntime)(lease.runtimeKind, endpoint);
   if (runtime === undefined) {
     throw new Error(
       `cannot reconcile ${lease.runtimeKind} lease through selected ${options.runtimeKind} runtime; recorded runtime is unavailable`,
     );
   }
-  const loadedPolicy = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE));
-  if (loadedPolicy.sha256 !== lease.bindings.watchdogPolicySha256) {
-    throw new Error('reconciliation policy hash does not match the lease binding');
+  if (endpoint !== undefined && runtime.dockerEndpoint?.host !== endpoint.host) {
+    throw new Error('recovery runtime does not match the recorded Docker endpoint');
   }
+  const loadedPolicy = loadLeaseWatchdogPolicy(lease, join(leaseDir, POLICY_FILE));
   const result = await performSerializedDockerWorkloadCleanup({
     runtime,
     leasePath,
@@ -982,7 +992,7 @@ async function recoverStaleLease(context: {
   try {
     supervisor.requestStop(
       join(leaseDir, STOP_REQUEST_FILE),
-      { leaseId: lease.leaseId, generation: lease.generation },
+      { leaseId: lease.leaseId, generation: lease.generation, schemaVersion: lease.schemaVersion },
       result.cleanup,
       clock(),
     );

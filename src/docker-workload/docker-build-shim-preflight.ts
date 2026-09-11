@@ -1,6 +1,12 @@
 /** Backend-neutral agent-side initialization for the package-build shim. */
 
-import type { DockerBuildShimStagingContract } from '../docker/docker-build-shim.js';
+import {
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+  type DockerBuildShimStagingContract,
+  type DockerBuildTrustCanaryContract,
+} from '../docker/docker-build-shim.js';
 import type { ContainerRuntime } from '../docker/types.js';
 
 export const DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS = 15_000;
@@ -261,4 +267,51 @@ export async function preflightDockerBuildShimAgent(
     throw new Error('nested-Docker build shim preflight argv does not invoke the PATH-resolved executable');
   }
   await execDockerBuildShimPreflight(exec, contract.preflight.argv, 'nested-Docker build shim version preflight');
+}
+
+/**
+ * Common protected-input preflight before untrusted agent execution. The outer
+ * create/adjudication path owns mount source identity; this probe confirms the
+ * runtime sees the same public inputs and effective read-only backing.
+ */
+export async function preflightDockerBuildTrust(
+  exec: DockerBuildShimExec,
+  contract: DockerBuildShimStagingContract,
+  canary: DockerBuildTrustCanaryContract,
+  wrapperPath = contract.buildTrustPreflight.expectedPath,
+): Promise<void> {
+  const inputs = [
+    [contract.buildTrustPreflight.trustContract.path, canary.buildTrustContract],
+    [DOCKER_BUILD_TRUST_CA_CERT_PATH, canary.caCertificate],
+    [DOCKER_BUILD_TRUST_CA_BUNDLE_PATH, canary.caBundle],
+    [DOCKER_BUILD_TRUST_APT_CONFIG_PATH, canary.aptConfig],
+  ] as const;
+  for (const [path, expected] of inputs) {
+    if (expected.length === 0 || Buffer.byteLength(expected) > 2 << 20)
+      throw new Error('build-trust expected public input is outside bounds');
+    const result = await exec(['/bin/cat', path], {
+      user: DOCKER_BUILD_SHIM_ROOT_USER,
+      timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0 || result.stdout !== expected) {
+      throw new Error(`nested-Docker build-trust public input differs from host staging: ${path}`);
+    }
+  }
+  const protectedInputs = await execDockerBuildShimPreflight(
+    exec,
+    [wrapperPath, '--ironcurtain-verify-protected-inputs-v2'],
+    'nested-Docker effective read-only build-trust inputs',
+    DOCKER_BUILD_SHIM_ROOT_USER,
+  );
+  if (protectedInputs !== 'ironcurtain-build-trust-inputs/2')
+    throw new Error('nested-Docker build-trust runtime protocol mismatch');
+  const version = await execDockerBuildShimPreflight(
+    exec,
+    [wrapperPath, '--version'],
+    'nested-Docker selected runc compatibility',
+    DOCKER_BUILD_SHIM_ROOT_USER,
+  );
+  if (!version.startsWith(contract.buildTrustPreflight.expectedVersionPrefix.trimEnd())) {
+    throw new Error('nested-Docker selected runc version mismatch');
+  }
 }

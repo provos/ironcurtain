@@ -11,6 +11,21 @@ import type { ContainerRuntime, DockerExecResult } from '../../src/docker/types.
 const NETWORK_ID = '1'.repeat(64);
 
 describe('backend-neutral private Docker client', () => {
+  it('retains a bounded, sanitized failed client probe when daemon logs are unavailable', async () => {
+    let now = 0;
+    const failure = waitForPrivateDockerDaemonReady(
+      {
+        containerId: 'daemon-sidecar',
+        async execute() {
+          return { exitCode: 255, stdout: '', stderr: '\u0000exec /wrong/docker: no such file\n' + 'x'.repeat(8_000) };
+        },
+      },
+      { timeoutMs: 1, now: () => now++, sleep: async () => undefined },
+    );
+    await expect(failure).rejects.toThrow('last readiness probe (exit 255):\nexec /wrong/docker: no such file');
+    await expect(failure).rejects.toThrow('… (truncated)\ndockerd log tail:\n(dockerd log unavailable)');
+  });
+
   it('binds readiness and managed-network commands to one client, socket, container, and user', async () => {
     const commands: (readonly string[])[] = [];
     const runtime: Pick<ContainerRuntime, 'exec'> = {

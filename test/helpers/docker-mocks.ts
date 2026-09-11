@@ -13,7 +13,6 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentAdapter, AgentId, AgentResponse } from '../../src/docker/agent-adapter.js';
 import type { CertificateAuthority } from '../../src/docker/ca.js';
-import type { RuntimeTrustMetadata } from '../../src/docker/runtime-trust.js';
 import type { DockerProxy } from '../../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../../src/docker/mitm-proxy.js';
 import type {
@@ -81,6 +80,7 @@ export function createMockDocker(options: CreateMockDockerOptions = {}): Contain
 
   return {
     supportsImageSnapshots: true,
+    dockerEndpoint: { host: 'unix:///var/run/docker.sock' },
 
     async preflight() {},
     async create(config: DockerContainerConfig) {
@@ -283,19 +283,5 @@ export function createMockCA(tempDir: string): CertificateAuthority {
     keyPem,
     certPath,
     keyPath,
-  };
-}
-
-/** Deterministic public-trust metadata for infrastructure shape tests. */
-export function createMockRuntimeTrust(): RuntimeTrustMetadata {
-  return {
-    schemaVersion: 1,
-    generation: `runtime-trust-v1:${'1'.repeat(64)}`,
-    caCertificateSha256: '1'.repeat(64),
-    publicRootsSha256: '2'.repeat(64),
-    bundleSha256: '3'.repeat(64),
-    publicRootCount: 1,
-    containerCertificatePath: '/etc/ironcurtain/ca-cert.pem',
-    containerBundlePath: '/etc/ironcurtain/ca-bundle.pem',
   };
 }

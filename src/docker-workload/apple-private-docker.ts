@@ -135,15 +135,12 @@ export async function provisionAppleVmDockerWorkload(options: {
     hostArtifactDirectory: options.config.hostArtifactDirectory,
     guestArtifactDirectory: options.config.guestArtifactDirectory,
   });
+  const artifact = options.config.artifact;
   const preflight = await preflightPrivateDockerClient({
     client,
-    manifest: loadClientToolchainManifest(options.config.clientToolchainManifestPath),
+    manifest: loadClientToolchainManifest(options.config.clientToolchainManifestPath, artifact.architecture),
   });
 
-  const artifact = options.config.artifact;
-  if (preflight.architecture !== artifact.architecture) {
-    throw new Error('selected agent artifact architecture differs from the private Docker daemon');
-  }
   await verifySelectedAgentArtifactArchive(artifact);
   let inspected = await runtime.inspectImage(artifact.logicalName);
   if (inspected === undefined) {
@@ -169,7 +166,6 @@ export async function provisionAppleVmDockerWorkload(options: {
       transport: 'apple-archive',
       logicalName: artifact.logicalName,
       buildHash: artifact.buildHash,
-      archiveSha256: artifact.archiveSha256,
       outerImageId: artifact.appleImageId,
       innerImageId: artifact.dockerImageId,
     },

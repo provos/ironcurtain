@@ -16,7 +16,6 @@ import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync
 import { join } from 'node:path';
 import * as logger from '../src/logger.js';
 import { getSessionsDir } from '../src/config/paths.js';
-import { createMockRuntimeTrust } from './helpers/docker-mocks.js';
 
 // --- Module mocks (hoisted) ---
 
@@ -39,7 +38,7 @@ const infraState: {
   createReturnValue: undefined,
 };
 
-vi.mock('../src/docker/docker-infrastructure.js', () => ({
+vi.mock('../src/docker/docker-infrastructure.js', async (importOriginal) => ({
   createDockerInfrastructure: vi.fn(async () => {
     infraState.createCalls++;
     if (infraState.createShouldThrow) {
@@ -61,8 +60,8 @@ vi.mock('../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: vi.fn(),
   createSessionContainers: vi.fn(),
   prepareConversationStateDir: vi.fn(),
-  // Only invoked on the Docker-workload path (handle present); harmless here.
-  dockerWorkloadSessionMetadata: vi.fn(),
+  dockerWorkloadSessionMetadata: (await importOriginal<typeof import('../src/docker/docker-infrastructure.js')>())
+    .dockerWorkloadSessionMetadata,
 }));
 
 // Mock claude-md-seed so we can exercise the error path by making the
@@ -85,6 +84,10 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import { createDockerInfrastructure, destroyDockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import { createAgentConversationId } from '../src/session/types.js';
+import { loadSessionMetadata } from '../src/session/session-metadata.js';
+import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
+import { loadFrozenWatchdogPolicyTemplate } from '../src/docker-workload/watchdog-policy.js';
+import { resolve } from 'node:path';
 import {
   createMockAdapter,
   createMockCA,
@@ -169,7 +172,6 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     docker: createMockDocker(),
     adapter: createMockAdapter(),
     ca: createMockCA(rootDir),
-    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake']]),
     orientationDir,
     systemPrompt: 'You are a borrowed test agent.',
@@ -504,6 +506,46 @@ describe('createDockerSession borrow path', () => {
     expect(teardownCounts.dockerRemove).toBe(0);
     expect(teardownCounts.proxyStop).toBe(0);
     expect(teardownCounts.mitmStop).toBe(0);
+  });
+
+  it('standalone batch persists complete workload configuration through the shared metadata factory', async () => {
+    const configuration = resolveDockerWorkloadConfig(
+      { enabled: true, networkAccess: 'packages' },
+      { memoryMb: 8192, cpus: 4 },
+    );
+    const watchdogPolicy = {
+      ...loadFrozenWatchdogPolicyTemplate(resolve('config/docker-workload/resource-watchdog-policy.json')),
+      targetRoot: '/state',
+      targetDevice: 1,
+      targetInode: 2,
+    };
+    const builtBundle = {
+      ...createMockInfra(tempDir, 'standalone-workload'),
+      runtimeKind: 'docker' as const,
+      dockerWorkload: {
+        leaseId: 'lease-batch',
+        generation: 'generation-batch',
+        loadedPolicy: { policy: watchdogPolicy },
+      } as unknown as NonNullable<DockerInfrastructure['dockerWorkload']>,
+    };
+    infraState.createReturnValue = builtBundle;
+    const baseConfig = createTestConfig();
+    const session = await createSession({
+      config: { ...baseConfig, userConfig: { ...baseConfig.userConfig, dockerWorkload: configuration } },
+      mode: { kind: 'docker', agent: 'claude-code' as never },
+      agentConversationId: createAgentConversationId(),
+    });
+    try {
+      expect(loadSessionMetadata(session.getInfo().id)?.dockerWorkload).toEqual({
+        leaseId: 'lease-batch',
+        generation: 'generation-batch',
+        configuration,
+        watchdogPolicy,
+        backend: 'docker',
+      });
+    } finally {
+      await session.close();
+    }
   });
 
   it('standalone success path: session.close() destroys the factory-owned bundle', async () => {

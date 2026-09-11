@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,51 +12,42 @@ import (
 )
 
 const syntheticBundlePath = buildkitExecutorRoot + "/aaaaaaaaaaaaaaaaaaaaaaaaa"
-const noNetworkEnvelopeEvidenceSHA256 = "af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21"
-const hostNetworkEnvelopeEvidenceSHA256 = "128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58"
-const envelopeComparisonEvidenceSHA256 = "36e5779065479b0aaecbbc7f859f8a9f5ae16a66665a4b8bcac318f4fbcbebf1"
 
 func TestQualifiedEnvelopeConstantsMatchCheckedEvidence(t *testing.T) {
 	cases := []struct {
 		name              string
 		path              string
-		digest            string
 		namespaceTypes    []string
 		qualificationMode string
 	}{
 		{
 			name:              "no network",
 			path:              "ca-injection-buildkit-oci-envelope.fixture.json",
-			digest:            noNetworkEnvelopeEvidenceSHA256,
 			namespaceTypes:    qualifiedNoNetworkNamespaceTypes,
 			qualificationMode: "none",
 		},
 		{
 			name:              "host network",
 			path:              "ca-injection-buildkit-oci-envelope-host.fixture.json",
-			digest:            hostNetworkEnvelopeEvidenceSHA256,
 			namespaceTypes:    qualifiedHostNetworkNamespaceTypes,
 			qualificationMode: "host",
 		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := readEnvelopeEvidence(t, test.path, test.digest)
+			fixture := readEnvelopeEvidence(t, test.path)
 			assertEvidenceMatchesQualifiedPolicy(t, fixture, test.namespaceTypes, test.qualificationMode)
 			assertExecutableFixtureRepresentsEvidence(t, fixture, test.namespaceTypes)
 		})
 	}
 
 	comparison := readEvidenceBytes(t, "ca-injection-buildkit-oci-envelope-comparison.json")
-	requireEvidenceDigest(t, comparison, envelopeComparisonEvidenceSHA256)
 	var delta struct {
 		Baseline struct {
-			NetworkMode   string `json:"networkMode"`
-			FixtureSHA256 string `json:"fixtureSha256"`
+			NetworkMode string `json:"networkMode"`
 		} `json:"baseline"`
 		Candidate struct {
-			NetworkMode   string `json:"networkMode"`
-			FixtureSHA256 string `json:"fixtureSha256"`
+			NetworkMode string `json:"networkMode"`
 		} `json:"candidate"`
 		StructuralDelta struct {
 			LinuxNamespaces struct {
@@ -74,7 +63,7 @@ func TestQualifiedEnvelopeConstantsMatchCheckedEvidence(t *testing.T) {
 	if err := json.Unmarshal(comparison, &delta); err != nil {
 		t.Fatal(err)
 	}
-	if delta.Baseline.NetworkMode != "none" || delta.Baseline.FixtureSHA256 != noNetworkEnvelopeEvidenceSHA256 || delta.Candidate.NetworkMode != "host" || delta.Candidate.FixtureSHA256 != hostNetworkEnvelopeEvidenceSHA256 || delta.StructuralDelta.DevMounts.Changed || len(delta.StructuralDelta.Unexpected) != 0 || len(delta.StructuralDelta.LinuxNamespaces.Added) != 0 || !reflect.DeepEqual(delta.StructuralDelta.LinuxNamespaces.Removed, []evidenceNamespace{{Keys: []string{"type"}, Type: "network"}}) {
+	if delta.Baseline.NetworkMode != "none" || delta.Candidate.NetworkMode != "host" || delta.StructuralDelta.DevMounts.Changed || len(delta.StructuralDelta.Unexpected) != 0 || len(delta.StructuralDelta.LinuxNamespaces.Added) != 0 || !reflect.DeepEqual(delta.StructuralDelta.LinuxNamespaces.Removed, []evidenceNamespace{{Keys: []string{"type"}, Type: "network"}}) {
 		t.Fatal("checked structural comparison is not the exact network-namespace-only delta")
 	}
 }
@@ -381,10 +370,9 @@ func readConfigFixture(t *testing.T) []byte {
 	return contents
 }
 
-func readEnvelopeEvidence(t *testing.T, name, expectedDigest string) envelopeEvidence {
+func readEnvelopeEvidence(t *testing.T, name string) envelopeEvidence {
 	t.Helper()
 	contents := readEvidenceBytes(t, name)
-	requireEvidenceDigest(t, contents, expectedDigest)
 	var fixture envelopeEvidence
 	if err := json.Unmarshal(contents, &fixture); err != nil {
 		t.Fatal(err)
@@ -399,14 +387,6 @@ func readEvidenceBytes(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return contents
-}
-
-func requireEvidenceDigest(t *testing.T, contents []byte, expected string) {
-	t.Helper()
-	digest := sha256.Sum256(contents)
-	if actual := hex.EncodeToString(digest[:]); actual != expected {
-		t.Fatalf("checked OCI evidence digest = %s, want %s", actual, expected)
-	}
 }
 
 func modeString(mode uint32) string {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import errno
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Literal, Sequence
+from urllib.parse import urlsplit
 
 
 WORKSPACE = Path("/workspace")
@@ -44,8 +46,6 @@ DAEMON_DATA_ROOT = Path("/home/codespace/.local/share/docker")
 
 REGISTRY_SOCKET = Path("/tmp/ironcurtain-registry-egress.sock")
 PACKAGE_SOCKET = Path("/tmp/ironcurtain-package-egress.sock")
-REGISTRY_PROXY = "http://127.0.0.1:18081"
-PACKAGE_PROXY = "http://127.0.0.1:18082"
 OUTER_RELAY_REFUSAL_TIMEOUT_SECONDS = 3
 HOST_RELAY_PROBE_TIMEOUT_SECONDS = 30
 HOST_PACKAGE_CONNECT_SOCKET_TIMEOUT_SECONDS = 5
@@ -64,18 +64,15 @@ HOST_PACKAGE_CONNECT_EXIT_OUTCOMES = {
 }
 OUTER_PACKAGE_RESPONSE_LIMIT = 512 * 1024
 PACKAGE_SHIM = Path("/usr/local/sbin/docker")
-PACKAGE_RUNC = Path("/usr/local/sbin/runc")
-REAL_RUNC = Path("/usr/local/lib/ironcurtain-docker/bin/runc")
+PACKAGE_RUNC = Path("/ironcurtain-build-trust/runc")
+REAL_RUNC = Path("/ironcurtain-real-runc")
 PACKAGE_CONFIG = Path("/run/ironcurtain-package-build/client/config.json")
 PACKAGE_BUILDX_STATE = Path("/run/ironcurtain-package-build/buildx")
-PACKAGE_CONTRACT_PARENT = Path("/opt/ironcurtain-build-trust")
-PACKAGE_CONTRACT = Path("/opt/ironcurtain-build-trust/build-trust-contract.json")
-PACKAGE_APT_CONFIG = Path("/opt/ironcurtain-build-trust/apt.conf")
-AGENT_CA_CERT = Path("/opt/ironcurtain-build-trust/ca-cert.pem")
-AGENT_CA_BUNDLE = Path("/opt/ironcurtain-build-trust/ca-bundle.pem")
-PACKAGE_RUNC_SHA256 = "34be777c92032e4bb63f7c467e396e0b9c35d4bf981f3b54a434d09b608c370d"
-REAL_RUNC_SHA256 = "f0ed2d355945fe2697f11f89773e07b48de0ef239962c4a0e0ae900161a23b12"
-REAL_RUNC_SIZE = 16_641_104
+PACKAGE_CONTRACT_PARENT = Path("/ironcurtain-build-trust")
+PACKAGE_CONTRACT = Path("/ironcurtain-build-trust/build-trust-contract.json")
+PACKAGE_APT_CONFIG = Path("/ironcurtain-build-trust/apt.conf")
+AGENT_CA_CERT = Path("/ironcurtain-build-trust/ca-cert.pem")
+AGENT_CA_BUNDLE = Path("/ironcurtain-build-trust/ca-bundle.pem")
 
 IMMUTABLE_ID = re.compile(r"sha256:[a-f0-9]{64}")
 CONTAINER_ID = re.compile(r"[a-f0-9]{64}")
@@ -201,12 +198,12 @@ def response_observation(port, marker, status, body):
     }
 
 
-def probe(port, path, marker):
+def probe(port, path, marker, endpoints):
     connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connection.settimeout(3)
     try:
         try:
-            connection.connect(("127.0.0.1", port))
+            connection.connect(tuple(endpoints.get(str(port), ["127.0.0.1", port])))
         except ConnectionRefusedError:
             return {"outcome": "refused", "port": port}
         except socket.timeout:
@@ -242,9 +239,10 @@ def probe(port, path, marker):
 
 if __name__ == "__main__":
     specs = json.loads(sys.argv[1])
+    endpoints = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
     print(
         json.dumps(
-            [probe(port, path, marker) for port, path, marker in specs],
+            [probe(port, path, marker, endpoints) for port, path, marker in specs],
             separators=(",", ":"),
             sort_keys=True,
         )
@@ -316,7 +314,7 @@ def main():
     deadline = time.monotonic() + SOCKET_TIMEOUT_SECONDS
     try:
         connection = socket.create_connection(
-            ("127.0.0.1", 18082), timeout=remaining_seconds(deadline)
+            (sys.argv[1], int(sys.argv[2])) if len(sys.argv) == 3 else ("127.0.0.1", 18082), timeout=remaining_seconds(deadline)
         )
     except OSError:
         return EXIT_DIAL_FAILURE
@@ -358,6 +356,9 @@ PACKAGE_NETWORK_BUILD_TIMEOUT_SECONDS = 900
 PACKAGE_FORM_BUILD_TIMEOUT_SECONDS = 90
 PACKAGE_CACHE_BUILD_TIMEOUT_SECONDS = 180
 PACKAGE_DIRECT_DENIAL_BUILD_TIMEOUT_SECONDS = 90
+PACKAGE_SIBLING_PROBE_ATTEMPTS = 5
+PACKAGE_SIBLING_CURL_TIMEOUT_SECONDS = 20
+PACKAGE_SIBLING_PROCESS_TIMEOUT_SECONDS = 30
 PACKAGE_IMAGE_SCAN_TIMEOUT_SECONDS = 300
 PACKAGE_SNAPSHOT_SCAN_TIMEOUT_SECONDS = 300
 SNAPSHOT_SCAN_PREFLIGHT_COMMAND_TIMEOUT_SECONDS = 5
@@ -417,7 +418,8 @@ PACKAGE_CRITICAL_OPERATION_BUDGET_SECONDS = (
 PACKAGE_WORKFLOW_RESERVE_SECONDS = 27 * 60
 HttpRequestMethod = Literal["CONNECT", "GET", "HEAD", "POST"]
 SnapshotRootClass = Literal["vfs"]
-DaemonIdentity = tuple[str, str, str, tuple[str, ...]]
+DaemonArchitecture = Literal["amd64", "arm64"]
+DaemonIdentity = tuple[str, str, str, DaemonArchitecture, tuple[str, ...]]
 SNAPSHOT_ENTRY_PHASES = (
     "root-open",
     "enumerate",
@@ -595,7 +597,7 @@ class PrivateKeyScanBudget:
     deadline: float
 
 
-def form_check_run_command() -> str:
+def form_check_run_command(endpoint: tuple[str, int]) -> str:
     try:
         script = (FIXTURE_DIR / "form-check.sh").read_bytes()
     except OSError:
@@ -606,6 +608,17 @@ def form_check_run_command() -> str:
         or len(script) > MAX_FORM_CHECK_SCRIPT_BYTES
     ):
         raise ProbeFailure("form-check fixture is outside its exact byte contract")
+    placeholder = b"__IRONCURTAIN_EXPECTED_PACKAGE_PROXY__"
+    if script.count(placeholder) != 1:
+        raise ProbeFailure("form-check fixture lacks one package-proxy placeholder")
+    try:
+        host = str(ipaddress.IPv4Address(endpoint[0]))
+    except (ipaddress.AddressValueError, IndexError, TypeError):
+        raise ProbeFailure("form-check package proxy is not a numeric IPv4 endpoint") from None
+    port = endpoint[1]
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ProbeFailure("form-check package proxy port is invalid")
+    script = script.replace(placeholder, f"http://{host}:{port}".encode("ascii"))
     encoded = base64.b64encode(script).decode("ascii", "strict")
     return f"RUN printf '%s' '{encoded}' | /usr/bin/base64 --decode | /bin/sh"
 
@@ -783,9 +796,41 @@ def run_bounded_snapshot_subprocess(
     )
 
 
+@dataclass(frozen=True)
+class SidecarSmokeSettings:
+    fixture_archive: str
+    fixture_image: str
+    uid: int
+    gid: int
+
+
+def parse_smoke_task(text: str) -> tuple[str, SidecarSmokeSettings | None]:
+    text = text.strip()
+    if text in MODE_CHECK_IDS:
+        return text, None
+    try:
+        value = json.loads(text)
+    except (ValueError, TypeError):
+        raise ProbeFailure("task must select a smoke mode or an explicit sidecar fixture descriptor") from None
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion", "mode", "placement", "fixtureArchive", "fixtureImage", "uid", "gid"
+    }:
+        raise ProbeFailure("sidecar smoke task has an invalid schema")
+    if value["schemaVersion"] != 1 or value["placement"] != "sidecar" or not isinstance(value["mode"], str) or value["mode"] not in MODE_CHECK_IDS:
+        raise ProbeFailure("sidecar smoke task has an invalid mode or placement")
+    if value["fixtureArchive"] != ".workflow-fixtures/python.tar" or not isinstance(value["fixtureImage"], str) or not SELECTED_LOCAL_REFERENCE.fullmatch(value["fixtureImage"]):
+        raise ProbeFailure("sidecar smoke task has an invalid fixture")
+    if type(value["uid"]) is not int or not 1 <= value["uid"] <= 0xFFFFFFFE or type(value["gid"]) is not int or not 0 <= value["gid"] <= 0xFFFFFFFE:
+        raise ProbeFailure("sidecar smoke task requires numeric non-root identity")
+    return value["mode"], SidecarSmokeSettings(value["fixtureArchive"], value["fixtureImage"], value["uid"], value["gid"])
+
+
 class Probe:
-    def __init__(self, mode: str = "packages") -> None:
+    def __init__(self, mode: str = "packages", sidecar: SidecarSmokeSettings | None = None) -> None:
         self.mode = mode
+        self.sidecar = sidecar
+        self.registry_endpoint: tuple[str, int] = ("127.0.0.1", 18081)
+        self.package_endpoint: tuple[str, int] = ("127.0.0.1", 18082)
         self.checks: list[str] = []
         suffix = uuid.uuid4().hex[:12]
         self.nonce = uuid.uuid4().hex
@@ -803,6 +848,7 @@ class Probe:
         self.ca_public_spki_cache: bytes | None = None
         self.authority_marker_cache: tuple[bytes, ...] | None = None
         self.admitted_daemon_identity: DaemonIdentity | None = None
+        self.daemon_architecture: DaemonArchitecture | None = None
 
     def require(self, condition: bool, check_id: str, detail: str = "") -> None:
         if not condition:
@@ -862,10 +908,29 @@ class Probe:
         )
 
     @staticmethod
+    def _canonical_daemon_architecture(value: object) -> DaemonArchitecture:
+        aliases: dict[object, DaemonArchitecture] = {
+            "amd64": "amd64",
+            "x86_64": "amd64",
+            "arm64": "arm64",
+            "aarch64": "arm64",
+        }
+        try:
+            return aliases[value]
+        except (KeyError, TypeError):
+            raise ProbeFailure("nested Docker daemon architecture is unsupported") from None
+
+    @staticmethod
     def _daemon_identity(info: object) -> DaemonIdentity:
         if not isinstance(info, dict):
             raise ProbeFailure("nested Docker daemon identity is not exact")
         security_options = info.get("SecurityOptions")
+        try:
+            architecture = Probe._canonical_daemon_architecture(
+                info.get("Architecture")
+            )
+        except ProbeFailure:
+            raise ProbeFailure("nested Docker daemon identity is not exact") from None
         if (
             info.get("Driver") != "vfs"
             or not isinstance(info.get("ID"), str)
@@ -881,20 +946,27 @@ class Probe:
             info["ID"],
             info["DockerRootDir"],
             info["Driver"],
+            architecture,
             tuple(security_options),
         )
 
     def validate_common(self) -> str:
         docker_host = os.environ.get("DOCKER_HOST")
         self.require(
-            docker_host == EXPECTED_DOCKER_HOST
+            docker_host == ("unix:///run/ironcurtain-docker/docker/docker.sock" if self.sidecar else EXPECTED_DOCKER_HOST)
             and os.environ.get("IRONCURTAIN_DOCKER_NETWORK") == EXPECTED_NETWORK,
             "common.endpoint",
             repr((docker_host, os.environ.get("IRONCURTAIN_DOCKER_NETWORK"))),
         )
 
+        if self.sidecar is not None:
+            self.assert_true(self.run(["sudo", "-n", "id", "-u"]).stdout.strip() == "0", "workflow agent retains passwordless sudo")
+
         server_version = self.docker(
             "version", "--format", "{{.Server.Version}}"
+        ).stdout.strip()
+        server_architecture = self.docker(
+            "version", "--format", "{{.Server.Arch}}"
         ).stdout.strip()
         info = json.loads(self.docker("info", "--format", "{{json .}}").stdout)
         try:
@@ -904,17 +976,32 @@ class Probe:
         daemon_detail = (
             tuple(
                 info.get(key)
-                for key in ("ID", "DockerRootDir", "Driver", "SecurityOptions")
+                for key in (
+                    "ID",
+                    "DockerRootDir",
+                    "Driver",
+                    "Architecture",
+                    "SecurityOptions",
+                )
             )
             if isinstance(info, dict)
             else type(info).__name__
         )
         self.require(
-            bool(server_version) and daemon_identity is not None,
+            bool(server_version)
+            and server_architecture in {"amd64", "arm64"}
+            and daemon_identity is not None
+            and daemon_identity[3] == server_architecture,
             "common.daemon-profile",
-            repr((server_version, daemon_detail)),
+            repr((server_version, server_architecture, daemon_detail)),
         )
         self.admitted_daemon_identity = daemon_identity
+        self.daemon_architecture = server_architecture
+        if self.sidecar is not None and self.mode in {"images", "packages"}:
+            self.registry_endpoint = self._proxy_endpoint(info.get("HttpProxy"))
+        if self.sidecar is not None and self.mode == "packages":
+            client_config = json.loads(PACKAGE_CONFIG.read_text(encoding="utf-8"))
+            self.package_endpoint = self._proxy_endpoint(client_config.get("proxies", {}).get("default", {}).get("httpProxy"))
 
         networks = json.loads(
             self.docker("network", "inspect", EXPECTED_NETWORK).stdout
@@ -933,6 +1020,15 @@ class Probe:
 
         containers = self.docker("container", "ls", "--all", "--quiet").stdout.strip()
         image_ids = self._all_image_ids()
+        if self.sidecar is not None:
+            self.assert_true(containers == "" and image_ids == [], "fresh sidecar has no inherited workload image")
+            self.assert_true(os.getuid() == self.sidecar.uid and os.getgid() == self.sidecar.gid, "workflow uses actual resolved host identity")
+            fixture = WORKSPACE / self.sidecar.fixture_archive
+            self.assert_true(fixture.is_file() and 0 < fixture.stat().st_size <= 1024 * 1024 * 1024, "test fixture archive is present and bounded")
+            self.docker("image", "load", "--input", str(fixture), timeout=300)
+            image_ids = self._all_image_ids()
+            fixture_id = self.docker("image", "inspect", "--format", "{{.Id}}", self.sidecar.fixture_image).stdout.strip()
+            self.assert_true(image_ids == [fixture_id], "sidecar contains only the explicit loaded fixture")
         self.require(
             containers == ""
             and len(image_ids) == 1
@@ -943,6 +1039,19 @@ class Probe:
         self.initial_image_ids = tuple(image_ids)
         self.cleanup_armed = True
         return image_ids[0]
+
+    @staticmethod
+    def _proxy_endpoint(value: object) -> tuple[str, int]:
+        if not isinstance(value, str):
+            raise ProbeFailure("sidecar proxy endpoint is missing")
+        parsed = urlsplit(value)
+        if parsed.scheme != "http" or not parsed.hostname or parsed.port is None or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment:
+            raise ProbeFailure("sidecar proxy endpoint is not one credential-free HTTP authority")
+        try:
+            ipaddress.IPv4Address(parsed.hostname)
+        except ipaddress.AddressValueError:
+            raise ProbeFailure("sidecar proxy endpoint must be a numeric IPv4 address") from None
+        return parsed.hostname, parsed.port
 
     def validate_relay_topology(self, selected_image_id: str) -> None:
         self.assert_true(
@@ -966,11 +1075,12 @@ class Probe:
             "--network",
             "host",
             "--entrypoint",
-            "/usr/bin/python3",
+            "python3" if self.sidecar else "/usr/bin/python3",
             selected_image_id,
             "-c",
             HOST_RELAY_PROBE_SCRIPT,
             json.dumps(HOST_RELAY_SPECS, separators=(",", ":")),
+            *([json.dumps({"18081": self.registry_endpoint, "18082": self.package_endpoint})] if self.sidecar else []),
             timeout=HOST_RELAY_PROBE_TIMEOUT_SECONDS,
         )
         self.assert_true(
@@ -1000,13 +1110,16 @@ class Probe:
         registry_expected = network_access in {"packages", "images"}
         package_expected = network_access == "packages"
         self.assert_true(
-            self._is_socket(REGISTRY_SOCKET) is registry_expected,
+            self._is_socket(REGISTRY_SOCKET) is (registry_expected and self.sidecar is None),
             f"registry UDS matches {network_access}",
         )
         self.assert_true(
-            self._is_socket(PACKAGE_SOCKET) is package_expected,
+            self._is_socket(PACKAGE_SOCKET) is (package_expected and self.sidecar is None),
             f"package UDS matches {network_access}",
         )
+        if self.sidecar is not None:
+            self._validate_sidecar_artifacts(network_access)
+            return
         package_paths = (
             PACKAGE_SHIM,
             PACKAGE_RUNC,
@@ -1052,10 +1165,11 @@ class Probe:
                 )
             contract_parent_stat = PACKAGE_CONTRACT_PARENT.stat()
             self.assert_true(
-                contract_parent_stat.st_uid == 0
-                and contract_parent_stat.st_gid == 0
-                and stat.S_IMODE(contract_parent_stat.st_mode) == 0o755,
-                "Apple contract parent is exact root-owned trusted infrastructure",
+                0 <= contract_parent_stat.st_uid <= 0xFFFFFFFF
+                and 0 <= contract_parent_stat.st_gid <= 0xFFFFFFFF
+                and stat.S_IMODE(contract_parent_stat.st_mode) == 0o755
+                and bool(os.statvfs(PACKAGE_CONTRACT_PARENT).f_flag & os.ST_RDONLY),
+                "contract parent has protected structural identity",
                 repr(
                     (
                         contract_parent_stat.st_uid,
@@ -1090,30 +1204,24 @@ class Probe:
                     "package trust input has effective read-only backing",
                     str(trusted_path),
                 )
+            protocol = self.run([str(PACKAGE_RUNC), "--ironcurtain-verify-protected-inputs-v2"])
             self.assert_true(
-                hashlib.sha256(PACKAGE_RUNC.read_bytes()).hexdigest()
-                == PACKAGE_RUNC_SHA256,
-                "pinned package runc wrapper digest",
+                protocol.stdout.strip() == "ironcurtain-build-trust-inputs/2",
+                "package wrapper verifies effective protected inputs",
             )
             real_runc_stat = REAL_RUNC.stat()
             self.assert_true(
                 stat.S_ISREG(real_runc_stat.st_mode)
-                and real_runc_stat.st_uid == 0
-                and real_runc_stat.st_gid == 0
+                and 0 <= real_runc_stat.st_uid <= 0xFFFFFFFF and 0 <= real_runc_stat.st_gid <= 0xFFFFFFFF
                 and stat.S_IMODE(real_runc_stat.st_mode) == 0o755
                 and real_runc_stat.st_nlink == 1
-                and real_runc_stat.st_size == REAL_RUNC_SIZE
-                and hashlib.sha256(REAL_RUNC.read_bytes()).hexdigest()
-                == REAL_RUNC_SHA256,
-                "selected-image real runc has exact outer identity",
-                repr(real_runc_stat),
+                and bool(os.statvfs(REAL_RUNC).f_flag & os.ST_RDONLY),
+                "selected-image real runc has protected structural identity",
             )
             real_runc_version = self.run([str(REAL_RUNC), "--version"]).stdout
             self.assert_true(
-                "runc version 1.3.4" in real_runc_version
-                and "commit: v1.3.4-0-gd6d73eb" in real_runc_version
-                and "spec: 1.2.1" in real_runc_version,
-                "selected-image real runc has exact version identity",
+                "runc version 1.3.4" in real_runc_version,
+                "selected-image real runc has supported version identity",
                 real_runc_version,
             )
             config = json.loads(PACKAGE_CONFIG.read_text(encoding="utf-8"))
@@ -1122,8 +1230,8 @@ class Probe:
                 == {
                     "proxies": {
                         "default": {
-                            "httpProxy": PACKAGE_PROXY,
-                            "httpsProxy": PACKAGE_PROXY,
+                            "httpProxy": self._package_proxy(),
+                            "httpsProxy": self._package_proxy(),
                         }
                     }
                 },
@@ -1157,17 +1265,7 @@ class Probe:
         build_base_layers = self._inspect_image(PRIMARY_PUBLIC_IMAGE)
 
         authoritative_tag = f"{self.tag_prefix}-authoritative:latest"
-        build_args = (
-            "build",
-            "--pull=false",
-            "--no-cache",
-            "--progress=plain",
-            "--build-arg",
-            f"IRONCURTAIN_NONCE={self.nonce}",
-            "--tag",
-            authoritative_tag,
-            str(FIXTURE_DIR),
-        )
+        build_args = self._package_fixture_build_args(authoritative_tag, no_cache=True)
         self.docker(*build_args, timeout=PACKAGE_NETWORK_BUILD_TIMEOUT_SECONDS)
         authoritative_id = self._track_image(authoritative_tag, fixture=True)
         self.complete("packages.authoritative-build")
@@ -1213,16 +1311,7 @@ class Probe:
         self.complete("packages.supported-build-forms")
 
         cached_tag = f"{self.tag_prefix}-cached:latest"
-        cache_args = (
-            "build",
-            "--pull=false",
-            "--progress=plain",
-            "--build-arg",
-            f"IRONCURTAIN_NONCE={self.nonce}",
-            "--tag",
-            cached_tag,
-            str(FIXTURE_DIR),
-        )
+        cache_args = self._package_fixture_build_args(cached_tag, no_cache=False)
         before_sentinel = self._record_cache_audit_sentinel("before")
         cached = self.docker(*cache_args, timeout=PACKAGE_CACHE_BUILD_TIMEOUT_SECONDS)
         after_sentinel = self._record_cache_audit_sentinel("after")
@@ -1244,6 +1333,27 @@ class Probe:
 
         self._scan_fixture_images()
         self._scan_snapshot_filesystems()
+
+    def _package_fixture_build_args(
+        self, tag: str, *, no_cache: bool
+    ) -> tuple[str, ...]:
+        self.assert_true(
+            self.daemon_architecture is not None,
+            "package build uses the admitted daemon architecture",
+        )
+        return (
+            "build",
+            "--pull=false",
+            *(("--no-cache",) if no_cache else ()),
+            "--progress=plain",
+            "--build-arg",
+            f"IRONCURTAIN_NONCE={self.nonce}",
+            "--build-arg",
+            f"IRONCURTAIN_ARCHITECTURE={self.daemon_architecture}",
+            "--tag",
+            tag,
+            str(FIXTURE_DIR),
+        )
 
     def validate_images(self) -> None:
         self.validate_artifacts("images")
@@ -1275,7 +1385,7 @@ class Probe:
         context = self._write_generated_context(
             "offline-hermetic",
             f"FROM {selected_reference}\n"
-            "RUN node -e \"require('node:fs').writeFileSync('/tmp/ironcurtain-hermetic', 'hermetic-ok')\"\n",
+            "RUN printf hermetic-ok > /tmp/ironcurtain-hermetic\n",
         )
         tag = f"{self.tag_prefix}-hermetic:latest"
         self.docker("build", "--network=none", "--tag", tag, str(context), timeout=300)
@@ -1289,10 +1399,9 @@ class Probe:
             "--network",
             "none",
             "--entrypoint",
-            "node",
+            "/bin/cat",
             image_id,
-            "-e",
-            "process.stdout.write(require('node:fs').readFileSync('/tmp/ironcurtain-hermetic','utf8'))",
+            "/tmp/ironcurtain-hermetic",
         ).stdout
         self.require(output == "hermetic-ok", "offline.hermetic-build", repr(output))
 
@@ -1309,10 +1418,61 @@ class Probe:
             repr(tags),
         )
 
+    def _agent_ca_cert(self) -> Path:
+        return AGENT_CA_CERT if self.sidecar is None else Path("/etc/ironcurtain/ca-cert.pem")
+
+    def _package_proxy(self) -> str:
+        return f"http://{self.package_endpoint[0]}:{self.package_endpoint[1]}"
+
+    def _host_observation(self, action: str) -> dict[str, str]:
+        nonce = uuid.uuid4().hex
+        request = Path(".workflow/host-observation-request.json")
+        response = Path(".workflow/host-observation-response.json")
+        temporary = request.with_name(f"{request.name}.{nonce}")
+        temporary.write_text(json.dumps({"schemaVersion": 1, "action": action, "nonce": nonce}) + "\n")
+        temporary.replace(request)
+        deadline = time.monotonic() + PRIVILEGED_SNAPSHOT_SCAN_TIMEOUT_SECONDS + 60
+        while time.monotonic() < deadline:
+            if response.exists():
+                self.assert_true(response.stat().st_size <= 256 * 1024, "bounded host observation response")
+                value = json.loads(response.read_text())
+                if value.get("nonce") == nonce:
+                    self.assert_true(value.get("schemaVersion") == 1 and value.get("action") == action
+                                     and value.get("passed") is True,
+                                     "host observation passed", repr(value))
+                    self.assert_true(isinstance(value.get("generation"), str), "host observation generation")
+                    return value.get("publicTrust", {})
+            time.sleep(0.2)
+        raise ProbeFailure("host observation deadline exceeded")
+
+    def _validate_sidecar_artifacts(self, network_access: str) -> None:
+        package_expected = network_access == "packages"
+        agent_paths = (PACKAGE_SHIM, PACKAGE_CONFIG, PACKAGE_BUILDX_STATE)
+        self.assert_true(all(path.exists() is package_expected for path in agent_paths),
+                         "sidecar agent package client artifacts match mode")
+        daemon_paths = (PACKAGE_RUNC, PACKAGE_CONTRACT, PACKAGE_APT_CONFIG, AGENT_CA_CERT, AGENT_CA_BUNDLE)
+        self.assert_true(not any(path.exists() for path in daemon_paths),
+                         "sidecar agent excludes daemon-only build authority")
+        self.assert_true((shutil.which("docker") == str(PACKAGE_SHIM)) is package_expected,
+                         "sidecar Docker shim selection matches mode")
+        if package_expected:
+            for path, mode in ((PACKAGE_SHIM, 0o555), (PACKAGE_CONFIG, 0o444), (PACKAGE_BUILDX_STATE, 0o700)):
+                self.assert_true(stat.S_IMODE(path.stat().st_mode) == mode, f"exact mode for {path}")
+            for path in (PACKAGE_SHIM, PACKAGE_CONFIG):
+                self.assert_true(bool(os.statvfs(path).f_flag & os.ST_RDONLY), f"read-only package input {path}")
+            self.assert_true(PACKAGE_BUILDX_STATE.stat().st_uid == os.getuid()
+                             and PACKAGE_BUILDX_STATE.stat().st_gid == os.getgid(),
+                             "Buildx state belongs to effective agent identity")
+            config = json.loads(PACKAGE_CONFIG.read_text())
+            self.assert_true(config == {"proxies": {"default": {"httpProxy": self._package_proxy(),
+                                                                  "httpsProxy": self._package_proxy()}}},
+                             "sidecar package config is exact and credential-free")
+        self.complete(f"{network_access}.artifacts")
+
     def _validate_trust_contract(self) -> None:
         contract = json.loads(PACKAGE_CONTRACT.read_text(encoding="utf-8"))
         self.assert_true(
-            contract.get("schemaVersion") == 1, "build trust contract schema"
+            contract.get("schemaVersion") == 2, "build trust contract schema"
         )
         self.assert_true(
             re.fullmatch(
@@ -1325,10 +1485,9 @@ class Probe:
         real_runc = contract.get("realRunc")
         self.assert_true(
             isinstance(real_runc, dict)
-            and real_runc.get("path") == "/usr/local/lib/ironcurtain-docker/bin/runc"
+            and real_runc.get("path") == "/ironcurtain-real-runc"
             and real_runc.get("version") == "1.3.4"
-            and real_runc.get("ownerPairs")
-            == [{"uid": 0, "gid": 0}, {"uid": 65534, "gid": 65534}]
+            and real_runc.get("requiresEffectiveReadOnly") is True
             and real_runc.get("nlink") == 1
             and real_runc.get("mode") == "0755",
             "build trust real-runc identity",
@@ -1348,7 +1507,7 @@ class Probe:
         for source in sources:
             self.assert_true(isinstance(source, dict), "public trust source shape")
             self.assert_true(
-                set(source) == {"path", "destination", "sha256", "size", "mode"},
+                set(source) == {"path", "destination", "size", "mode"},
                 "public trust source has exact owner-free schema",
                 repr(source),
             )
@@ -1363,15 +1522,10 @@ class Probe:
                 "public trust source exact path, mode, and size",
                 repr(source),
             )
-            observed[str(target)] = str(source.get("sha256"))
+            observed[str(target)] = str(source.get("path"))
         self.assert_true(
             set(observed) == set(expected), "public trust targets are exact"
         )
-        for target, source_path in expected.items():
-            digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-            self.assert_true(
-                observed[target] == digest, f"public trust digest for {target}"
-            )
         lowered = json.dumps(contract).lower()
         self.assert_true(
             "private" not in lowered
@@ -1454,26 +1608,31 @@ class Probe:
         )
         self.container_ids.append(self._container_id(created, self.server_name))
         last_error = ""
-        for _ in range(10):
-            sibling = self.docker(
-                "container",
-                "run",
-                "--rm",
-                "--network",
-                EXPECTED_NETWORK,
-                "--pull",
-                "never",
-                image_id,
-                "curl",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "10",
-                "http://target:8080/",
-                expect_success=None,
-                timeout=15,
-            )
+        for _ in range(PACKAGE_SIBLING_PROBE_ATTEMPTS):
+            try:
+                sibling = self.docker(
+                    "container",
+                    "run",
+                    "--rm",
+                    "--network",
+                    EXPECTED_NETWORK,
+                    "--pull",
+                    "never",
+                    image_id,
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--show-error",
+                    "--max-time",
+                    str(PACKAGE_SIBLING_CURL_TIMEOUT_SECONDS),
+                    "http://target:8080/",
+                    expect_success=None,
+                    timeout=PACKAGE_SIBLING_PROCESS_TIMEOUT_SECONDS,
+                )
+            except ProbeFailure as error:
+                last_error = str(error)[-2048:]
+                time.sleep(1)
+                continue
             if sibling.returncode == 0 and sibling.stdout == self.nonce:
                 self.complete("packages.sibling-network")
                 return
@@ -1732,7 +1891,7 @@ class Probe:
             "--max-time",
             "30",
             "--proxy",
-            PACKAGE_PROXY,
+            self._package_proxy(),
             "--noproxy",
             "",
             "https://registry.npmjs.org/is-number",
@@ -1756,7 +1915,7 @@ class Probe:
             "--max-time",
             "20",
             "--proxy",
-            PACKAGE_PROXY,
+            self._package_proxy(),
             "--noproxy",
             "",
             "https://example.com/",
@@ -1776,10 +1935,11 @@ class Probe:
             "--network",
             "host",
             "--entrypoint",
-            "/usr/bin/python3",
+            "python3" if self.sidecar is not None else "/usr/bin/python3",
             self.initial_image_ids[0],
             "-c",
             HOST_PACKAGE_CONNECT_DENIAL_SCRIPT,
+            *([self.package_endpoint[0], str(self.package_endpoint[1])] if self.sidecar is not None else []),
             expect_success=None,
             timeout=HOST_PACKAGE_CONNECT_PROBE_TIMEOUT_SECONDS,
         )
@@ -1868,7 +2028,7 @@ class Probe:
         self, completed: subprocess.CompletedProcess[str], label: str
     ) -> None:
         output = f"{completed.stdout}\n{completed.stderr}"
-        expected_command = re.escape(form_check_run_command())
+        expected_command = re.escape(form_check_run_command(self.package_endpoint))
         step_ids = re.findall(
             rf"^(#\d+) .*{expected_command}\s*$",
             output,
@@ -2447,12 +2607,16 @@ class Probe:
         raise ProbeFailure(failure_code)
 
     def _scan_snapshot_filesystems(self) -> None:
-        self._validate_privileged_snapshot_scan_preflight()
+        if self.sidecar is None:
+            self._validate_privileged_snapshot_scan_preflight()
         self.complete("packages.snapshot-preflight")
         before = self._snapshot_scan_state()
         scan_error: Exception | None = None
         try:
-            self._invoke_privileged_snapshot_scan()
+            if self.sidecar is None:
+                self._invoke_privileged_snapshot_scan()
+            else:
+                self._host_observation("snapshot")
         except Exception as error:
             scan_error = error
 
@@ -3139,16 +3303,23 @@ class Probe:
         if self.authority_marker_cache is not None:
             return self.authority_marker_cache
         try:
-            certificate = AGENT_CA_CERT.read_bytes().strip()
-            apt_config = PACKAGE_APT_CONFIG.read_bytes().strip()
-            contract = PACKAGE_CONTRACT.read_bytes().strip()
+            certificate = self._agent_ca_cert().read_bytes().strip()
+            if self.sidecar is None:
+                apt_config = PACKAGE_APT_CONFIG.read_bytes().strip()
+                contract = PACKAGE_CONTRACT.read_bytes().strip()
+            else:
+                public = self._host_observation("public-trust")
+                self.assert_true(public.get("caCertificate", "").encode().strip() == certificate,
+                                 "host-observed daemon CA matches agent public CA")
+                apt_config = public["aptConfig"].encode().strip()
+                contract = public["buildTrustContract"].encode().strip()
         except OSError:
             raise ProbeFailure("snapshot authority input is unavailable") from None
         self.assert_true(
             certificate.startswith(b"-----BEGIN CERTIFICATE-----"), "agent CA is PEM"
         )
         paths = (
-            PACKAGE_PROXY,
+            self._package_proxy(),
             "/dev/ironcurtain/ca-cert.pem",
             "/dev/ironcurtain/ca-bundle.pem",
             "/dev/ironcurtain/apt.conf",
@@ -3263,8 +3434,9 @@ class Probe:
             raise ProbeFailure(f"package CONNECT failed: {response[:1024]!r}")
         return connection
 
-    @staticmethod
-    def _open_package_socket() -> socket.socket:
+    def _open_package_socket(self) -> socket.socket:
+        if self.sidecar is not None:
+            return socket.create_connection(self.package_endpoint, timeout=10)
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(10)
         try:
@@ -3283,7 +3455,7 @@ class Probe:
     ) -> bytes:
         self._validate_request_method(request_method, request)
         connection = self._open_connect(connect_host, 443)
-        context = ssl.create_default_context(cafile=str(AGENT_CA_CERT))
+        context = ssl.create_default_context(cafile=str(self._agent_ca_cert()))
         wrapped = context.wrap_socket(connection, server_hostname=sni)
         try:
             wrapped.sendall(request)
@@ -3496,7 +3668,7 @@ class Probe:
         context = self._write_generated_context(
             f"packages-{label}",
             f"FROM {base_reference}\n"
-            f"{form_check_run_command()}\n"
+            f"{form_check_run_command(self.package_endpoint)}\n"
             f'LABEL org.ironcurtain.workflow.build-form="{label}"\n'
             f"CMD {command}\n",
         )
@@ -3681,7 +3853,7 @@ class Probe:
         try:
             completed = subprocess.run(
                 ["/usr/bin/openssl", "x509", "-pubkey", "-noout"],
-                input=AGENT_CA_CERT.read_bytes(),
+                input=self._agent_ca_cert().read_bytes(),
                 capture_output=True,
                 check=False,
                 timeout=timeout_seconds,
@@ -4075,12 +4247,7 @@ class Probe:
 
 
 def read_mode() -> str:
-    mode = TASK_PATH.read_text(encoding="utf-8").strip()
-    if mode not in MODE_CHECK_IDS:
-        raise ProbeFailure(
-            'task text must be exactly "packages", "images", "offline", or "admission"'
-        )
-    return mode
+    return parse_smoke_task(TASK_PATH.read_text(encoding="utf-8"))[0]
 
 
 def write_result(
@@ -4132,8 +4299,8 @@ def main() -> int:
     mode = "unknown"
     probe: Probe | None = None
     try:
-        mode = read_mode()
-        probe = Probe(mode)
+        mode, sidecar = parse_smoke_task(TASK_PATH.read_text(encoding="utf-8"))
+        probe = Probe(mode, sidecar)
         selected_image_id = probe.validate_common()
         probe.validate_relay_topology(selected_image_id)
         if mode == "packages":

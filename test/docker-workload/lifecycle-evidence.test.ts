@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
 import { PRIVATE_DOCKER_READINESS_TEXT_BOUNDS } from '../../src/docker-workload/private-docker.js';
+import { loadFrozenWatchdogPolicyTemplate } from '../../src/docker-workload/watchdog-policy.js';
 import {
   createJsonlDockerWorkloadAuditSink,
   createRecordingDockerWorkloadAuditSink,
@@ -23,7 +24,7 @@ import {
   type WriteLifecycleEvidenceOptions,
 } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -72,6 +73,55 @@ function evidenceDir(): string {
 }
 
 describe('Docker-workload lifecycle evidence', () => {
+  it('preserves historical hash-shaped admission evidence', () => {
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const envelope = { at: '2026-07-20T12:00:00.000Z', leaseId: 'dw-legacy', generation: 'gen-legacy' };
+    const admission = {
+      ...envelope,
+      kind: 'admission-decision' as const,
+      decision: 'admitting' as const,
+      bundleId: 'bundle-legacy',
+      runtimeKind: 'apple-container' as const,
+      configHash: '1'.repeat(64),
+      watchdogPolicySha256: '2'.repeat(64),
+      watchdogTemplateSha256: '3'.repeat(64),
+      detail: 'historical admission',
+    };
+    sink.emit(admission);
+    expect(sink.events).toEqual([admission]);
+  });
+
+  it('records complete configuration values and rejects unbounded or mixed-format admission evidence', () => {
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const admission = {
+      at: '2026-09-10T12:00:00.000Z',
+      leaseId: 'dw-current',
+      generation: 'gen-current',
+      kind: 'admission-decision' as const,
+      decision: 'admitting' as const,
+      bundleId: 'bundle-current',
+      runtimeKind: 'docker' as const,
+      configuration: ADMISSION_CONFIGURATION,
+      watchdogPolicy: {
+        ...loadFrozenWatchdogPolicyTemplate(WATCHDOG_TEMPLATE_PATH),
+        targetRoot: '/state',
+        targetDevice: 1,
+        targetInode: 2,
+      },
+      detail: 'current admission',
+    };
+    sink.emit(admission);
+    expect(sink.events).toEqual([admission]);
+    expect(sink.events[0]).not.toHaveProperty('configHash');
+    expect(() => sink.emit({ ...admission, configHash: '1'.repeat(64) })).toThrow();
+    expect(() =>
+      sink.emit({
+        ...admission,
+        configuration: { ...ADMISSION_CONFIGURATION, resources: { memoryMb: Infinity } },
+      } as unknown as typeof admission),
+    ).toThrow();
+  });
+
   it('records the admit → activate → teardown audit event sequence', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
@@ -82,7 +132,7 @@ describe('Docker-workload lifecycle evidence', () => {
       runtimeKind: 'docker',
       bundleId: 'bundle-evidence-001',
       workspaceRoot: join(getHome(), 'workspace'),
-      configHash: ADMISSION_CONFIG_HASH,
+      configuration: ADMISSION_CONFIGURATION,
       watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
       watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
       auditSink: sink,
@@ -118,6 +168,8 @@ describe('Docker-workload lifecycle evidence', () => {
       'revocation-result',
       'cleanup-proof',
     ]);
+    expect(sink.events[0]).toMatchObject({ configuration: ADMISSION_CONFIGURATION });
+    expect(sink.events[0]).not.toHaveProperty('configHash');
   });
 
   it('creates a not-yet-existing evidence directory before the first write', () => {
@@ -328,7 +380,6 @@ describe('Docker-workload lifecycle evidence', () => {
       generation: 'gen-dw-private-docker',
       kind: 'private-docker-bootstrap' as const,
       attestation: DAEMON_READY_ATTESTATION,
-      toolchainDigest: 'a'.repeat(64),
       toolchain: {
         dockerCli: '29.2.1',
         dockerDaemon: '29.2.1',
@@ -346,7 +397,6 @@ describe('Docker-workload lifecycle evidence', () => {
       transport: 'apple-archive' as const,
       logicalName: 'ironcurtain-claude-code:latest',
       buildHash: 'c'.repeat(64),
-      archiveSha256: 'd'.repeat(64),
       outerImageId: `sha256:${'e'.repeat(64)}`,
       innerImageId: `sha256:${'f'.repeat(64)}`,
     };
@@ -367,7 +417,6 @@ describe('Docker-workload lifecycle evidence', () => {
           transport: 'apple-archive',
           logicalName: appleImage.logicalName,
           buildHash: appleImage.buildHash,
-          archiveSha256: appleImage.archiveSha256,
           outerImageId: appleImage.outerImageId,
         },
       } as never),

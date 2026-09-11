@@ -24,6 +24,7 @@ import (
 
 const version = "ironcurtain-fixed-relay-v1"
 const dockerDesktopHostGatewayAlias = "host.docker.internal"
+const fixedUnixTarget = "/run/ironcurtain-upstream.sock"
 const maxProxyHeaderBytes = 64 * 1024
 
 var errByteLimit = errors.New("relay byte limit reached")
@@ -31,6 +32,7 @@ var errByteLimit = errors.New("relay byte limit reached")
 type config struct {
 	listenAddress      string
 	targetAddress      string
+	targetNetwork      string
 	allowedCIDR        *net.IPNet
 	maxConcurrent      int
 	maxBytes           int64
@@ -102,6 +104,7 @@ func parseConfig(args []string) (config, bool, error) {
 	flags.SetOutput(io.Discard)
 	listenAddress := flags.String("listen", "", "exact IPv4 listen address")
 	targetAddress := flags.String("target", "", "exact IPv4 target address or frozen Docker Desktop host-gateway alias")
+	targetUnix := flags.String("target-unix", "", "fixed mounted Unix policy socket")
 	allowCIDR := flags.String("allow-cidr", "", "only admitted IPv4 source CIDR")
 	maxConcurrent := flags.Int("max-concurrent", 64, "maximum concurrent streams")
 	maxBytes := flags.Int64("max-bytes", 256*1024*1024, "maximum bytes in each direction")
@@ -126,9 +129,20 @@ func parseConfig(args []string) (config, bool, error) {
 	if err != nil {
 		return config{}, false, fmt.Errorf("listen: %w", err)
 	}
-	target, err := validateTargetEndpoint(*targetAddress)
-	if err != nil {
-		return config{}, false, fmt.Errorf("target: %w", err)
+	if (*targetAddress == "") == (*targetUnix == "") {
+		return config{}, false, errors.New("select exactly one target or target-unix")
+	}
+	target, targetNetwork := *targetUnix, "unix"
+	if *targetUnix != "" {
+		if *targetUnix != fixedUnixTarget {
+			return config{}, false, errors.New("target-unix must be the fixed mounted policy socket")
+		}
+	} else {
+		targetNetwork = "tcp4"
+		target, err = validateTargetEndpoint(*targetAddress)
+		if err != nil {
+			return config{}, false, fmt.Errorf("target: %w", err)
+		}
 	}
 	allowedIP, network, err := net.ParseCIDR(*allowCIDR)
 	if err != nil || network.IP.To4() == nil {
@@ -160,6 +174,7 @@ func parseConfig(args []string) (config, bool, error) {
 	return config{
 		listenAddress:      listen,
 		targetAddress:      target,
+		targetNetwork:      targetNetwork,
 		allowedCIDR:        network,
 		maxConcurrent:      *maxConcurrent,
 		maxBytes:           *maxBytes,
@@ -260,7 +275,7 @@ func (r *relay) handle(ctx context.Context, downstream net.Conn) {
 	id := r.nextID.Add(1)
 	defer downstream.Close()
 	dialer := net.Dialer{Timeout: r.config.dialTimeout}
-	upstream, err := dialer.DialContext(ctx, "tcp4", r.config.targetAddress)
+	upstream, err := dialer.DialContext(ctx, r.config.targetNetwork, r.config.targetAddress)
 	if err != nil {
 		log.Printf("stream=%d target-connect=failed", id)
 		return

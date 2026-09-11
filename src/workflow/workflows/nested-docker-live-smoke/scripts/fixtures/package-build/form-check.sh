@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
 
-test "$HTTP_PROXY" = "http://127.0.0.1:18082"
-test "$HTTPS_PROXY" = "http://127.0.0.1:18082"
-test "$http_proxy" = "http://127.0.0.1:18082"
-test "$https_proxy" = "http://127.0.0.1:18082"
+expected_proxy="__IRONCURTAIN_EXPECTED_PACKAGE_PROXY__"
+test "$HTTP_PROXY" = "$expected_proxy"
+test "$HTTPS_PROXY" = "$expected_proxy"
+test "$http_proxy" = "$expected_proxy"
+test "$https_proxy" = "$expected_proxy"
 test "$NODE_EXTRA_CA_CERTS" = "/dev/ironcurtain/ca-cert.pem"
 test "$SSL_CERT_FILE" = "/dev/ironcurtain/ca-bundle.pem"
 test "$CURL_CA_BUNDLE" = "/dev/ironcurtain/ca-bundle.pem"

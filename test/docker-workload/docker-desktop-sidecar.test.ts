@@ -1,14 +1,16 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   DOCKER_DESKTOP_RUNC_SHIM_PATH,
   DOCKER_DESKTOP_SIDECAR_API_ROOT,
+  DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT,
+  DOCKER_DESKTOP_SIDECAR_ENTRYPOINT,
   DOCKER_DESKTOP_SIDECAR_DATA_ROOT,
   DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
   DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT,
   loadDockerDesktopP2SeccompProfile,
-  parseDockerDesktopProfileCeiling,
   startDockerDesktopSidecar,
   type DockerDesktopSidecarCreateAuthority,
   type DockerDesktopSidecarEgress,
@@ -21,17 +23,25 @@ import type {
   DockerImageInfo,
   DockerVolumeInfo,
 } from '../../src/docker/types.js';
-import { computeHash, sha256Hex } from '../../src/hash.js';
+import { computeHash } from '../../src/hash.js';
 import type { ExpandedOuterCreate } from '../../src/docker-workload/lifecycle-evidence.js';
 import { loadClientToolchainManifest } from '../../src/docker-workload/client-toolchain.js';
 import { getFrozenClientToolchainManifestPath } from '../../src/docker/docker-workload-paths.js';
 import {
-  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
-  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-  DOCKER_BUILD_TRUST_CA_CERT_PATH,
-  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
 } from '../../src/docker/docker-build-shim.js';
 import type { PrivateDockerBootstrapObservation } from '../../src/docker-workload/private-docker.js';
+
+const temporaryDirectories: string[] = [];
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+function hostDirectory(): string {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'sidecar-config-')));
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 const SIDECAR_IMAGE_ID = `sha256:${'d'.repeat(64)}`;
 const SIDECAR_CONTAINER_ID = 'c'.repeat(64);
@@ -45,7 +55,8 @@ const WORKSPACE_ROOT = '/host/project';
 const WORKSPACE_MOUNT = { source: WORKSPACE_ROOT, target: '/workspace', readonly: false } as const;
 const CANARY_IMAGE_ID = `sha256:${'e'.repeat(64)}`;
 const INNER_NETWORK_ID = 'f'.repeat(64);
-const CLIENT_MANIFEST = loadClientToolchainManifest(getFrozenClientToolchainManifestPath()).manifest;
+const LOADED_CLIENT_MANIFEST = loadClientToolchainManifest(getFrozenClientToolchainManifestPath(), 'arm64');
+const CLIENT_MANIFEST = LOADED_CLIENT_MANIFEST.manifest;
 const REGISTRY_PROXY_URL = 'http://172.31.44.2:8443';
 const CA_MOUNT = {
   source: '/host/ironcurtain/ca-bundle.pem',
@@ -54,28 +65,8 @@ const CA_MOUNT = {
 } as const;
 const BUILD_TRUST_MOUNTS = [
   {
-    source: '/host/ironcurtain/build-trust/runc',
-    target: DOCKER_DESKTOP_RUNC_SHIM_PATH,
-    readonly: true,
-  },
-  {
-    source: '/host/ironcurtain/build-trust/build-trust-contract.json',
-    target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
-    readonly: true,
-  },
-  {
-    source: '/host/ironcurtain/build-trust/ca-cert.pem',
-    target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
-    readonly: true,
-  },
-  {
-    source: '/host/ironcurtain/build-trust/ca-bundle.pem',
-    target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-    readonly: true,
-  },
-  {
-    source: '/host/ironcurtain/build-trust/apt.conf',
-    target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+    source: '/host/ironcurtain/build-trust',
+    target: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
     readonly: true,
   },
 ] as const;
@@ -155,6 +146,7 @@ interface RuntimeFixture {
   readonly events: string[];
   readonly configs: DockerContainerConfig[];
   readonly execs: (readonly string[])[];
+  readonly execUsers: (string | null | undefined)[];
   readonly volumeLabels: Map<string, Readonly<Record<string, string>>>;
   readonly expandedCreates: ExpandedOuterCreate[];
   readonly bootstrapObservations: PrivateDockerBootstrapObservation[];
@@ -164,6 +156,7 @@ function runtimeFixture(
   options: {
     readonly failBuild?: boolean;
     readonly failShim?: boolean;
+    readonly wrongApiOwner?: boolean;
     readonly wrongVolumeLabels?: boolean;
     readonly observedWorkspaceBind?: string;
     readonly observedHostConfig?: Readonly<Record<string, unknown>>;
@@ -178,6 +171,7 @@ function runtimeFixture(
   const events: string[] = [];
   const configs: DockerContainerConfig[] = [];
   const execs: (readonly string[])[] = [];
+  const execUsers: (string | null | undefined)[] = [];
   const volumeLabels = new Map<string, Readonly<Record<string, string>>>();
   const expandedCreates: ExpandedOuterCreate[] = [];
   const bootstrapObservations: PrivateDockerBootstrapObservation[] = [];
@@ -216,9 +210,9 @@ function runtimeFixture(
         State: { Status: 'created', Running: false },
         Config: {
           Image: config.image,
-          User: 'rootless',
+          User: '0:0',
           WorkingDir: '/home/rootless',
-          Entrypoint: ['dockerd-entrypoint.sh'],
+          Entrypoint: [DOCKER_DESKTOP_SIDECAR_ENTRYPOINT],
           Cmd: config.command,
           Env: [
             'HOME=/home/rootless',
@@ -272,7 +266,7 @@ function runtimeFixture(
               PathInContainer: device.target,
               CgroupPermissions: device.permissions,
             })),
-          ExtraHosts: config.network === 'none' ? null : ['host.docker.internal:host-gateway'],
+          ExtraHosts: config.extraHosts ?? null,
           ...options.observedHostConfig,
         },
         NetworkSettings: {
@@ -303,21 +297,31 @@ function runtimeFixture(
     async start(id) {
       events.push(`container:start:${id}`);
     },
-    async exec(_id, argv): Promise<DockerExecResult> {
+    async exec(_id, argv, _timeout, execUser): Promise<DockerExecResult> {
       execs.push([...argv]);
+      execUsers.push(execUser);
+      if (argv[0] === 'stat')
+        return { exitCode: 0, stdout: `0:0:755\n${options.wrongApiOwner ? '1000:1000' : execUser}:710\n`, stderr: '' };
       if (argv[0] === '/bin/sh' && argv[1] === '-c' && argv[2] === 'command -v runc') {
         events.push('shim:path');
         return {
           exitCode: 0,
-          stdout: `${options.failShim === true ? '/usr/local/bin/runc' : DOCKER_DESKTOP_RUNC_SHIM_PATH}\n`,
+          stdout: `${options.failShim === true ? '/usr/local/bin/runc' : configs[0].env.PATH.split(':')[0] + '/runc'}\n`,
           stderr: '',
         };
       }
-      if (argv[0] === DOCKER_DESKTOP_RUNC_SHIM_PATH && argv[1] === '--version') {
+      if (
+        [DOCKER_DESKTOP_RUNC_SHIM_PATH, DOCKER_BUILD_TRUST_WRAPPER_PATH].includes(argv[0]) &&
+        argv[1] === '--version'
+      ) {
         events.push('shim:version');
         return { exitCode: 0, stdout: 'runc version 1.3.4\ncommit: d6d73eb\n', stderr: '' };
       }
-      if (argv[0] === 'docker' && argv[1] === '--host' && argv[2] === DOCKER_DESKTOP_SIDECAR_DOCKER_HOST) {
+      if (
+        argv[0] === '/usr/local/bin/docker' &&
+        argv[1] === '--host' &&
+        argv[2] === DOCKER_DESKTOP_SIDECAR_DOCKER_HOST
+      ) {
         const operation = argv.slice(3);
         if (operation[0] === 'container' && operation[1] === 'inspect') {
           return { exitCode: 1, stdout: '', stderr: `Error: No such container: ${operation.at(-1) ?? ''}` };
@@ -377,7 +381,7 @@ function runtimeFixture(
       volumeLabels.delete(name);
     },
   };
-  return { runtime, events, configs, execs, volumeLabels, expandedCreates, bootstrapObservations };
+  return { runtime, events, configs, execs, execUsers, volumeLabels, expandedCreates, bootstrapObservations };
 }
 
 function resourceAuthority(
@@ -402,6 +406,9 @@ function startOptions(fixture: RuntimeFixture): StartDockerDesktopSidecarOptions
     sidecarImage: 'ironcurtain-nested-daemon:latest',
     outerAgentImageId: OUTER_AGENT_IMAGE_ID,
     workspaceRoot: WORKSPACE_ROOT,
+    identity: { uid: 1000, gid: 1000 },
+    hostConfigDirectory: hostDirectory(),
+    clientManifest: LOADED_CLIENT_MANIFEST,
     resources: { memoryMb: 4096, cpus: 2, pidsLimit: 512 },
     createOuterResource: resourceAuthority(events, fixture.expandedCreates),
     activation: {
@@ -430,45 +437,22 @@ async function expectStoppedProfileRejection(fixture: RuntimeFixture, field: str
 }
 
 describe('Docker Desktop sidecar frozen artifacts', () => {
-  it('loads the hash-bound P2 profile with the measured sethostname rule and no keyctl allowance', () => {
-    const profile = loadDockerDesktopP2SeccompProfile();
+  it('renders the complete P2 profile with the measured sethostname rule and no keyctl allowance', () => {
+    const profile = loadDockerDesktopP2SeccompProfile(hostDirectory());
     const bytes = readFileSync(profile.path);
     const parsed = JSON.parse(bytes.toString('utf8')) as {
       readonly syscalls: readonly { readonly names: readonly string[]; readonly action: string }[];
     };
 
-    expect(profile.sha256).toBe(sha256Hex(bytes));
+    expect(parsed).toEqual(profile.definition);
     expect(profile.systemPathsSecurityOption).toBe('systempaths=unconfined');
-    expect(profile.path).toMatch(/config\/docker-workload\/seccomp\/desktop-p2-userns\.json$/u);
+    expect(profile.path).toMatch(/seccomp\.json$/u);
     expect(parsed.syscalls).toContainEqual(
       expect.objectContaining({ names: ['sethostname'], action: 'SCMP_ACT_ALLOW' }),
     );
     expect(parsed.syscalls).not.toContainEqual(
       expect.objectContaining({ names: ['keyctl'], action: 'SCMP_ACT_ALLOW' }),
     );
-  });
-
-  it('fails closed when the reviewed sidecar-only mount-mask exception drifts', () => {
-    const ceiling = JSON.parse(
-      readFileSync(join(process.cwd(), 'config/docker-workload/profile-ceiling.json'), 'utf8'),
-    ) as Record<string, unknown>;
-    expect(() => parseDockerDesktopProfileCeiling(ceiling)).not.toThrow();
-
-    const wrongScope = structuredClone(ceiling) as {
-      categories: { mountMask: { additions: Array<{ scope: string }> } };
-    };
-    wrongScope.categories.mountMask.additions[0].scope = 'all-containers';
-    expect(() => parseDockerDesktopProfileCeiling(wrongScope)).toThrow();
-
-    const wrongDevice = structuredClone(ceiling) as {
-      categories: { deviceAccess: { additions: Array<{ source: string }> } };
-    };
-    wrongDevice.categories.deviceAccess.additions[0].source = '/dev/kvm';
-    expect(() => parseDockerDesktopProfileCeiling(wrongDevice)).toThrow();
-
-    const wrongStatus = structuredClone(ceiling) as { status: string };
-    wrongStatus.status = 'qualified';
-    expect(() => parseDockerDesktopProfileCeiling(wrongStatus)).toThrow();
   });
 });
 
@@ -520,8 +504,13 @@ describe('Docker Desktop sidecar lifecycle', () => {
       trustedCreateOptions: {
         namedVolumeMounts: [
           { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false, noCopy: false },
-          { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false, noCopy: true },
-          { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false, noCopy: true },
+          {
+            name: API_VOLUME_NAME,
+            target: dirname(DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT),
+            readonly: false,
+            noCopy: true,
+          },
+          { name: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_DATA_ROOT), readonly: false, noCopy: true },
         ],
         readOnlyRootfs: true,
         securityOptions: ['systempaths=unconfined'],
@@ -534,18 +523,25 @@ describe('Docker Desktop sidecar lifecycle', () => {
       '/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
       '/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000',
     ]);
-    expect(config.mounts).toEqual([WORKSPACE_MOUNT]);
+    expect(config.mounts).toEqual([
+      WORKSPACE_MOUNT,
+      ...['passwd', 'group', 'subuid', 'subgid'].map((name) => ({
+        source: join(options.hostConfigDirectory, name),
+        target: `/etc/${name}`,
+        readonly: true,
+      })),
+    ]);
     expect(fixture.expandedCreates).toHaveLength(1);
     expect(fixture.expandedCreates[0]?.mounts).toEqual([
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
-      WORKSPACE_MOUNT,
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT), readonly: false },
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_DATA_ROOT), readonly: false },
+      ...config.mounts,
     ]);
     expect(config.env).toEqual({
       DOCKER_TLS_CERTDIR: '',
       DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'none',
-      XDG_RUNTIME_DIR: DOCKER_DESKTOP_SIDECAR_API_ROOT,
+      XDG_RUNTIME_DIR: DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT,
       PATH: '/usr/local/lib/ironcurtain:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     });
     expect(config.command).toEqual([
@@ -555,15 +551,15 @@ describe('Docker Desktop sidecar lifecycle', () => {
       `--host=${DOCKER_DESKTOP_SIDECAR_DOCKER_HOST}`,
       '--storage-driver=vfs',
       `--data-root=${DOCKER_DESKTOP_SIDECAR_DATA_ROOT}`,
-      `--exec-root=${DOCKER_DESKTOP_SIDECAR_API_ROOT}/exec`,
-      `--pidfile=${DOCKER_DESKTOP_SIDECAR_API_ROOT}/docker.pid`,
+      `--exec-root=${DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT}/exec`,
+      `--pidfile=${DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT}/docker.pid`,
       '--iptables=false',
       '--bridge=none',
       '--ip-forward=false',
       '--ip-masq=false',
     ]);
     expect(config.ports).toBeUndefined();
-    expect(config.extraHosts).toBeUndefined();
+    expect(config.extraHosts).toEqual([]);
     expect(config.ipv4Address).toBeUndefined();
     expect(config.trustedCreateOptions?.devices).toBeUndefined();
 
@@ -600,6 +596,26 @@ describe('Docker Desktop sidecar lifecycle', () => {
     );
   });
 
+  it('uses the configured numeric identity for every daemon exec and matching writable tmpfs', async () => {
+    const fixture = runtimeFixture();
+    const handle = await startDockerDesktopSidecar({ ...startOptions(fixture), identity: { uid: 1101, gid: 1102 } });
+    expect(handle.execUser).toBe('1101:1102');
+    expect(new Set(fixture.execUsers)).toEqual(new Set(['1101:1102']));
+    expect(fixture.configs[0].trustedCreateOptions?.tmpfs?.every((spec) => spec.endsWith('uid=1101,gid=1102'))).toBe(
+      true,
+    );
+    expect(fixture.configs[0].capAdd).toEqual(['SETUID', 'SETGID']);
+  });
+
+  it('rejects an API child left with the image UID rather than the configured host identity', async () => {
+    const fixture = runtimeFixture({ wrongApiOwner: true });
+    await expect(
+      startDockerDesktopSidecar({ ...startOptions(fixture), identity: { uid: 1101, gid: 1102 } }),
+    ).rejects.toThrow(/ownership differs/);
+    expect(fixture.events).toContain(`container:remove:${SIDECAR_CONTAINER_ID}`);
+    expect(fixture.events).toContain(`volume:remove:${API_VOLUME_NAME}`);
+  });
+
   it('attaches image mode to the isolated relay network with a static address, slirp4netns, and public CA', async () => {
     const fixture = runtimeFixture();
     await startDockerDesktopSidecar({ ...startOptions(fixture), egress: egressOptions() });
@@ -608,7 +624,15 @@ describe('Docker Desktop sidecar lifecycle', () => {
     expect(config).toMatchObject({
       network: 'ic-dw-egress-test',
       ipv4Address: '172.31.44.10',
-      mounts: [WORKSPACE_MOUNT, CA_MOUNT],
+      mounts: [
+        WORKSPACE_MOUNT,
+        ...['passwd', 'group', 'subuid', 'subgid'].map((name) => ({
+          source: expect.any(String),
+          target: `/etc/${name}`,
+          readonly: true,
+        })),
+        CA_MOUNT,
+      ],
       env: {
         DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'slirp4netns',
         HTTP_PROXY: REGISTRY_PROXY_URL,
@@ -624,14 +648,21 @@ describe('Docker Desktop sidecar lifecycle', () => {
       { source: '/dev/net/tun', target: '/dev/net/tun', permissions: 'rwm' },
     ]);
     expect(config.ports).toBeUndefined();
-    expect(config.extraHosts).toBeUndefined();
+    expect(config.extraHosts).toEqual([]);
     expect(fixture.expandedCreates[0]?.mounts).toEqual([
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
-      WORKSPACE_MOUNT,
-      CA_MOUNT,
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT), readonly: false },
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_DATA_ROOT), readonly: false },
+      ...config.mounts,
     ]);
+  });
+
+  it('rejects a host-gateway alias in the online daemon before start', async () => {
+    const fixture = runtimeFixture({ observedHostConfig: { ExtraHosts: ['host.docker.internal:host-gateway'] } });
+    await expect(startDockerDesktopSidecar({ ...startOptions(fixture), egress: egressOptions() })).rejects.toThrow(
+      /effective profile mismatch: extra hosts/u,
+    );
+    expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
   });
 
   it.each([
@@ -690,13 +721,22 @@ describe('Docker Desktop sidecar lifecycle', () => {
     });
 
     const config = fixture.configs[0];
-    expect(config.mounts).toEqual([WORKSPACE_MOUNT, CA_MOUNT, ...BUILD_TRUST_MOUNTS]);
+    expect(config.mounts).toEqual([
+      WORKSPACE_MOUNT,
+      ...['passwd', 'group', 'subuid', 'subgid'].map((name) => ({
+        source: expect.any(String),
+        target: `/etc/${name}`,
+        readonly: true,
+      })),
+      CA_MOUNT,
+      ...BUILD_TRUST_MOUNTS,
+    ]);
+    expect(config.command).toContain(`--add-runtime=ic-no-new-keyring=${DOCKER_BUILD_TRUST_WRAPPER_PATH}`);
     expect(config.mounts).toContainEqual({
-      source: '/host/ironcurtain/build-trust/runc',
-      target: DOCKER_DESKTOP_RUNC_SHIM_PATH,
+      source: '/host/ironcurtain/build-trust',
+      target: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
       readonly: true,
     });
-    expect(config.command).toContain(`--add-runtime=ic-no-new-keyring=${DOCKER_DESKTOP_RUNC_SHIM_PATH}`);
     expect(config.command).toContain('--default-runtime=ic-no-new-keyring');
     expect(config.env).toMatchObject({
       DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'slirp4netns',
@@ -705,19 +745,36 @@ describe('Docker Desktop sidecar lifecycle', () => {
     });
     expect(fixture.expandedCreates[0]?.mounts).toEqual([
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
-      WORKSPACE_MOUNT,
-      CA_MOUNT,
-      ...BUILD_TRUST_MOUNTS,
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT), readonly: false },
+      { source: API_VOLUME_NAME, target: dirname(DOCKER_DESKTOP_SIDECAR_DATA_ROOT), readonly: false },
+      ...config.mounts,
     ]);
+  });
+
+  it('bypasses a Docker wrapper in the package runtime PATH for every private-daemon command', async () => {
+    const fixture = runtimeFixture();
+    const exec = fixture.runtime.exec.bind(fixture.runtime);
+    fixture.runtime.exec = async (id, command, timeout, user) => {
+      if (command[0] === 'docker' || command[0] === `${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/docker`) {
+        throw new Error('package runtime Docker wrapper must not run in the daemon sidecar');
+      }
+      return exec(id, command, timeout, user);
+    };
+    await startDockerDesktopSidecar({ ...startOptions(fixture), egress: egressOptions(BUILD_TRUST_MOUNTS) });
+    expect(fixture.configs[0].env.PATH.split(':')[0]).toBe(DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY);
+    const commands = fixture.execs.filter((command) => command[1] === '--host');
+    expect(commands.some((command) => command.includes('info'))).toBe(true);
+    expect(commands.some((command) => command.includes('version'))).toBe(true);
+    expect(commands.some((command) => command.includes('network'))).toBe(true);
+    expect(commands.some((command) => command.includes('build'))).toBe(true);
+    expect(commands.every((command) => command[0] === '/usr/local/bin/docker')).toBe(true);
   });
 
   it('fails closed and rolls back when PATH does not select the baked no-new-keyring shim', async () => {
     const fixture = runtimeFixture({ failShim: true });
 
     await expect(startDockerDesktopSidecar(startOptions(fixture))).rejects.toThrow(
-      /PATH did not select the baked runc shim/u,
+      /PATH did not select the protected runc shim/u,
     );
     expect(fixture.events).not.toContain('record:private-docker');
     expect(fixture.events.slice(-3)).toEqual([

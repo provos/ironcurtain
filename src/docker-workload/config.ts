@@ -1,7 +1,9 @@
+import { bindDockerEndpointExec, resolveDockerEndpoint } from '../docker/docker-endpoint.js';
 /** Operator-requested and trusted-resolved secure nested Docker capability. */
 
 import { z } from 'zod';
-import { computeHash } from '../hash.js';
+import { release } from 'node:os';
+import { isWsl2Host, resolveDockerWorkloadEnvironment, type DockerWorkloadEnvironment } from './environment.js';
 
 const LEGACY_DOCKER_WORKLOAD_BACKENDS = ['auto', 'docker', 'apple-container'] as const;
 
@@ -119,14 +121,14 @@ export const dockerWorkloadRequestedSchema = z
       context.addIssue({
         code: 'custom',
         path: ['resources', 'pids', 'required'],
-        message: 'required nested-Docker PID enforcement is not supported by the current macOS developer slice',
+        message: 'required nested-Docker PID enforcement is not supported by the current developer slice',
       });
     }
     if (request.resources?.diskMb !== undefined && request.resources.diskMb !== null) {
       context.addIssue({
         code: 'custom',
         path: ['resources', 'diskMb'],
-        message: 'numeric nested-Docker disk limits are not supported by the current macOS developer slice',
+        message: 'numeric nested-Docker disk limits are not supported by the current developer slice',
       });
     }
   })
@@ -148,19 +150,40 @@ export const dockerWorkloadRequestedSchema = z
 
 export type DockerWorkloadRequestedConfig = z.infer<typeof dockerWorkloadRequestedSchema>;
 
-export type ResolvedDockerWorkloadConfig =
-  | { readonly enabled: false }
-  | {
-      readonly enabled: true;
-      readonly networkAccess: DockerWorkloadNetworkAccess;
-      readonly acceptObservedDiskRisk: boolean;
-      readonly resources: {
-        readonly memoryMb: number;
-        readonly cpus: number;
-        readonly pids: { readonly desired: number; readonly required: boolean };
-        readonly diskMb: number | null;
-      };
-    };
+/** Complete bounded configuration recorded directly in admission and session evidence. */
+export const resolvedDockerWorkloadConfigSchema = z.discriminatedUnion('enabled', [
+  z
+    .object({ enabled: z.literal(false) })
+    .strict()
+    .readonly(),
+  z
+    .object({
+      enabled: z.literal(true),
+      networkAccess: z.enum(DOCKER_WORKLOAD_NETWORK_ACCESS),
+      acceptObservedDiskRisk: z.boolean(),
+      resources: z
+        .object({
+          memoryMb: z.number().int().min(DOCKER_WORKLOAD_MEMORY_MIN_MB).max(DOCKER_WORKLOAD_MEMORY_MAX_MB),
+          cpus: z.number().min(DOCKER_WORKLOAD_CPU_MIN).max(DOCKER_WORKLOAD_CPU_MAX),
+          pids: z
+            .object({ desired: z.number().int().min(16).max(1_048_576), required: z.boolean() })
+            .strict()
+            .readonly(),
+          diskMb: z
+            .number()
+            .int()
+            .min(512)
+            .max(16 * 1024 * 1024)
+            .nullable(),
+        })
+        .strict()
+        .readonly(),
+    })
+    .strict()
+    .readonly(),
+]);
+
+export type ResolvedDockerWorkloadConfig = z.infer<typeof resolvedDockerWorkloadConfigSchema>;
 
 /** Feature-off is a one-field value carrying no per-session provisioned authority. */
 export function resolveDockerWorkloadConfig(
@@ -184,7 +207,7 @@ export function resolveDockerWorkloadConfig(
   return {
     enabled: true,
     networkAccess: validated.networkAccess ?? 'images',
-    // The currently admitted macOS developer slice uses an observed-only disk
+    // The currently admitted developer slice uses an observed-only disk
     // ceiling guarded by the host watchdog on both backends. Keep that
     // implementation detail out of the ordinary opt-in: `{ enabled: true }`
     // must resolve without requiring hidden risk-policy fields.
@@ -219,16 +242,13 @@ export function formatDockerWorkloadStatus(config: ResolvedDockerWorkloadConfig 
   }
 }
 
-export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): string {
-  return computeHash(config);
-}
-
 /**
  * Admit only a supported developer slice. The caller resolves `auto` first,
  * then invokes this guard before any feature-attributable runtime, image,
- * proxy, lease, or filesystem provisioning. Docker Desktop is admitted only
- * on Darwin; Apple Container performs its platform/version checks in the
- * runtime-availability preflight below. Operational artifacts are verified
+ * proxy, lease, or filesystem provisioning. Docker Desktop is admitted on macOS
+ * and WSL2; its server facts select the implemented profile in the availability
+ * preflight. Apple Container performs its platform/version checks there too.
+ * Operational artifacts are verified
  * later by their owning seams; this guard deliberately contains no
  * release/commit bookkeeping.
  */
@@ -236,6 +256,7 @@ export function assertDockerWorkloadVariantAdmitted(
   config: ResolvedDockerWorkloadConfig | undefined,
   resolvedRuntimeKind: 'docker' | 'apple-container',
   hostPlatform: NodeJS.Platform = process.platform,
+  hostRelease: string = release(),
 ): void {
   if (config?.enabled !== true) return;
   if (config.resources.pids.required || config.resources.diskMb !== null || !config.acceptObservedDiskRisk) {
@@ -243,9 +264,9 @@ export function assertDockerWorkloadVariantAdmitted(
       'secure nested Docker does not admit the requested resource policy; no image, relay, daemon, or lease action was performed',
     );
   }
-  if (resolvedRuntimeKind === 'docker' && hostPlatform !== 'darwin') {
+  if (resolvedRuntimeKind === 'docker' && hostPlatform !== 'darwin' && !isWsl2Host(hostPlatform, hostRelease)) {
     throw new Error(
-      `secure nested Docker with the Docker runtime is supported only on macOS (Darwin), not ${hostPlatform}; no image, relay, daemon, or lease action was performed`,
+      `secure nested Docker with the Docker runtime is supported on macOS and WSL2 with Docker Desktop, not this ${hostPlatform} host; no image, relay, daemon, or lease action was performed`,
     );
   }
 }
@@ -253,12 +274,15 @@ export function assertDockerWorkloadVariantAdmitted(
 /** Read-only runtime preflight required after the supported variant is selected. */
 export async function assertAdmittedDockerWorkloadRuntimeAvailable(
   resolvedRuntimeKind: 'docker' | 'apple-container',
-): Promise<void> {
-  const checkAvailability =
-    resolvedRuntimeKind === 'docker'
-      ? (await import('../docker/docker-probe.js')).checkDockerAvailable
-      : (await import('../docker/apple-container-manager.js')).checkAppleContainerAvailable;
-  const availability = await checkAvailability();
+): Promise<DockerWorkloadEnvironment> {
+  const { defaultExecFile } = await import('../docker/docker-manager.js');
+  const dockerEndpoint = resolvedRuntimeKind === 'docker' ? await resolveDockerEndpoint(defaultExecFile) : undefined;
+  const availability =
+    dockerEndpoint !== undefined
+      ? await (
+          await import('../docker/docker-probe.js')
+        ).checkDockerAvailable(bindDockerEndpointExec(dockerEndpoint, defaultExecFile), true)
+      : await (await import('../docker/apple-container-manager.js')).checkAppleContainerAvailable();
   if (!availability.available) {
     const runtimeName = resolvedRuntimeKind === 'docker' ? 'Docker' : 'Apple';
     throw new Error(
@@ -266,4 +290,8 @@ export async function assertAdmittedDockerWorkloadRuntimeAvailable(
         (availability.detailedMessage ? ` (${availability.detailedMessage})` : ''),
     );
   }
+  return {
+    ...resolveDockerWorkloadEnvironment(resolvedRuntimeKind, availability.server),
+    ...(dockerEndpoint === undefined ? {} : { dockerEndpoint }),
+  };
 }

@@ -1,4 +1,6 @@
 import { isIP } from 'node:net';
+import { lstatSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import type { ExecFileFn } from '../docker/docker-manager.js';
 import type { LedgeredOuterCreateAuthority } from './infrastructure.js';
 
@@ -12,6 +14,7 @@ const ENABLE_IPV4 = 'com.docker.network.enable_ipv4';
 const RELAY_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 export const DESKTOP_RELAY_HOST_GATEWAY_ALIAS = 'host.docker.internal';
 export const DESKTOP_RELAY_UPLINK_NETWORK = 'bridge';
+export const FIXED_RELAY_UNIX_TARGET = '/run/ironcurtain-upstream.sock';
 const DESKTOP_RELAY_HOST_GATEWAY_MAPPING = `${DESKTOP_RELAY_HOST_GATEWAY_ALIAS}:host-gateway`;
 const PROXY_AUTHORIZATION = /^Basic [A-Za-z0-9+/]+={0,2}$/u;
 
@@ -26,19 +29,26 @@ export const DESKTOP_RELAY_PROFILE = Object.freeze({
   dialTimeout: '5s',
 });
 
+export type FixedRelayUpstream =
+  | { readonly kind: 'tcp'; readonly host: string; readonly port: number }
+  | {
+      readonly kind: 'unix';
+      /** Exact host policy socket, mounted only into this trusted relay. */
+      readonly socketPath: string;
+      readonly runtimeUid: number;
+      readonly runtimeGid: number;
+    };
+
 export interface DesktopRelayConfig {
   readonly bundleId: string;
   readonly containerName: string;
   readonly isolatedNetworkName: string;
-  readonly uplinkNetworkName: string;
   readonly imageId: string;
   readonly ipv4Subnet: string;
   readonly ipv6Subnet: string;
   readonly relayIpv4Address: string;
   readonly listenPort: number;
-  /** An IPv4 literal or the one frozen Docker Desktop host-gateway alias. */
-  readonly targetHost: string;
-  readonly targetPort: number;
+  readonly upstream: FixedRelayUpstream;
   /** Host policy hop credential injected by the relay, never disclosed to the bundle. */
   readonly requiredProxyAuthorization: string;
 }
@@ -47,8 +57,7 @@ export interface DesktopRelayEndpointConfig {
   readonly containerName: string;
   readonly relayIpv4Address: string;
   readonly listenPort: number;
-  readonly targetHost: string;
-  readonly targetPort: number;
+  readonly upstream: FixedRelayUpstream;
 }
 
 /** Narrow adapter view of the common ledgered outer-create capability. */
@@ -62,7 +71,6 @@ export interface CreateDesktopRelayExposureOptions {
   readonly mode: 'images' | 'packages';
   readonly imageId: string;
   readonly isolatedNetworkName: string;
-  readonly uplinkNetworkName: string;
   readonly ipv4Subnet: string;
   readonly ipv6Subnet: string;
   readonly requiredProxyAuthorization: string;
@@ -146,6 +154,22 @@ function ipv4ToNumber(ip: string): number {
   return ip.split('.').reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0);
 }
 
+function canonicalIpv6Subnet(cidr: string): string {
+  const match = /^([^/]+)\/(\d+)$/.exec(cidr);
+  if (!match || isIP(match[1]) !== 6 || match[1].includes('%') || Number(match[2]) !== 64) {
+    throw new Error('relay IPv6 subnet must be an explicit /64');
+  }
+  // Docker compresses zero hextets and strips leading zeros on inspect. URL
+  // serializes the same address canonically without masking any address bits.
+  const address = new URL(`http://[${match[1]}]`).hostname.slice(1, -1);
+  // A canonical /64 network address has at most four explicit hextets,
+  // followed by a compressed run containing all four zero host hextets.
+  if (!address.endsWith('::') || address.split(':').filter(Boolean).length > 4) {
+    throw new Error('relay IPv6 subnet must use its canonical network address');
+  }
+  return `${address}/64`;
+}
+
 function assertConfig(config: DesktopRelayConfig): void {
   for (const [field, value] of [
     ['bundleId', config.bundleId],
@@ -153,9 +177,6 @@ function assertConfig(config: DesktopRelayConfig): void {
     ['isolatedNetworkName', config.isolatedNetworkName],
   ] as const) {
     if (!RESOURCE_NAME.test(value)) throw new Error(`relay ${field} is not a canonical IronCurtain resource name`);
-  }
-  if (config.uplinkNetworkName !== DESKTOP_RELAY_UPLINK_NETWORK) {
-    throw new Error(`relay uplink network must be the fixed ${DESKTOP_RELAY_UPLINK_NETWORK} network`);
   }
   if (!IMAGE_ID.test(config.imageId)) throw new Error('relay image must be an immutable sha256 image ID');
 
@@ -168,12 +189,26 @@ function assertConfig(config: DesktopRelayConfig): void {
   const broadcastPart = ~ipv4Subnet.mask >>> 0;
   if (hostPart === 0 || hostPart === broadcastPart) throw new Error('relay IPv4 address cannot be network/broadcast');
 
-  const ipv6Match = /^([^/]+)\/(\d+)$/.exec(config.ipv6Subnet);
-  if (!ipv6Match || isIP(ipv6Match[1]) !== 6 || Number(ipv6Match[2]) !== 64) {
-    throw new Error('relay IPv6 subnet must be an explicit /64');
-  }
+  canonicalIpv6Subnet(config.ipv6Subnet);
   normalizeIpEndpoint(config.relayIpv4Address, config.listenPort, 'relay listen');
-  normalizeTargetEndpoint(config.targetHost, config.targetPort);
+  if (config.upstream.kind === 'tcp') {
+    normalizeTargetEndpoint(config.upstream.host, config.upstream.port);
+  } else {
+    const { socketPath, runtimeUid, runtimeGid } = config.upstream;
+    if (!isAbsolute(socketPath) || resolve(socketPath) !== socketPath || /[,\p{Cc}]/u.test(socketPath)) {
+      throw new Error('relay Unix upstream must be one canonical absolute socket path');
+    }
+    if (
+      !Number.isSafeInteger(runtimeUid) ||
+      runtimeUid < 1 ||
+      runtimeUid > 0xffff_fffe ||
+      !Number.isSafeInteger(runtimeGid) ||
+      runtimeGid < 0 ||
+      runtimeGid > 0xffff_fffe
+    ) {
+      throw new Error('relay Unix upstream requires a numeric non-root UID and valid GID');
+    }
+  }
   if (!PROXY_AUTHORIZATION.test(config.requiredProxyAuthorization)) {
     throw new Error('relay proxy authorization is not one canonical Basic credential');
   }
@@ -214,7 +249,7 @@ export function buildDesktopRelayNetworkCreateArgs(
     '--subnet',
     config.ipv4Subnet,
     '--subnet',
-    config.ipv6Subnet,
+    canonicalIpv6Subnet(config.ipv6Subnet),
     '--opt',
     `${IPV4_GATEWAY_MODE}=isolated`,
     '--opt',
@@ -241,15 +276,18 @@ export function buildDesktopRelayCreateArgs(
     config.isolatedNetworkName,
     '--ip',
     config.relayIpv4Address,
-    ...(config.targetHost === DESKTOP_RELAY_HOST_GATEWAY_ALIAS
+    ...(config.upstream.kind === 'tcp' && config.upstream.host === DESKTOP_RELAY_HOST_GATEWAY_ALIAS
       ? (['--add-host', DESKTOP_RELAY_HOST_GATEWAY_MAPPING] as const)
+      : []),
+    ...(config.upstream.kind === 'unix'
+      ? ['--mount', `type=bind,source=${config.upstream.socketPath},target=${FIXED_RELAY_UNIX_TARGET},readonly`]
       : []),
     '--read-only',
     '--cap-drop=ALL',
     '--security-opt',
     'no-new-privileges:true',
     '--user',
-    '65532:65532',
+    config.upstream.kind === 'unix' ? `${config.upstream.runtimeUid}:${config.upstream.runtimeGid}` : '65532:65532',
     '--env',
     `PATH=${RELAY_PATH}`,
     '--workdir',
@@ -276,8 +314,9 @@ export function buildDesktopRelayCreateArgs(
     config.imageId,
     '--listen',
     normalizeIpEndpoint(config.relayIpv4Address, config.listenPort, 'relay listen'),
-    '--target',
-    normalizeTargetEndpoint(config.targetHost, config.targetPort),
+    ...(config.upstream.kind === 'tcp'
+      ? ['--target', normalizeTargetEndpoint(config.upstream.host, config.upstream.port)]
+      : ['--target-unix', FIXED_RELAY_UNIX_TARGET]),
     '--allow-cidr',
     config.ipv4Subnet,
     '--max-concurrent',
@@ -331,7 +370,10 @@ export function assertDesktopRelayContainerInspect(
   const image = stringAt(raw, 'Image');
   if (image !== config.imageId) throw new Error(`relay immutable image drift: ${image}`);
   const containerConfig = objectAt(raw, 'Config');
-  if (stringAt(containerConfig, 'User') !== '65532:65532') throw new Error('relay must run as numeric non-root');
+  const expectedUser =
+    config.upstream.kind === 'unix' ? `${config.upstream.runtimeUid}:${config.upstream.runtimeGid}` : '65532:65532';
+  if (stringAt(containerConfig, 'User') !== expectedUser)
+    throw new Error('relay must run as its exact numeric non-root identity');
   exactStringSet(containerConfig.Entrypoint, ['/ironcurtain-fixed-relay'], 'Entrypoint');
   const createArgs = buildDesktopRelayCreateArgs(config);
   const imageIndex = createArgs.indexOf(config.imageId);
@@ -370,7 +412,9 @@ export function assertDesktopRelayContainerInspect(
   if (stringAt(hostConfig, 'NetworkMode') !== config.isolatedNetworkName)
     throw new Error('relay primary network drift');
   const expectedExtraHosts =
-    config.targetHost === DESKTOP_RELAY_HOST_GATEWAY_ALIAS ? [DESKTOP_RELAY_HOST_GATEWAY_MAPPING] : [];
+    config.upstream.kind === 'tcp' && config.upstream.host === DESKTOP_RELAY_HOST_GATEWAY_ALIAS
+      ? [DESKTOP_RELAY_HOST_GATEWAY_MAPPING]
+      : [];
   const actualExtraHosts = hostConfig.ExtraHosts ?? [];
   exactStringSet(actualExtraHosts, expectedExtraHosts, 'ExtraHosts');
   if (hostConfig.Binds !== null && (!Array.isArray(hostConfig.Binds) || hostConfig.Binds.length !== 0)) {
@@ -402,10 +446,28 @@ export function assertDesktopRelayContainerInspect(
     throw new Error('relay nofile limit drift');
   }
 
-  if (!Array.isArray(raw.Mounts) || raw.Mounts.length !== 0) throw new Error('relay must have no mount');
+  if (!Array.isArray(raw.Mounts)) throw new Error('relay mount inspection is missing');
+  if (config.upstream.kind === 'unix') {
+    const mount: unknown = raw.Mounts[0];
+    if (
+      raw.Mounts.length !== 1 ||
+      !isObject(mount) ||
+      mount.Type !== 'bind' ||
+      mount.Source !== config.upstream.socketPath ||
+      mount.Destination !== FIXED_RELAY_UNIX_TARGET ||
+      mount.RW !== false ||
+      mount.Propagation !== 'rprivate'
+    ) {
+      throw new Error('relay must mount only its exact read-only Unix policy socket');
+    }
+  } else if (raw.Mounts.length !== 0) throw new Error('relay must have no mount');
   const networks = objectAt(objectAt(raw, 'NetworkSettings'), 'Networks');
   const names = Object.keys(networks).sort();
-  const expectedNetworks = [config.isolatedNetworkName, config.uplinkNetworkName].sort();
+  const expectedNetworks = (
+    config.upstream.kind === 'tcp'
+      ? [config.isolatedNetworkName, DESKTOP_RELAY_UPLINK_NETWORK]
+      : [config.isolatedNetworkName]
+  ).sort();
   if (JSON.stringify(names) !== JSON.stringify(expectedNetworks)) throw new Error('relay network attachment drift');
   const isolated = objectAt(networks, config.isolatedNetworkName);
   const isolatedIpam = objectAt(isolated, 'IPAMConfig');
@@ -415,14 +477,20 @@ export function assertDesktopRelayContainerInspect(
   if (isolated.IPAddress !== '' && isolated.IPAddress !== config.relayIpv4Address) {
     throw new Error('relay isolated IPv4 drift');
   }
-  const uplink = objectAt(networks, config.uplinkNetworkName);
-  if (typeof uplink.IPAddress !== 'string' || (uplink.IPAddress !== '' && isIP(uplink.IPAddress) !== 4)) {
-    throw new Error('relay uplink lacks an exact IPv4 address');
+  if (config.upstream.kind === 'tcp') {
+    const uplink = objectAt(networks, DESKTOP_RELAY_UPLINK_NETWORK);
+    if (
+      typeof uplink.IPAddress !== 'string' ||
+      (uplink.IPAddress !== '' && isIP(uplink.IPAddress) !== 4) ||
+      (requireRunning && isIP(uplink.IPAddress) !== 4)
+    ) {
+      throw new Error('relay uplink lacks an exact IPv4 address');
+    }
   }
   if (requireRunning) {
     const state = objectAt(raw, 'State');
     if (state.Running !== true) throw new Error('relay did not enter running state');
-    if (isolated.IPAddress !== config.relayIpv4Address || isIP(uplink.IPAddress) !== 4) {
+    if (isolated.IPAddress !== config.relayIpv4Address) {
       throw new Error('running relay lacks its exact network addresses');
     }
   }
@@ -465,9 +533,9 @@ export function assertDesktopRelayNetworkInspect(
   const subnets = new Map<string, JsonObject>();
   for (const entry of ipam.Config) {
     if (!isObject(entry) || typeof entry.Subnet !== 'string') throw new Error('relay network IPAM entry is malformed');
-    subnets.set(entry.Subnet, entry);
+    subnets.set(entry.Subnet.includes(':') ? canonicalIpv6Subnet(entry.Subnet) : entry.Subnet, entry);
   }
-  if (subnets.size !== 2 || !subnets.has(config.ipv4Subnet) || !subnets.has(config.ipv6Subnet)) {
+  if (subnets.size !== 2 || !subnets.has(config.ipv4Subnet) || !subnets.has(canonicalIpv6Subnet(config.ipv6Subnet))) {
     throw new Error('relay network subnet drift');
   }
   for (const entry of subnets.values()) {
@@ -540,14 +608,12 @@ function relayConfig(
     bundleId: options.bundleId,
     containerName: endpoint.containerName,
     isolatedNetworkName: options.isolatedNetworkName,
-    uplinkNetworkName: options.uplinkNetworkName,
     imageId: options.imageId,
     ipv4Subnet: options.ipv4Subnet,
     ipv6Subnet: options.ipv6Subnet,
     relayIpv4Address: endpoint.relayIpv4Address,
     listenPort: endpoint.listenPort,
-    targetHost: endpoint.targetHost,
-    targetPort: endpoint.targetPort,
+    upstream: endpoint.upstream,
     requiredProxyAuthorization: options.requiredProxyAuthorization,
   };
 }
@@ -611,6 +677,9 @@ async function createRelayContainer(
     async (requestedName, labels) => {
       if (requestedName !== config.containerName) throw new Error('relay create authority changed the container name');
       effectiveLabels = labels;
+      if (config.upstream.kind === 'unix' && !lstatSync(config.upstream.socketPath).isSocket()) {
+        throw new Error('relay Unix upstream source is not a socket');
+      }
       const container = await exec('docker', buildDesktopRelayCreateArgs(config, labels), {
         timeout: 30_000,
         maxBuffer: 10 * 1024 * 1024,
@@ -618,10 +687,12 @@ async function createRelayContainer(
       const containerId = assertRawId(container.stdout.trim(), 'container');
       rawContainerId = containerId;
       rollbackContainerIds.push(containerId);
-      await exec('docker', ['network', 'connect', config.uplinkNetworkName, containerId], {
-        timeout: 10_000,
-        maxBuffer: 10 * 1024 * 1024,
-      });
+      if (config.upstream.kind === 'tcp') {
+        await exec('docker', ['network', 'connect', DESKTOP_RELAY_UPLINK_NETWORK, containerId], {
+          timeout: 10_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+      }
       return { id: containerId };
     },
   );

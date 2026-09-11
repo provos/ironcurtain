@@ -42,7 +42,49 @@ export type ProbeExecFileFn = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /** Result of a container-runtime availability probe. */
-export type DockerAvailability = { available: true } | { available: false; reason: string; detailedMessage: string };
+export interface DockerServerFacts {
+  readonly architecture: 'amd64' | 'arm64';
+  readonly operatingSystem: string;
+  readonly osType: string;
+  readonly serverVersion: string;
+  readonly kernelVersion: string;
+  readonly cgroupVersion: string;
+  readonly securityOptions: readonly string[];
+}
+
+export type DockerAvailability =
+  | { available: true; server?: DockerServerFacts }
+  | { available: false; reason: string; detailedMessage: string };
+
+export function parseDockerServerFacts(value: unknown): DockerServerFacts {
+  if (value === null || typeof value !== 'object') throw new Error('Docker info did not return an object');
+  const info = value as Record<string, unknown>;
+  const architecture =
+    info.Architecture === 'x86_64' || info.Architecture === 'amd64'
+      ? 'amd64'
+      : info.Architecture === 'aarch64' || info.Architecture === 'arm64'
+        ? 'arm64'
+        : undefined;
+  if (architecture === undefined)
+    throw new Error(`Unsupported Docker execution architecture: ${String(info.Architecture)}`);
+  const requiredString = (key: string): string => {
+    const value = info[key];
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`Docker info omitted ${key}`);
+    return value;
+  };
+  if (!Array.isArray(info.SecurityOptions) || !info.SecurityOptions.every((item) => typeof item === 'string')) {
+    throw new Error('Docker info omitted security options');
+  }
+  return {
+    architecture,
+    operatingSystem: requiredString('OperatingSystem'),
+    osType: requiredString('OSType'),
+    serverVersion: requiredString('ServerVersion'),
+    kernelVersion: requiredString('KernelVersion'),
+    cgroupVersion: requiredString('CgroupVersion'),
+    securityOptions: info.SecurityOptions,
+  };
+}
 
 function describeProbeFailure(err: unknown, fallback: string): string {
   if (!isExecError(err)) return fallback;
@@ -77,14 +119,21 @@ function describeProbeFailure(err: unknown, fallback: string): string {
  *
  * @param execFileFn Optional `execFile` implementation for tests.
  */
-export async function checkDockerAvailable(execFileFn: ProbeExecFileFn = execFile): Promise<DockerAvailability> {
+export async function checkDockerAvailable(
+  execFileFn: ProbeExecFileFn = execFile,
+  includeServerFacts = false,
+): Promise<DockerAvailability> {
   const totalAttempts = DOCKER_PROBE_MAX_RETRIES + 1;
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     try {
-      await execFileFn('docker', ['info'], { timeout: DOCKER_PROBE_TIMEOUT_MS });
-      return { available: true };
+      const { stdout } = await execFileFn(
+        'docker',
+        includeServerFacts ? ['info', '--format', '{{json .}}'] : ['info'],
+        { timeout: DOCKER_PROBE_TIMEOUT_MS },
+      );
+      return { available: true, ...(includeServerFacts ? { server: parseDockerServerFacts(JSON.parse(stdout)) } : {}) };
     } catch (err: unknown) {
       lastErr = err;
       if (!isExecError(err) || !isExecTimeout(err)) {

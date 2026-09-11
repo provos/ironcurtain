@@ -42,8 +42,8 @@ describe.skipIf(!ready)('purpose-built nested daemon image metadata', () => {
       }>;
       expect(parsed).toHaveLength(1);
       expect(parsed[0].Config).toMatchObject({
-        User: 'rootless',
-        Entrypoint: ['dockerd-entrypoint.sh'],
+        User: '0:0',
+        Entrypoint: ['/usr/local/lib/ironcurtain/daemon-entrypoint.sh'],
         Labels: { 'com.ironcurtain.docker-workload.image-role': 'nested-daemon' },
       });
       expect(parsed[0].Config?.Volumes).toBeUndefined();

@@ -15,7 +15,7 @@ import { loadDockerWorkloadLease, revokeDockerWorkloadLease } from '../../src/do
 import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -40,7 +40,7 @@ function baseOptions(
     runtimeKind: 'docker',
     bundleId: 'bundle-admission-001',
     workspaceRoot: join(getHome(), 'workspace'),
-    configHash: ADMISSION_CONFIG_HASH,
+    configuration: ADMISSION_CONFIGURATION,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     auditSink,

@@ -29,9 +29,9 @@ type trustSource struct {
 }
 
 var productionTrustSources = []trustSource{
-	{Source: "/opt/ironcurtain-build-trust/ca-cert.pem", Destination: "/dev/ironcurtain/ca-cert.pem", MaxBytes: 64 << 10},
-	{Source: "/opt/ironcurtain-build-trust/ca-bundle.pem", Destination: "/dev/ironcurtain/ca-bundle.pem", MaxBytes: 2 << 20},
-	{Source: "/opt/ironcurtain-build-trust/apt.conf", Destination: "/dev/ironcurtain/apt.conf", MaxBytes: 64 << 10},
+	{Source: "/ironcurtain-build-trust/ca-cert.pem", Destination: "/dev/ironcurtain/ca-cert.pem", MaxBytes: 64 << 10},
+	{Source: "/ironcurtain-build-trust/ca-bundle.pem", Destination: "/dev/ironcurtain/ca-bundle.pem", MaxBytes: 2 << 20},
+	{Source: "/ironcurtain-build-trust/apt.conf", Destination: "/dev/ironcurtain/apt.conf", MaxBytes: 64 << 10},
 }
 
 var injectedEnvironment = []string{

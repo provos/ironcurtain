@@ -41,6 +41,7 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm run build
+      - run: npm run build:build-trust-runtime
       - run: npm run check:build-trust-runtime
       - run: npm test
 

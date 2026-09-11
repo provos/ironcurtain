@@ -575,7 +575,7 @@ describe('Apple VM nested-daemon readiness — in-VM text is bounded at the seam
         sleep: timeline.sleep,
       }),
     ).rejects.toThrow(
-      /apple-vm daemon did not become ready within 1000ms; dockerd log tail:\nrootlesskit: nsenter: failed to execute ip/u,
+      /apple-vm daemon did not become ready within 1000ms;[\s\S]*dockerd log tail:\nrootlesskit: nsenter: failed to execute ip/u,
     );
     expect(calls.filter((call) => call.argv[0] === 'tail')).toEqual([
       { argv: [...APPLE_VM_DAEMON_LOG_TAIL_ARGV], user: 'codespace', timeoutMs: 5_000 },
@@ -590,7 +590,7 @@ describe('Apple VM nested-daemon readiness — in-VM text is bounded at the seam
     };
     await expect(
       waitForAppleVmDaemonReady(exec, { timeoutMs: 0, now: timeline.now, sleep: timeline.sleep }),
-    ).rejects.toThrow(/did not become ready within 0ms; dockerd log tail:\n\(dockerd log unavailable\)/u);
+    ).rejects.toThrow(/did not become ready within 0ms;[\s\S]*dockerd log tail:\n\(dockerd log unavailable\)/u);
   });
 
   it('truncates the log tail to a byte budget the in-VM writer does not choose', async () => {
@@ -608,7 +608,7 @@ describe('Apple VM nested-daemon readiness — in-VM text is bounded at the seam
 
     const message = (error as Error).message;
     expect(message).toContain('… (truncated)');
-    expect(Buffer.byteLength(message, 'utf8')).toBeLessThan(4_200);
+    expect(Buffer.byteLength(message.split('dockerd log tail:\n')[1], 'utf8')).toBeLessThan(4_200);
   });
 
   it('strips control characters so a log line cannot inject terminal escapes', async () => {

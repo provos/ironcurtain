@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assembleDockerInfrastructure,
   buildDockerDesktopTransportCreateLimits,
-  buildNestedDockerAgentTrustedCreateOptions,
+  buildDockerAgentTrustedCreateOptions,
   buildDockerWorkloadEgressMounts,
   createLedgeredAgentContainer,
   createSessionContainers,
@@ -59,15 +59,9 @@ import {
   DOCKER_BUILD_TRUST_CA_CERT_PATH,
   getDockerBuildShimStagingContract,
 } from '../../src/docker/docker-build-shim.js';
+import { createMockAdapter, createMockCA, createMockMitmProxy, createMockProxy } from '../helpers/docker-mocks.js';
 import {
-  createMockAdapter,
-  createMockCA,
-  createMockMitmProxy,
-  createMockProxy,
-  createMockRuntimeTrust,
-} from '../helpers/docker-mocks.js';
-import {
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createTestAppleVmDockerWorkloadBootstrap,
@@ -107,7 +101,7 @@ async function admit(
     runtimeKind: 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
-    configHash: ADMISSION_CONFIG_HASH,
+    configuration: ADMISSION_CONFIGURATION,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     clock: clock.clock,
@@ -143,7 +137,6 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
     docker,
     adapter: createMockAdapter(),
     ca: createMockCA(tempDir),
-    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -162,7 +155,6 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
         dockerImageId: `sha256:${'3'.repeat(64)}`,
         manifestDigest: `sha256:${'4'.repeat(64)}`,
         archivePath: join(tempDir, 'agent.tar'),
-        archiveSha256: '7'.repeat(64),
         archiveSizeBytes: 1024,
       },
     },
@@ -197,6 +189,7 @@ function packageBuildShim(): NonNullable<PreContainerInfrastructure['dockerBuild
     'packages',
     APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
     APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+    { architecture: 'arm64', dockerHost: 'unix:///run/ironcurtain-docker/docker.sock' },
   )!;
   return {
     contract,
@@ -246,10 +239,10 @@ function packageBuildShim(): NonNullable<PreContainerInfrastructure['dockerBuild
     ],
     buildTrustCanary: {
       caGeneration: 'gen-00000000-0000-4000-8000-000000000000',
-      buildTrustContractSha256: '4'.repeat(64),
-      caCertificateSha256: '1'.repeat(64),
-      caBundleSha256: '2'.repeat(64),
-      aptConfigSha256: '3'.repeat(64),
+      buildTrustContract: 'fixture-contract\n',
+      caCertificate: 'fixture-cert\n',
+      caBundle: 'fixture-bundle\n',
+      aptConfig: 'fixture-apt\n',
     },
   };
 }
@@ -421,6 +414,18 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
     expect(containerId).toBe('docker-container-id');
     expect(createImage).toBe(immutableImageId);
     expect(inspected).toBe(false);
+  });
+});
+
+describe('Docker outer-agent inherited volume suppression', () => {
+  it('shadows the image-declared Docker state volume without a nested workload', () => {
+    expect(buildDockerAgentTrustedCreateOptions('docker', [], undefined)).toEqual({
+      tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
+    });
+  });
+
+  it('leaves Apple agent mounts unchanged', () => {
+    expect(buildDockerAgentTrustedCreateOptions('apple-container', [], undefined)).toBeUndefined();
   });
 });
 
@@ -970,13 +975,13 @@ describe('Docker-workload wiring — session metadata (§8.4)', () => {
     const runtime = createEventRuntime();
     const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
 
-    const tuple = dockerWorkloadSessionMetadata(handle, 'a'.repeat(64), 'docker');
+    const tuple = dockerWorkloadSessionMetadata(handle, ADMISSION_CONFIGURATION, 'docker');
 
     expect(tuple).toEqual({
       leaseId: handle.leaseId,
       generation: handle.generation,
-      configHash: 'a'.repeat(64),
-      watchdogPolicySha256: handle.loadedPolicy.sha256,
+      configuration: ADMISSION_CONFIGURATION,
+      watchdogPolicy: handle.loadedPolicy.policy,
       backend: 'docker',
     });
   });
@@ -1033,6 +1038,7 @@ describe('Docker-workload wiring — outer resource envelope', () => {
           },
         },
         { cpus: 8, memoryMb: 16_384 },
+        true,
       );
 
       expect(partition).toEqual({
@@ -1060,12 +1066,14 @@ describe('Docker-workload wiring — outer resource envelope', () => {
         trustedCreateOptions: { pidsLimit: DESKTOP_RELAY_PROFILE.pidsLimit },
       });
       expect(
-        buildNestedDockerAgentTrustedCreateOptions(
+        buildDockerAgentTrustedCreateOptions(
+          'docker',
           [{ name: 'daemon-api', target: '/run/ironcurtain-docker', readonly: true, noCopy: true }],
           partition,
         ),
       ).toEqual({
         namedVolumeMounts: [{ name: 'daemon-api', target: '/run/ironcurtain-docker', readonly: true, noCopy: true }],
+        tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
         pidsLimit: 128,
       });
     },
@@ -1093,11 +1101,40 @@ describe('Docker-workload wiring — outer resource envelope', () => {
           },
         },
         { cpus: 8, memoryMb: 16_384 },
+        true,
       ),
     ).toThrow(
       `Docker Desktop nested Docker ${minimum.networkAccess} mode requires at least ${minimum.minimumMemoryMb} MiB and ${minimum.minimumCpus} CPU`,
     );
   });
+
+  it.each([
+    { networkAccess: 'offline', sidecarPids: 384, agentMemoryMb: 1024, agentCpus: 1 },
+    { networkAccess: 'images', sidecarPids: 352, agentMemoryMb: 960, agentCpus: 0.75 },
+    { networkAccess: 'packages', sidecarPids: 320, agentMemoryMb: 896, agentCpus: 0.5 },
+  ] as const)(
+    'omits unused TCP transport reserves for WSL $networkAccess',
+    ({ networkAccess, sidecarPids, agentMemoryMb, agentCpus }) => {
+      const partition = selectDockerDesktopResourcePartition(
+        {
+          dockerResources: { memoryMb: 7777, cpus: 7 },
+          dockerWorkload: {
+            enabled: true,
+            networkAccess,
+            acceptObservedDiskRisk: true,
+            resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
+          },
+        },
+        { cpus: 8, memoryMb: 16_384 },
+        false,
+      );
+      expect(partition).toEqual({
+        sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: sidecarPids },
+        transport: { memoryMb: 0, cpus: 0, pidsLimit: 0 },
+        agent: { memoryMb: agentMemoryMb, cpus: agentCpus, pidsLimit: 128 },
+      });
+    },
+  );
 
   it('builds the purpose-built Desktop daemon once and reuses its hash-labeled image', async () => {
     let storedHash: string | undefined;

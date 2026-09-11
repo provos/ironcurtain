@@ -25,6 +25,8 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { sha256HexSchema as sha256Schema } from '../hash.js';
 import { assertCanonicalHostPath } from '../hardened-fs.js';
+import { resourceWatchdogPolicySchema } from '../docker/resource-watchdog.js';
+import { resolvedDockerWorkloadConfigSchema } from './config.js';
 import {
   lifecycleIdentifierSchema as identifierSchema,
   ownedResourceInventorySchema as inventorySchema,
@@ -65,7 +67,29 @@ const expandedCreateSchema = z
 
 const baseEventShape = { at: timestampSchema, leaseId: identifierSchema, generation: identifierSchema };
 
-const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
+const dockerWorkloadAuditEventSchema = z.union([
+  z
+    .object({
+      ...baseEventShape,
+      kind: z.literal('admission-decision'),
+      decision: z.enum(['admitting', 'blocked']),
+      bundleId: identifierSchema,
+      runtimeKind: z.enum(['docker', 'apple-container']),
+      configuration: resolvedDockerWorkloadConfigSchema,
+      watchdogPolicy: resourceWatchdogPolicySchema,
+      detail: z.string().min(1).max(4096),
+    })
+    .strict(),
+  z
+    .object({
+      ...baseEventShape,
+      kind: z.literal('watchdog-attested'),
+      supervisorPid: z.number().int().positive(),
+      policy: resourceWatchdogPolicySchema,
+      firstSample: sampleSchema,
+    })
+    .strict(),
+  // Historical audit records remain readable while old generations close.
   z
     .object({
       ...baseEventShape,
@@ -132,7 +156,6 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
       ...baseEventShape,
       kind: z.literal('private-docker-bootstrap'),
       attestation: z.literal(DAEMON_READY_ATTESTATION),
-      toolchainDigest: sha256Schema,
       toolchain: z
         .object({
           dockerCli: softwareVersionSchema,
@@ -147,7 +170,6 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
             transport: z.literal('apple-archive'),
             logicalName: z.string().min(1).max(255),
             buildHash: sha256Schema,
-            archiveSha256: sha256Schema,
             outerImageId: runtimeIdentitySchema,
             innerImageId: runtimeIdentitySchema,
           })

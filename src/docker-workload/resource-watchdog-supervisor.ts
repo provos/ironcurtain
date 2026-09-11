@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
 import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
 import {
@@ -30,20 +31,20 @@ import {
   type DockerWorkloadLifecycleClaimHandle,
 } from './cleanup-ownership.js';
 import {
-  loadResourceWatchdogPolicy,
+  resourceWatchdogPolicySchema,
   ResourceWatchdog,
   type ResourceWatchdogAttestation,
   type ResourceWatchdogSample,
   type ResourceWatchdogTrip,
 } from '../docker/resource-watchdog.js';
-import { DOCKER_WORKLOAD_STALE_HEARTBEAT_MS } from './watchdog-policy.js';
+import { DOCKER_WORKLOAD_STALE_HEARTBEAT_MS, loadLeaseWatchdogPolicy } from './watchdog-policy.js';
 
-export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 1;
+export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 2;
 export const MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES = 1024 * 1024;
 
 const stopRequestSchema = z
   .object({
-    schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
+    schemaVersion: z.union([z.literal(1), z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION)]),
     leaseId: identifierSchema,
     generation: identifierSchema,
     requestedAt: timestampSchema,
@@ -59,14 +60,12 @@ const tripSchema = z
     overshootWithinFrozenMaximum: z.boolean(),
   })
   .strict();
-const supervisorStatusSchema = z
+const supervisorStatusBaseSchema = z
   .object({
-    schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
     leaseId: identifierSchema,
     generation: identifierSchema,
     supervisorPid: z.number().int().positive(),
     state: z.enum(['starting', 'ready', 'revoking', 'closed', 'incident']),
-    policySha256: sha256Schema,
     policyId: identifierSchema,
     startedAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -75,6 +74,19 @@ const supervisorStatusSchema = z
     detail: z.string().min(1).max(8192).nullable(),
   })
   .strict();
+const supervisorStatusSchema = z
+  .discriminatedUnion('schemaVersion', [
+    supervisorStatusBaseSchema.extend({ schemaVersion: z.literal(1), policySha256: sha256Schema }),
+    supervisorStatusBaseSchema.extend({
+      schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
+      policy: resourceWatchdogPolicySchema,
+    }),
+  ])
+  .superRefine((status, context) => {
+    if (status.schemaVersion === 2 && status.policyId !== status.policy.policyId) {
+      context.addIssue({ code: 'custom', message: 'watchdog supervisor policy ID does not match its snapshot' });
+    }
+  });
 
 export type ResourceWatchdogSupervisorStatus = z.infer<typeof supervisorStatusSchema>;
 export type ResourceWatchdogSupervisorStopRequest = z.infer<typeof stopRequestSchema>;
@@ -105,27 +117,30 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
   const sleep =
     options.sleep ??
     ((milliseconds: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
-  const loadedPolicy = loadResourceWatchdogPolicy(options.policyPath);
   let lease = loadDockerWorkloadLease(options.leasePath);
-  if (lease.bindings.watchdogPolicySha256 !== loadedPolicy.sha256) {
-    throw new Error('watchdog supervisor policy hash does not match the bundle lease');
-  }
-  if (lease.paths.stateRoot !== loadedPolicy.policy.targetRoot) {
-    throw new Error('watchdog supervisor target root does not match the bundle lease');
-  }
+  const loadedPolicy = loadLeaseWatchdogPolicy(lease, options.policyPath);
   for (const controlPath of [options.leasePath, options.policyPath, options.statusPath, options.stopRequestPath]) {
     if (controlPath === lease.paths.stateRoot || controlPath.startsWith(`${lease.paths.stateRoot}/`)) {
       throw new Error('watchdog supervisor control files must be outside the revocable state root');
     }
   }
-  const runtime = options.runtime ?? createContainerRuntime(lease.runtimeKind);
+  const runtime =
+    options.runtime ??
+    createContainerRuntime(lease.runtimeKind, lease.schemaVersion === 2 ? lease.dockerEndpoint : undefined);
+  if (
+    lease.schemaVersion === 2 &&
+    lease.dockerEndpoint !== undefined &&
+    runtime.dockerEndpoint?.host !== lease.dockerEndpoint.host
+  ) {
+    throw new Error('watchdog runtime does not match the recorded Docker endpoint');
+  }
   const startedAt = now().toISOString();
   const baseStatus = {
-    schemaVersion: RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION,
+    schemaVersion: lease.schemaVersion,
     leaseId: lease.leaseId,
     generation: lease.generation,
     supervisorPid: process.pid,
-    policySha256: loadedPolicy.sha256,
+    ...watchdogSupervisorPolicyBinding(lease),
     policyId: loadedPolicy.policy.policyId,
     startedAt,
   } as const;
@@ -383,7 +398,7 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
   }
 }
 
-/** Spawn a process-group-independent child and wait for its hash-bound attestation. */
+/** Spawn a process-group-independent child and wait for its generation's attestation. */
 export async function launchDetachedResourceWatchdogSupervisor(
   options: LaunchDetachedResourceWatchdogSupervisorOptions,
 ): Promise<{ readonly pid: number; readonly status: ResourceWatchdogSupervisorStatus }> {
@@ -484,14 +499,16 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void>
 
 export function requestResourceWatchdogSupervisorStop(
   path: string,
-  lease: Pick<DockerWorkloadLease, 'leaseId' | 'generation'>,
+  lease: Pick<DockerWorkloadLease, 'leaseId' | 'generation' | 'schemaVersion'>,
   cleanup: DockerWorkloadCleanupProof,
   now = new Date(),
 ): void {
   writeStrictJsonAtomic(
     path,
     stopRequestSchema.parse({
-      schemaVersion: RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION,
+      // An old supervisor keeps its original protocol until that generation
+      // closes, even if the coordinator has since been upgraded.
+      schemaVersion: lease.schemaVersion,
       leaseId: lease.leaseId,
       generation: lease.generation,
       requestedAt: now.toISOString(),
@@ -506,7 +523,7 @@ export function loadResourceWatchdogSupervisorStatus(path: string): ResourceWatc
 
 export function assertResourceWatchdogSupervisorFresh(
   status: ResourceWatchdogSupervisorStatus,
-  expected: { readonly leaseId: string; readonly generation: string; readonly policySha256: string },
+  expected: { readonly leaseId: string; readonly generation: string } & WatchdogSupervisorPolicyBinding,
   staleAfterMs: number,
   now = new Date(),
 ): void {
@@ -514,7 +531,7 @@ export function assertResourceWatchdogSupervisorFresh(
   if (
     validated.leaseId !== expected.leaseId ||
     validated.generation !== expected.generation ||
-    validated.policySha256 !== expected.policySha256
+    !supervisorPolicyMatches(validated, expected)
   ) {
     throw new Error('watchdog supervisor status binding mismatch');
   }
@@ -522,6 +539,26 @@ export function assertResourceWatchdogSupervisorFresh(
   if (now.getTime() - Date.parse(validated.updatedAt) >= staleAfterMs) {
     throw new Error('watchdog supervisor heartbeat is stale');
   }
+}
+
+type WatchdogSupervisorPolicyBinding =
+  | { readonly policySha256: string }
+  | { readonly policy: import('../docker/resource-watchdog.js').ResourceWatchdogPolicy };
+
+/** One compatibility seam for launch, readiness, and reconciliation. */
+export function watchdogSupervisorPolicyBinding(lease: DockerWorkloadLease): WatchdogSupervisorPolicyBinding {
+  return lease.schemaVersion === 1
+    ? { policySha256: lease.bindings.watchdogPolicySha256 }
+    : { policy: lease.bindings.watchdogPolicy };
+}
+
+function supervisorPolicyMatches(
+  status: ResourceWatchdogSupervisorStatus,
+  expected: WatchdogSupervisorPolicyBinding,
+): boolean {
+  return status.schemaVersion === 1
+    ? 'policySha256' in expected && status.policySha256 === expected.policySha256
+    : 'policy' in expected && isDeepStrictEqual(status.policy, expected.policy);
 }
 
 async function waitForSamplingClaim(

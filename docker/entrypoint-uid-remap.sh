@@ -28,10 +28,10 @@
 if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
   if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
     # Renumber the codespace user/group to the host UID/GID, then fix
-    # ownership on the baked home dir and workspace mount so the remapped
-    # codespace user can read/write them. Bind-mounted subdirectories
-    # (conversation state, sockets, orientation) keep their host-side
-    # ownership, which now matches codespace.
+    # ownership on the baked home directory so the remapped user can
+    # write generated state. Host workspace and mounted state keep their
+    # ownership. Bind-mounted subdirectories (conversation state, sockets,
+    # orientation) keep their host-side ownership, which now matches codespace.
     #
     # GID and UID collisions are handled asymmetrically because they mean
     # different things:
@@ -53,35 +53,52 @@ if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN
     #     `chown` / `runuser -u codespace` would operate on the wrong
     #     account — recreating the original issue #232 bug with no
     #     diagnostic. This is the regression guard from commit 2f463f3.
-    current_gid="$(id -g codespace)"
-    if [ "$current_gid" != "$IRONCURTAIN_AGENT_GID" ]; then
-      if getent group "$IRONCURTAIN_AGENT_GID" >/dev/null 2>&1; then
-        # GID already exists in the image (benign collision): reuse it as
-        # codespace's primary group instead of renumbering codespace's own
-        # group onto an occupied GID.
-        usermod -g "$IRONCURTAIN_AGENT_GID" codespace || {
-          echo "[ironcurtain] usermod failed: cannot set codespace primary group to existing GID $IRONCURTAIN_AGENT_GID" >&2
-          exit 1
-        }
-      else
-        # GID is free: renumber codespace's own group to it.
-        groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
-          echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
-          exit 1
-        }
-      fi
-    fi
-
     current_uid="$(id -u codespace)"
-    if [ "$current_uid" != "$IRONCURTAIN_AGENT_UID" ]; then
-      usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace || {
-        echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID (already in use?)" >&2
+    current_gid="$(id -g codespace)"
+    if [ "$current_gid" != "$IRONCURTAIN_AGENT_GID" ] &&
+      ! getent group "$IRONCURTAIN_AGENT_GID" >/dev/null 2>&1; then
+      # A free GID can renumber the image group. Existing groups are selected
+      # below without modifying their membership or ownership.
+      groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
+        echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
         exit 1
       }
     fi
 
-    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace || {
-      echo "[ironcurtain] chown failed: cannot reset ownership of /home/codespace and /workspace to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
+    # Both usermod -u AND usermod -g implicitly traverse the home directory.
+    # Redirect the account home for the entire identity update, including a
+    # GID-only change or collision, then restore it before dropping privileges.
+    if [ -e /nonexistent ] || [ -L /nonexistent ]; then
+      echo '[ironcurtain] cannot remap codespace: temporary account home /nonexistent must be absent' >&2
+      exit 1
+    fi
+    usermod -d /nonexistent -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace &&
+      usermod -d /home/codespace codespace || {
+      echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID and GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
+      exit 1
+    }
+
+    # Only the image home tree is generated state. Prune every nested mount
+    # explicitly: -xdev alone does not exclude binds from the same filesystem.
+    # mountinfo escapes whitespace/backslashes using octal sequences.
+    ic_home_prunes=()
+    while read -r ic_mount_id ic_mount_parent ic_mount_device ic_mount_root ic_mount_path ic_mount_rest; do
+      printf -v ic_mount_path '%b' "$ic_mount_path"
+      case "$ic_mount_path" in
+        /home/codespace/*)
+          # find -path parses glob patterns even when the shell argument is
+          # quoted. Mount names are literal, including brackets and wildcards.
+          ic_mount_path="${ic_mount_path//\\/\\\\}"
+          ic_mount_path="${ic_mount_path//\*/\\*}"
+          ic_mount_path="${ic_mount_path//\?/\\?}"
+          ic_mount_path="${ic_mount_path//\[/\\[}"
+          ic_home_prunes+=( -path "$ic_mount_path" -prune -o )
+          ;;
+      esac
+    done < /proc/self/mountinfo
+    find -P /home/codespace -xdev "${ic_home_prunes[@]}" \
+      -uid "$current_uid" -exec chown --no-dereference "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" '{}' + || {
+      echo "[ironcurtain] cannot reset generated home ownership to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
       exit 1
     }
   fi

@@ -72,15 +72,9 @@ import {
   DOCKER_BUILDX_STATE_DIRECTORY,
   getDockerBuildShimStagingContract,
 } from '../../src/docker/docker-build-shim.js';
+import { createMockAdapter, createMockCA, createMockMitmProxy, createMockProxy } from '../helpers/docker-mocks.js';
 import {
-  createMockAdapter,
-  createMockCA,
-  createMockMitmProxy,
-  createMockProxy,
-  createMockRuntimeTrust,
-} from '../helpers/docker-mocks.js';
-import {
-  ADMISSION_CONFIG_HASH,
+  ADMISSION_CONFIGURATION,
   QUALIFIED_DOCKER_INFO,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
@@ -142,7 +136,7 @@ async function admitBundle(options?: {
     runtimeKind: options?.runtimeKind ?? 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
-    configHash: ADMISSION_CONFIG_HASH,
+    configuration: ADMISSION_CONFIGURATION,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     auditSink: audit,
@@ -180,6 +174,13 @@ function makeCore(
           runtimeKind === 'docker'
             ? `http://172.31.44.2:${TEST_DESKTOP_REGISTRY_PORT}`
             : APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+          {
+            architecture: runtimeKind === 'docker' ? 'amd64' : 'arm64',
+            dockerHost:
+              runtimeKind === 'docker'
+                ? 'unix:///run/ironcurtain-docker/docker/docker.sock'
+                : 'unix:///run/ironcurtain-docker/docker.sock',
+          },
         )
       : undefined;
   if (bootstrap) docker.getImageId = async () => bootstrap.artifact.appleImageId;
@@ -202,7 +203,6 @@ function makeCore(
     docker,
     adapter: createMockAdapter(),
     ca: createMockCA(tempDir),
-    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -347,10 +347,10 @@ function makeCore(
             ],
             buildTrustCanary: {
               caGeneration: 'gen-00000000-0000-4000-8000-000000000000',
-              buildTrustContractSha256: '4'.repeat(64),
-              caCertificateSha256: '1'.repeat(64),
-              caBundleSha256: '2'.repeat(64),
-              aptConfigSha256: '3'.repeat(64),
+              buildTrustContract: 'fixture-contract\n',
+              caCertificate: 'fixture-cert\n',
+              caBundle: 'fixture-bundle\n',
+              aptConfig: 'fixture-apt\n',
             },
           },
   };
@@ -727,7 +727,7 @@ describe('nested daemon — egress transports', () => {
       target: '/etc/ironcurtain',
       readonly: true,
     });
-    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).toBe('/opt/ironcurtain-build-trust/build-trust-contract.json');
+    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).toBe('/ironcurtain-build-trust/build-trust-contract.json');
     expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).not.toMatch(/^\/etc\/ironcurtain(?:\/|$)/u);
     expect(agentMounts).toEqual(
       expect.arrayContaining([
@@ -758,44 +758,14 @@ describe('nested daemon — egress transports', () => {
           readonly: true,
         },
         {
-          source: join(tempDir, 'build-shim', 'runc'),
-          target: DOCKER_BUILD_TRUST_WRAPPER_PATH,
-          readonly: true,
-        },
-        {
-          source: join(tempDir, 'build-shim', 'build-trust-contract.json'),
-          target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
-          readonly: true,
-        },
-        {
-          source: join(tempDir, 'build-shim', 'ca-cert.pem'),
-          target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
-          readonly: true,
-        },
-        {
-          source: join(tempDir, 'build-shim', 'ca-bundle.pem'),
-          target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-          readonly: true,
-        },
-        {
-          source: join(tempDir, 'build-shim', 'apt.conf'),
-          target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+          source: join(tempDir, 'build-shim'),
+          target: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
           readonly: true,
         },
       ]),
     );
-    expect(
-      agentMounts
-        .filter(({ target }) => target.startsWith(`${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/`))
-        .map(({ target }) => target)
-        .sort(),
-    ).toEqual(
-      [
-        DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
-        DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-        DOCKER_BUILD_TRUST_CA_CERT_PATH,
-        DOCKER_BUILD_TRUST_CONTRACT_PATH,
-      ].sort(),
+    expect(agentMounts.some(({ target }) => target.startsWith(`${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/`))).toBe(
+      false,
     );
     const readinessIndex = runtime.execs.findIndex((argv) => argv.includes('info'));
     const buildStateIndex = runtime.execs.findIndex((argv) => argv.includes(DOCKER_BUILDX_STATE_DIRECTORY));
@@ -803,7 +773,13 @@ describe('nested daemon — egress transports', () => {
     const shimVersionIndex = runtime.execs.findIndex((argv) => argv.includes('{{json .Client}}'));
     const provisioningIndex = runtime.execs.findIndex((argv) => argv.includes('image') && argv.includes('inspect'));
     const contractValidationIndex = runtime.execs.findIndex(
-      (argv) => argv[0] === '/bin/sh' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH),
+      (argv) => argv[0] === '/bin/cat' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH),
+    );
+    const protectedInputsIndex = runtime.execs.findIndex(
+      (argv) => argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === '--ironcurtain-verify-protected-inputs-v2',
+    );
+    const selectedRuncVersionIndex = runtime.execs.findIndex(
+      (argv) => argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === '--version',
     );
     const baseTagIndex = runtime.execs.findIndex(
       (argv) => argv.includes('image') && argv.includes('tag') && argv.includes(canaryBase),
@@ -831,16 +807,16 @@ describe('nested daemon — egress transports', () => {
     expect(buildStateIndex).toBeGreaterThan(readinessIndex);
     expect(pathIndex).toBeGreaterThan(buildStateIndex);
     expect(shimVersionIndex).toBeGreaterThan(pathIndex);
-    expect(provisioningIndex).toBeGreaterThan(shimVersionIndex);
-    expect(contractValidationIndex).toBeGreaterThan(provisioningIndex);
-    expect(runtime.execs[contractValidationIndex]).toEqual(
-      expect.arrayContaining([
-        DOCKER_BUILD_TRUST_CONTRACT_PATH,
-        '4'.repeat(64),
-        'gen-00000000-0000-4000-8000-000000000000',
-      ]),
-    );
-    expect(baseTagIndex).toBeGreaterThan(contractValidationIndex);
+    expect(contractValidationIndex).toBeGreaterThan(shimVersionIndex);
+    expect(runtime.execs.slice(contractValidationIndex, protectedInputsIndex)).toEqual([
+      ['/bin/cat', DOCKER_BUILD_TRUST_CONTRACT_PATH],
+      ['/bin/cat', DOCKER_BUILD_TRUST_CA_CERT_PATH],
+      ['/bin/cat', DOCKER_BUILD_TRUST_CA_BUNDLE_PATH],
+      ['/bin/cat', DOCKER_BUILD_TRUST_APT_CONFIG_PATH],
+    ]);
+    expect(selectedRuncVersionIndex).toBeGreaterThan(protectedInputsIndex);
+    expect(provisioningIndex).toBeGreaterThan(selectedRuncVersionIndex);
+    expect(baseTagIndex).toBeGreaterThan(provisioningIndex);
     expect(baseInspectIndices[0]).toBeLessThan(baseTagIndex);
     expect(outputInspectIndices[0]).toBeLessThan(baseTagIndex);
     expect(runtime.execs[baseTagIndex]).toEqual([
@@ -927,16 +903,16 @@ describe('nested daemon — egress transports', () => {
     expect(capturing.config().env).not.toHaveProperty('BUILDX_CONFIG');
   });
 
-  it('fails closed before canary build when the staged contract does not match its CA generation', async () => {
+  it('fails closed before canary build when mounted public contract differs from host staging', async () => {
     const { runtime, handle } = await admitBundle({
       exec: (argv) =>
-        argv[0] === '/bin/sh' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH)
+        argv[0] === '/bin/cat' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH)
           ? { exitCode: 1, stdout: '', stderr: 'contract mismatch' }
           : respondHealthyAppleVmDaemon(argv),
     });
     const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
 
-    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/contract\/CA generation validation/u);
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/differs from host staging/u);
 
     expect(runtime.execs.some(isBuildTrustCanaryBuildArgv)).toBe(false);
     expect(managedNetworkCreates(runtime)).toHaveLength(0);
@@ -1552,6 +1528,7 @@ describe('nested daemon — Docker Desktop agent capability', () => {
         noCopy: true,
       },
     ]);
+    expect(capturing.config().trustedCreateOptions?.tmpfs).toEqual(['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m']);
     expect(capturing.config().mounts).not.toContainEqual(
       expect.objectContaining({ target: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR }),
     );
@@ -1614,7 +1591,6 @@ describe('nested daemon — daemon-ready evidence (§8.4)', () => {
           transport: 'apple-archive',
           logicalName: 'ironcurtain-claude-code:latest',
           buildHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          archiveSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
           outerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
           innerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
         },

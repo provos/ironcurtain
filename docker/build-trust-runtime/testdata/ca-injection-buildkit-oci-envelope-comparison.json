@@ -2,13 +2,11 @@
   "schemaVersion": 1,
   "baseline": {
     "networkMode": "none",
-    "fixturePath": "/private/tmp/ic-oci-envelope.uuDNaw/docker-29.2.1-buildkit-oci-config-envelope.fixture.json",
-    "fixtureSha256": "af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21"
+    "fixturePath": "/private/tmp/ic-oci-envelope.uuDNaw/docker-29.2.1-buildkit-oci-config-envelope.fixture.json"
   },
   "candidate": {
     "networkMode": "host",
-    "fixturePath": "/private/tmp/ic-oci-envelope-host.f3HAmj/docker-29.2.1-buildkit-oci-config-envelope-host.fixture.json",
-    "fixtureSha256": "128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58"
+    "fixturePath": "/private/tmp/ic-oci-envelope-host.f3HAmj/docker-29.2.1-buildkit-oci-config-envelope-host.fixture.json"
   },
   "structuralDelta": {
     "qualificationCommand": {
