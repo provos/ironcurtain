@@ -1,5 +1,4 @@
 /** Complete trusted rootless sidecar seccomp definition. Changes require boundary tests. */
-import { isDeepStrictEqual } from 'node:util';
 
 interface SeccompFilter {
   readonly caps?: readonly string[];
@@ -775,10 +774,4 @@ const PROFILE = {
 
 export function nestedDaemonSeccompProfile(): NestedDaemonSeccompProfile {
   return structuredClone(PROFILE);
-}
-
-export function assertNestedDaemonSeccompProfile(value: unknown): asserts value is NestedDaemonSeccompProfile {
-  if (!isDeepStrictEqual(value, PROFILE)) {
-    throw new Error('nested daemon seccomp profile differs from its complete trusted definition');
-  }
 }

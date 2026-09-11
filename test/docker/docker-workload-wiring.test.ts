@@ -1148,10 +1148,22 @@ describe('Docker-workload wiring — outer resource envelope', () => {
       buildImage,
     } as unknown as ContainerRuntime;
 
-    await expect(ensureDockerDesktopSidecarImage(runtime)).resolves.toBe('ironcurtain-nested-daemon:latest');
-    await expect(ensureDockerDesktopSidecarImage(runtime)).resolves.toBe('ironcurtain-nested-daemon:latest');
+    const source = {
+      architecture: 'amd64' as const,
+      imageId: `sha256:${'a'.repeat(64)}`,
+      reference: `docker@sha256:${'b'.repeat(64)}`,
+    };
+    await expect(ensureDockerDesktopSidecarImage(runtime, source)).resolves.toBe('ironcurtain-nested-daemon:latest');
+    await expect(ensureDockerDesktopSidecarImage(runtime, source)).resolves.toBe('ironcurtain-nested-daemon:latest');
 
     expect(buildImage).toHaveBeenCalledOnce();
+    expect(buildImage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(Object),
+      { IRONCURTAIN_DOCKER_SOURCE: source.reference },
+    );
     expect(buildImage.mock.calls[0]?.[1]).toMatch(/docker\/nested-daemon\/Dockerfile$/u);
     expect(buildImage.mock.calls[0]?.[2]).toMatch(/docker\/nested-daemon$/u);
     expect(storedHash).toMatch(/^[a-f0-9]{64}$/u);

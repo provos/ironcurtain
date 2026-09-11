@@ -17,6 +17,19 @@ const source = getDockerToolchainSourceReference(compatibility.manifest);
 // actual ownership, plugin discovery and sudo are checked against built images by
 // live qualification; matching Dockerfile text does not establish those properties.
 describe('shared Docker toolchain image inputs', () => {
+  it.each([
+    ['amd64', amd64],
+    ['arm64', arm64],
+  ])('%s adds no daemon exposure or credential material', (_architecture, dockerfile) => {
+    // Inspect our instructions, not comments or inherited base-image metadata.
+    const instructions = dockerfile
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    expect(instructions).not.toMatch(/^(?:VOLUME|EXPOSE)\b/mu);
+    expect(instructions).not.toMatch(/tcp:\/\/|DOCKER_HOST|DOCKER_TLS|dockerd-entrypoint/u);
+    expect(instructions).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY|API_KEY|AUTH_TOKEN/u);
+  });
   it('uses one versioned Docker source in both agent bases and the daemon', () => {
     for (const dockerfile of [amd64, arm64, daemon]) {
       expect(dockerfile).toContain(`ARG IRONCURTAIN_DOCKER_SOURCE=${source}`);

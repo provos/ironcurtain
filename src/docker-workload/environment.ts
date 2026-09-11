@@ -2,6 +2,7 @@ import type { DockerEndpoint } from '../docker/docker-endpoint.js';
 /** Runtime facts select an implemented profile; version strings are diagnostics. */
 import { release } from 'node:os';
 import type { DockerServerFacts } from '../docker/docker-probe.js';
+import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
 
 export interface DockerWorkloadEnvironment {
   readonly dockerEndpoint?: DockerEndpoint;
@@ -9,6 +10,10 @@ export interface DockerWorkloadEnvironment {
   readonly architecture: 'amd64' | 'arm64';
   readonly egressTransport: 'tcp' | 'unix';
   readonly server?: DockerServerFacts;
+}
+
+export function dockerWorkloadRuntimeKind(environment: DockerWorkloadEnvironment): ContainerRuntimeKind {
+  return environment.profile === 'apple-container' ? 'apple-container' : 'docker';
 }
 
 export function isWsl2Host(platform: NodeJS.Platform, hostRelease: string): boolean {

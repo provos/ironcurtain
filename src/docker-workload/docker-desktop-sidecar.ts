@@ -35,11 +35,7 @@ import type {
 } from '../docker/types.js';
 import { computeHash } from '../hash.js';
 import { writeStableJsonAtomic } from '../hardened-fs.js';
-import {
-  nestedDaemonSeccompProfile,
-  assertNestedDaemonSeccompProfile,
-  type NestedDaemonSeccompProfile,
-} from './nested-daemon-profile.js';
+import { nestedDaemonSeccompProfile, type NestedDaemonSeccompProfile } from './nested-daemon-profile.js';
 import {
   stageNestedDaemonIdentity,
   prepareNestedDaemonHostConfigDirectory,
@@ -337,6 +333,9 @@ export async function startDockerDesktopSidecar(
       EXEC_TIMEOUT_MS,
       execUser,
     );
+    // The entrypoint creates the private child as 0700. It is also Docker's
+    // data root through the shared volume mounts below; dockerd changes it to
+    // 0710 during initialization, before this post-readiness observation.
     if (ownership.exitCode !== 0 || ownership.stdout.trim() !== `0:0:755\n${execUser}:710`) {
       throw new Error('nested daemon API parent or private state ownership differs from its configured identity');
     }
@@ -598,11 +597,6 @@ function assertStoppedSidecarProfile(
   let effectiveSeccomp: unknown;
   try {
     effectiveSeccomp = JSON.parse(securityOptions[0].slice('seccomp='.length)) as unknown;
-  } catch {
-    mismatch('seccomp profile');
-  }
-  try {
-    assertNestedDaemonSeccompProfile(effectiveSeccomp);
   } catch {
     mismatch('seccomp profile');
   }

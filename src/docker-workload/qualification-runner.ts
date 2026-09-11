@@ -180,10 +180,7 @@ async function defaultQualificationExecutor(options: {
   const stderr: Buffer[] = [];
   child.stdout.on('data', (chunk: Buffer) => capture(stdout, chunk));
   child.stderr.on('data', (chunk: Buffer) => capture(stderr, chunk));
-  // Drain both pipes before examining diagnostics, including their final bytes.
-  const closed = new Promise<void>((resolvePromise) => child.once('close', () => resolvePromise()));
   const exit = await waitForQualificationProcess(child, options.timeoutMs, { signal: cancellation.signal });
-  await closed;
   return {
     exitCode: exit.code ?? 1,
     stdout: Buffer.concat(stdout).toString('utf8'),

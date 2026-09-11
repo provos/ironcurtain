@@ -58,6 +58,21 @@ describe('captured Docker endpoint', () => {
     ]);
   });
 
+  it.each(['tcp://localhost:2375', 'ssh://remote'])(
+    'explains how to replace an unsupported nested endpoint %s',
+    async (host) => {
+      const exec = vi.fn<ExecFileFn>();
+      await expect(resolveDockerEndpoint(exec, { DOCKER_HOST: host })).rejects.toThrow(
+        /local Docker Desktop Unix socket.*unset DOCKER_CONTEXT.*disable dockerWorkload/,
+      );
+      expect(exec).not.toHaveBeenCalled();
+      exec.mockResolvedValue({ stdout: JSON.stringify(host), stderr: '' });
+      await expect(resolveDockerEndpoint(exec, { DOCKER_CONTEXT: 'remote' })).rejects.toThrow(
+        /TCP and SSH endpoints are not qualified/,
+      );
+    },
+  );
+
   it.each(['tcp://remote:2375', 'ssh://remote', 'unix:///tmp/../other.sock', 'unix:///tmp/a%2fb', 'unix:///'])(
     'rejects unqualified or ambiguous endpoint %s',
     (host) => {

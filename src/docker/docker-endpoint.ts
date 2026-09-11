@@ -55,7 +55,7 @@ export async function resolveDockerEndpoint(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<DockerEndpoint> {
   const env = { ...environment };
-  if (!env.DOCKER_CONTEXT && env.DOCKER_HOST) return dockerEndpointSchema.parse({ host: env.DOCKER_HOST });
+  if (!env.DOCKER_CONTEXT && env.DOCKER_HOST) return parseSelectedEndpoint(env.DOCKER_HOST);
   const context =
     env.DOCKER_CONTEXT || (await exec('docker', ['context', 'show'], { timeout: 10_000, env })).stdout.trim();
   if (!context || context.startsWith('-')) throw new Error('Docker did not resolve a selected context');
@@ -63,5 +63,16 @@ export async function resolveDockerEndpoint(
     timeout: 10_000,
     env,
   });
-  return dockerEndpointSchema.parse({ host: JSON.parse(result.stdout) as unknown });
+  return parseSelectedEndpoint(JSON.parse(result.stdout) as unknown);
+}
+
+function parseSelectedEndpoint(host: unknown): DockerEndpoint {
+  try {
+    return dockerEndpointSchema.parse({ host });
+  } catch (error) {
+    throw new Error(
+      'Nested Docker requires a local Docker Desktop Unix socket. Select a Docker Desktop context with a unix:/// endpoint, or set DOCKER_HOST to that socket and unset DOCKER_CONTEXT. TCP and SSH endpoints are not qualified for nested Docker; disable dockerWorkload to use ordinary Docker sessions.',
+      { cause: error },
+    );
+  }
 }

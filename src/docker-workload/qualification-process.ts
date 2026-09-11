@@ -3,6 +3,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const QUALIFICATION_TERM_GRACE_MS = 60_000;
 export const QUALIFICATION_KILL_GRACE_MS = 10_000;
+const QUALIFICATION_OUTPUT_DRAIN_MS = 5_000;
+
+export class QualificationTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`qualification child timed out after ${timeoutMs}ms`);
+    this.name = 'QualificationTimeoutError';
+  }
+}
 
 export interface SmokeChildExit {
   readonly code: number | null;
@@ -75,6 +83,11 @@ export async function waitForQualificationProcess(
     throw new Error('qualification child has no process group ID');
   }
   const processGroupId = child.pid;
+  let onClose: (() => void) | undefined;
+  const closed = new Promise<boolean>((resolvePromise) => {
+    onClose = () => resolvePromise(true);
+    child.once('close', onClose);
+  });
   const terminate = (signal: NodeJS.Signals): void => signalProcessGroup(processGroupId, signal);
   const cancellation = new AbortController();
   const onSigint = (): void => cancellation.abort('SIGINT');
@@ -106,16 +119,23 @@ export async function waitForQualificationProcess(
       }
       throw error;
     }
+    // Exiting the process group does not close pipes inherited by a detached
+    // descendant. Preserve final output, but bound draining for every caller.
+    const drained = await Promise.race([closed, delay(QUALIFICATION_OUTPUT_DRAIN_MS, false, { ref: false })]);
     if (waitFailure !== undefined) throw waitFailure;
     if (cancellation.signal.aborted) {
       const reason: unknown = cancellation.signal.reason;
       throw reason instanceof Error ? reason : new Error(`qualification interrupted by ${String(reason)}`);
     }
     if (exit === undefined) throw new Error('qualification child ended without an exit result');
-    if (exit.timedOut) throw new Error(`qualification child timed out after ${timeoutMs}ms`);
+    if (exit.timedOut) throw new QualificationTimeoutError(timeoutMs);
     if (group.leaked) throw new Error('qualification child leaked a descendant process');
+    if (!drained) throw new Error('qualification child output pipes did not close during bounded teardown');
     return exit;
   } finally {
+    if (onClose !== undefined) child.removeListener('close', onClose);
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);
     options.signal?.removeEventListener('abort', onAbort);

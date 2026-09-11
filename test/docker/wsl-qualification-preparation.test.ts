@@ -8,7 +8,6 @@ const preparedWslEnvironment = {
     profile: 'wsl-desktop',
     architecture: 'amd64',
     egressTransport: 'unix',
-    runtimeKind: 'docker',
     server: {
       architecture: 'amd64',
       operatingSystem: 'Docker Desktop',

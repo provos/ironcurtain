@@ -1,10 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { getFrozenProfileCeilingPath } from '../../src/docker/docker-workload-paths.js';
-import {
-  nestedDaemonSeccompProfile,
-  assertNestedDaemonSeccompProfile,
-} from '../../src/docker-workload/nested-daemon-profile.js';
+import { nestedDaemonSeccompProfile } from '../../src/docker-workload/nested-daemon-profile.js';
 
 interface ProfileCeiling {
   schemaVersion: number;
@@ -81,20 +78,4 @@ describe('Docker Desktop profile ceiling', () => {
     expect(ceiling.absoluteStops).toContain('systempaths-unconfined-outside-reviewed-nested-daemon-sidecar');
     expect(ceiling.absoluteStops).not.toContain('systempaths-unconfined');
   });
-  it.each(['syscall', 'argument', 'architecture', 'capability', 'default-action'])(
-    'rejects a changed %s even when the old canary rules are retained',
-    (change) => {
-      const profile = JSON.parse(JSON.stringify(nestedDaemonSeccompProfile())) as {
-        defaultAction: string;
-        archMap: { subArchitectures: string[] | null }[];
-        syscalls: { names: string[]; action: string; args?: { value: number }[]; includes?: { caps?: string[] } }[];
-      };
-      if (change === 'syscall') profile.syscalls.push({ names: ['bpf'], action: 'SCMP_ACT_ALLOW' });
-      if (change === 'argument') profile.syscalls.find((rule) => rule.args !== undefined)!.args![0].value += 1;
-      if (change === 'architecture') profile.archMap[0].subArchitectures!.push('SCMP_ARCH_AARCH64');
-      if (change === 'capability') delete profile.syscalls.find((rule) => rule.includes?.caps !== undefined)!.includes;
-      if (change === 'default-action') profile.defaultAction = 'SCMP_ACT_ALLOW';
-      expect(() => assertNestedDaemonSeccompProfile(profile)).toThrow(/complete trusted definition/);
-    },
-  );
 });

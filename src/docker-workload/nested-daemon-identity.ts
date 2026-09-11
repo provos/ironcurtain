@@ -3,11 +3,9 @@ import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertCanonicalHostPath, readHardenedFile } from '../hardened-fs.js';
 import type { DockerMount } from '../docker/types.js';
+import type { ContainerIdentity } from '../docker/container-identity.js';
 
-export interface NestedDaemonIdentity {
-  readonly uid: number;
-  readonly gid: number;
-}
+export type NestedDaemonIdentity = ContainerIdentity;
 
 export function assertNestedDaemonIdentity(identity: NestedDaemonIdentity): void {
   for (const id of [identity.uid, identity.gid]) {

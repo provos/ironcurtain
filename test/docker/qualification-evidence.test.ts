@@ -1,8 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { setTimeout as delay } from 'node:timers/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QualificationEvidenceRecorder } from '../../scripts/qualification-evidence.js';
+import * as qualificationProcess from '../../src/docker-workload/qualification-process.js';
 
 const reportDirectories: string[] = [];
 
@@ -131,6 +133,61 @@ describe('qualification evidence', () => {
 
     expect(() => createRecorder(reportDirectory)).toThrow();
     expect(readFileSync(manifestPath, 'utf8')).toBe('existing evidence');
+  });
+
+  it('bounds both retained and forwarded output when a script floods its pipe', async () => {
+    const reportDirectory = createReportDirectory();
+    const recorder = createRecorder(reportDirectory);
+    let forwardedBytes = 0;
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      forwardedBytes += Buffer.byteLength(chunk);
+      return true;
+    });
+    try {
+      await expect(
+        recorder.runScript({
+          kind: 'live-gate',
+          script: 'fixtures/qualification-evidence.ts',
+          arguments: ['flood'],
+          timeoutMs: 5_000,
+          termGraceMs: 100,
+        }),
+      ).rejects.toThrow('exceeded its retained output bound');
+      const manifest = loadManifest(reportDirectory);
+      expect(statSync(join(reportDirectory, manifest.scripts[0].stdoutLog)).size).toBe(50 * 1024 * 1024);
+      expect(forwardedBytes).toBe(50 * 1024 * 1024);
+      expect(manifest).toMatchObject({ scripts: [{ status: 'failed', timedOut: false }] });
+    } finally {
+      output.mockRestore();
+    }
+  });
+
+  it('does not label a cleanup failure after the deadline as a child timeout', async () => {
+    const reportDirectory = createReportDirectory();
+    const recorder = createRecorder(reportDirectory);
+    const wait = qualificationProcess.waitForQualificationProcess;
+    const mockedWait = vi
+      .spyOn(qualificationProcess, 'waitForQualificationProcess')
+      .mockImplementationOnce(async (child) => {
+        await wait(child, 5_000);
+        await delay(150);
+        throw new Error('qualification child leaked a descendant process');
+      });
+    try {
+      await expect(
+        recorder.runScript({
+          kind: 'live-gate',
+          script: 'fixtures/qualification-evidence.ts',
+          arguments: ['0'],
+          timeoutMs: 100,
+        }),
+      ).rejects.toThrow('leaked a descendant process');
+      expect(loadManifest(reportDirectory)).toMatchObject({
+        scripts: [{ status: 'failed', exitCode: 0, timedOut: false }],
+      });
+    } finally {
+      mockedWait.mockRestore();
+    }
   });
 
   it('records a log-file collision without replacing the existing artifact', async () => {

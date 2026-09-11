@@ -63,7 +63,7 @@ import { createContainerRuntime, resolveRuntimeKind, type ContainerRuntimeKind }
 import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
-import { getInternalNetworkName, useTcpTransport } from './platform.js';
+import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers, destroyBundleOuterResources } from './container-lifecycle.js';
 import {
   createIronCurtainInternalNetwork,
@@ -153,7 +153,8 @@ import {
 } from '../docker-workload/desktop-relay.js';
 import { loadClientToolchainManifest } from '../docker-workload/client-toolchain.js';
 import { resolveDockerToolchainSource, type DockerToolchainSource } from '../docker-workload/toolchain-source.js';
-import type { DockerWorkloadEnvironment } from '../docker-workload/environment.js';
+import { dockerWorkloadRuntimeKind, type DockerWorkloadEnvironment } from '../docker-workload/environment.js';
+import { resolveContainerIdentity, type ContainerIdentity } from './container-identity.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import {
   DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
@@ -718,6 +719,7 @@ async function createDockerDesktopRelayExposureForBundle(options: {
   readonly imageId: string;
   readonly egress: DockerWorkloadEgressCollection;
   readonly runtime: ContainerRuntime;
+  readonly identity: ContainerIdentity;
   readonly createOuterResource: CreateDesktopRelayExposureOptions['createOuterResource'];
 }): Promise<DesktopRelayExposure> {
   const authorization = options.egress.proxyAuthorization;
@@ -727,8 +729,8 @@ async function createDockerDesktopRelayExposureForBundle(options: {
       ? {
           kind: 'unix',
           socketPath: endpoint.socketPath,
-          runtimeUid: process.getuid?.() ?? 1000,
-          runtimeGid: process.getgid?.() ?? 1000,
+          runtimeUid: options.identity.uid,
+          runtimeGid: options.identity.gid,
         }
       : { kind: 'tcp', host: DESKTOP_RELAY_HOST_GATEWAY_ALIAS, port: endpoint.port };
   const shortId = getBundleShortId(options.bundleId);
@@ -928,7 +930,7 @@ export interface CaptureSetupInput {
 }
 
 export type AgentImageResolution = {
-  readonly dockerWorkloadEnvironment?: DockerWorkloadEnvironment & { readonly runtimeKind: ContainerRuntimeKind };
+  readonly dockerWorkloadEnvironment?: DockerWorkloadEnvironment;
   readonly toolchainSource?: DockerToolchainSource;
   readonly mode: 'build-if-stale' | 'selected-agent-artifact';
   readonly logicalName: string;
@@ -965,11 +967,13 @@ export async function prepareDockerInfrastructure(
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
   // read-only probe; ordinary CLI credential preflight is outside this seam.
   // Keep the feature-off path's historical profile/adapter/runtime ordering.
-  const admittedEnvironment = await resolveAdmittedDockerWorkloadRuntimeKind(
+  const admitted = await resolveAdmittedDockerWorkload(
     config.userConfig,
     preparedImageResolution?.dockerWorkloadEnvironment,
   );
-  const admittedRuntimeKind = admittedEnvironment?.runtimeKind;
+  const admittedEnvironment = admitted?.environment;
+  const admittedRuntimeKind =
+    admittedEnvironment === undefined ? undefined : dockerWorkloadRuntimeKind(admittedEnvironment);
   let dockerDesktopResources: DockerDesktopResourcePartition | undefined;
   if (admittedRuntimeKind !== undefined) {
     if (admittedRuntimeKind === 'docker') {
@@ -1102,7 +1106,8 @@ export async function prepareDockerInfrastructure(
   // resolved-variant guard above limits this production path to an admitted
   // backend/mode. `attestWatchdog()` (§8.2 step 3) is driven after the proxies
   // start, below.
-  const dockerWorkloadConfig = config.userConfig.dockerWorkload;
+  const dockerWorkloadConfig = admitted?.configuration;
+  const containerIdentity = resolveContainerIdentity(runtimeKind === 'docker' && !useTcp);
   let dockerWorkloadAgentImage: string | undefined;
   let dockerWorkloadImageResolution: AgentImageResolution | undefined;
   let dockerDesktopSidecarImage: string | undefined;
@@ -1110,16 +1115,16 @@ export async function prepareDockerInfrastructure(
   let admittedDockerWorkload:
     | { readonly handle: DockerWorkloadBundleHandle; readonly bootstrap?: AppleVmDockerWorkloadBootstrapConfig }
     | undefined;
-  if (dockerWorkloadConfig?.enabled === true) {
-    if (admittedEnvironment === undefined) throw new Error('Nested Docker environment was not resolved');
+  if (admitted !== undefined) {
+    const { environment, configuration } = admitted;
     const toolchainSource =
       preparedImageResolution?.toolchainSource ??
-      (await resolveDockerToolchainSource(docker, admittedEnvironment.architecture));
-    if (toolchainSource.architecture !== admittedEnvironment.architecture)
+      (await resolveDockerToolchainSource(docker, environment.architecture));
+    if (toolchainSource.architecture !== environment.architecture)
       throw new Error('Prepared Docker toolchain platform changed');
     if (runtimeKind === 'docker') {
       dockerDesktopSidecarImage = await ensureDockerDesktopSidecarImage(docker, toolchainSource);
-      if (dockerWorkloadConfig.networkAccess !== 'offline') {
+      if (configuration.networkAccess !== 'offline') {
         dockerDesktopRelayImageId = await ensureDockerDesktopRelayImage(docker);
       }
     }
@@ -1142,7 +1147,7 @@ export async function prepareDockerInfrastructure(
     assertPreparedImageResolution(dockerWorkloadImageResolution, dockerWorkloadAgentImage, runtimeKind);
     const artifact = dockerWorkloadImageResolution.artifact;
     admittedDockerWorkload = await admitDockerWorkloadForSession({
-      dockerWorkload: dockerWorkloadConfig,
+      dockerWorkload: configuration,
       runtime: docker,
       runtimeKind,
       bundleId,
@@ -1271,18 +1276,14 @@ export async function prepareDockerInfrastructure(
             };
           }
         } catch (error) {
-          const authorities =
-            listeners.networkAccess === 'packages'
-              ? [listeners.packages.listener, listeners.registry.listener]
-              : [listeners.registry.listener];
-          const cleanup = await Promise.allSettled(authorities.map((authority) => authority.stop()));
-          const failures: Error[] = cleanup.flatMap((result) =>
-            result.status === 'rejected' ? [new Error(errorMessage(result.reason), { cause: result.reason })] : [],
-          );
-          if (failures.length > 0) {
-            throw new AggregateError([error, ...failures], 'nested-Docker egress startup and rollback failed', {
-              cause: error,
-            });
+          const failures: unknown[] = [error];
+          try {
+            await stopDockerWorkloadEgress(listeners);
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          }
+          if (failures.length > 1) {
+            throw new AggregateError(failures, 'nested-Docker egress startup and rollback failed', { cause: error });
           }
           throw error;
         }
@@ -1532,42 +1533,41 @@ export async function prepareDockerInfrastructure(
         imageId: dockerDesktopRelayImageId,
         egress: dockerWorkloadEgress,
         runtime: docker,
+        identity: containerIdentity,
         createOuterResource: (spec, create) => ledgerOuterResourceCreate(dockerWorkload, spec, create),
       });
     }
 
-    if (dockerWorkloadConfig?.enabled === true) {
-      if (admittedEnvironment === undefined) throw new Error('Nested Docker environment is missing');
+    if (admitted !== undefined) {
+      const { environment, configuration } = admitted;
       const packageProxyUrl =
         runtimeKind === 'docker' ? dockerDesktopRelayExposure?.package?.proxyUrl : APPLE_VM_PACKAGE_EGRESS_PROXY_URL;
       const registryProxyUrl =
         runtimeKind === 'docker' ? dockerDesktopRelayExposure?.registry.proxyUrl : APPLE_VM_REGISTRY_EGRESS_PROXY_URL;
       let protectedRealRunc: Buffer | undefined;
-      if (runtimeKind === 'apple-container' && dockerWorkloadConfig.networkAccess === 'packages') {
+      if (runtimeKind === 'apple-container' && configuration.networkAccess === 'packages') {
         const artifact = dockerWorkloadImageResolution?.artifact;
         if (artifact === undefined) throw new Error('Apple package builds require the selected image artifact');
         const { readSelectedImageRealRunc } = await import('./selected-image-file.js');
         protectedRealRunc = await readSelectedImageRealRunc(artifact);
       }
-      dockerBuildShim = stageDockerBuildShim(bundleId, dockerWorkloadConfig.networkAccess, {
+      dockerBuildShim = stageDockerBuildShim(bundleId, configuration.networkAccess, {
         ...(protectedRealRunc === undefined ? {} : { protectedRealRunc }),
         orientationDir,
         caGeneration: ca.generation,
         runtimeKind,
-        architecture: admittedEnvironment.architecture,
-        uid: runtimeKind === 'docker' && !useTcp ? (process.getuid?.() ?? 1000) : 1000,
-        gid: runtimeKind === 'docker' && !useTcp ? (process.getgid?.() ?? 1000) : 1000,
+        architecture: environment.architecture,
+        ...containerIdentity,
         ...(packageProxyUrl === undefined ? {} : { packageProxyUrl }),
         ...(registryProxyUrl === undefined ? {} : { registryProxyUrl }),
       });
-      if ((dockerWorkloadConfig.networkAccess === 'packages') !== (dockerBuildShim !== undefined)) {
+      if ((configuration.networkAccess === 'packages') !== (dockerBuildShim !== undefined)) {
         throw new Error('nested-Docker package build staging did not match the resolved network access');
       }
     }
 
-    if (runtimeKind === 'docker' && dockerWorkload !== undefined) {
+    if (runtimeKind === 'docker' && dockerWorkload !== undefined && admitted !== undefined) {
       if (
-        admittedEnvironment === undefined ||
         dockerDesktopSidecarImage === undefined ||
         dockerDesktopResources === undefined ||
         dockerWorkloadImageResolution?.immutableImageId === undefined
@@ -1604,13 +1604,11 @@ export async function prepareDockerInfrastructure(
       const sidecar = await startDockerDesktopSidecar({
         runtime: requireDockerDesktopSidecarRuntime(docker),
         sidecarImage: dockerDesktopSidecarImage,
-        identity: useTcp
-          ? { uid: 1000, gid: 1000 }
-          : { uid: process.getuid?.() ?? 1000, gid: process.getgid?.() ?? 1000 },
+        identity: containerIdentity,
         hostConfigDirectory: resolve(hostOnlyDir, 'daemon'),
         clientManifest: loadClientToolchainManifest(
           getFrozenClientToolchainManifestPath(),
-          admittedEnvironment.architecture,
+          admitted.environment.architecture,
         ),
         outerAgentImageId: dockerWorkloadImageResolution.immutableImageId,
         workspaceRoot: workspaceDir,
@@ -2399,8 +2397,8 @@ export function selectOuterContainerResources(
  */
 export function selectDockerDesktopResourcePartition(
   userConfig: Pick<ResolvedUserConfig, 'dockerResources' | 'dockerWorkload'>,
-  hostResources?: HostResources,
-  tcpTransport = useTcpTransport(),
+  hostResources: HostResources | undefined,
+  tcpTransport: boolean,
 ): DockerDesktopResourcePartition {
   if (userConfig.dockerWorkload?.enabled !== true) {
     throw new Error('Docker Desktop resource partition requires an enabled nested-Docker workload');
@@ -2571,8 +2569,7 @@ export function buildAgentUidRemap(skipRemap: boolean): {
   readonly env: Record<string, string>;
 } {
   if (skipRemap) return { user: undefined, env: {} };
-  const uid = process.getuid?.() ?? 1000;
-  const gid = process.getgid?.() ?? 1000;
+  const { uid, gid } = resolveContainerIdentity(true);
   return {
     user: '0:0',
     env: {
@@ -2784,7 +2781,14 @@ export async function activateNestedDockerWorkload(options: {
 }
 
 /** Stop every constructed authority even when one listener reports a failure. */
-export async function stopDockerWorkloadEgress(egress: DockerWorkloadEgressCollection | undefined): Promise<void> {
+export async function stopDockerWorkloadEgress(
+  egress:
+    | DockerWorkloadEgressSet<
+        { readonly listener: { stop(): Promise<void> } },
+        { readonly listener: { stop(): Promise<void> } }
+      >
+    | undefined,
+): Promise<void> {
   if (egress === undefined) return;
   const endpoints = egress.networkAccess === 'packages' ? [egress.packages, egress.registry] : [egress.registry];
   const results = await Promise.allSettled(
@@ -3590,8 +3594,10 @@ export async function ensureDockerImage(
   agentId: AgentId,
   userConfig: ResolvedUserConfig,
 ): Promise<AgentImageResolution> {
-  const admittedEnvironment = await resolveAdmittedDockerWorkloadRuntimeKind(userConfig);
-  const admittedRuntimeKind = admittedEnvironment?.runtimeKind;
+  const admitted = await resolveAdmittedDockerWorkload(userConfig);
+  const admittedEnvironment = admitted?.environment;
+  const admittedRuntimeKind =
+    admittedEnvironment === undefined ? undefined : dockerWorkloadRuntimeKind(admittedEnvironment);
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
 
@@ -3600,15 +3606,15 @@ export async function ensureDockerImage(
   const image = await adapter.getImage();
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(userConfig.containerRuntime));
   const docker = createContainerRuntime(runtimeKind, admittedEnvironment?.dockerEndpoint);
-  const toolchainSource =
-    admittedEnvironment === undefined
-      ? undefined
-      : await resolveDockerToolchainSource(docker, admittedEnvironment.architecture);
-  if (userConfig.dockerWorkload?.enabled === true && runtimeKind === 'docker') {
-    selectDockerDesktopResourcePartition(userConfig, undefined, admittedEnvironment?.egressTransport === 'tcp');
-    await ensureDockerDesktopSidecarImage(docker, toolchainSource);
-    if (userConfig.dockerWorkload.networkAccess !== 'offline') {
-      await ensureDockerDesktopRelayImage(docker);
+  let toolchainSource: DockerToolchainSource | undefined;
+  if (admitted !== undefined) {
+    toolchainSource = await resolveDockerToolchainSource(docker, admitted.environment.architecture);
+    if (runtimeKind === 'docker') {
+      selectDockerDesktopResourcePartition(userConfig, undefined, admitted.environment.egressTransport === 'tcp');
+      await ensureDockerDesktopSidecarImage(docker, toolchainSource);
+      if (admitted.configuration.networkAccess !== 'offline') {
+        await ensureDockerDesktopRelayImage(docker);
+      }
     }
   }
   const resolved: AgentImageResolution = {
@@ -3627,21 +3633,28 @@ export async function ensureDockerImage(
   return resolved;
 }
 
-async function resolveAdmittedDockerWorkloadRuntimeKind(
+async function resolveAdmittedDockerWorkload(
   userConfig: Pick<ResolvedUserConfig, 'containerRuntime' | 'dockerWorkload'>,
   preparedEnvironment?: AgentImageResolution['dockerWorkloadEnvironment'],
-): Promise<(DockerWorkloadEnvironment & { readonly runtimeKind: ContainerRuntimeKind }) | undefined> {
+): Promise<
+  | {
+      readonly configuration: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>;
+      readonly environment: DockerWorkloadEnvironment;
+    }
+  | undefined
+> {
   const workload = userConfig.dockerWorkload;
   if (workload?.enabled !== true) return undefined;
 
   const runtimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
   assertDockerWorkloadVariantAdmitted(workload, runtimeKind);
   if (preparedEnvironment !== undefined) {
-    if (preparedEnvironment.runtimeKind !== runtimeKind) throw new Error('Prepared nested-Docker runtime changed');
-    return preparedEnvironment;
+    if (dockerWorkloadRuntimeKind(preparedEnvironment) !== runtimeKind)
+      throw new Error('Prepared nested-Docker runtime changed');
+    return { configuration: workload, environment: preparedEnvironment };
   }
   const environment = await assertAdmittedDockerWorkloadRuntimeAvailable(runtimeKind);
-  return { ...environment, runtimeKind };
+  return { configuration: workload, environment };
 }
 
 function selectedAgentImageResolution(
@@ -3809,14 +3822,14 @@ export async function resolveAgentImage(
 /** Resolve the purpose-built Desktop daemon image through the normal hash-label cache. */
 export async function ensureDockerDesktopSidecarImage(
   runtime: ContainerRuntime,
-  toolchainSource?: DockerToolchainSource,
+  toolchainSource: DockerToolchainSource,
 ): Promise<string> {
   const contextDirectory = resolve(getIronCurtainPackageRoot(), 'docker', 'nested-daemon');
   const dockerfilePath = resolve(contextDirectory, 'Dockerfile');
   const buildHash = computeDockerBuildHash(
     contextDirectory,
     ['Dockerfile', 'entrypoint.sh', 'runtime-shim/main.go'],
-    JSON.stringify(toolchainSource ?? {}),
+    JSON.stringify(toolchainSource),
   );
   if (!(await isImageStale(DOCKER_DESKTOP_SIDECAR_IMAGE, runtime, buildHash))) {
     return DOCKER_DESKTOP_SIDECAR_IMAGE;
@@ -3830,7 +3843,7 @@ export async function ensureDockerDesktopSidecarImage(
     {
       'ironcurtain.build-hash': buildHash,
     },
-    toolchainSource === undefined ? undefined : { IRONCURTAIN_DOCKER_SOURCE: toolchainSource.reference },
+    { IRONCURTAIN_DOCKER_SOURCE: toolchainSource.reference },
   );
   logger.info('Docker Desktop nested-daemon image built successfully');
   return DOCKER_DESKTOP_SIDECAR_IMAGE;

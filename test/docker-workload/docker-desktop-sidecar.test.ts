@@ -1,3 +1,4 @@
+import { nestedDaemonSeccompProfile } from '../../src/docker-workload/nested-daemon-profile.js';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -457,6 +458,23 @@ describe('Docker Desktop sidecar frozen artifacts', () => {
 });
 
 describe('Docker Desktop sidecar lifecycle', () => {
+  it.each(['syscall', 'argument', 'architecture', 'capability', 'default-action'])(
+    'rejects a changed %s even when the old canary rules are retained',
+    async (change) => {
+      const profile = JSON.parse(JSON.stringify(nestedDaemonSeccompProfile())) as {
+        defaultAction: string;
+        archMap: { subArchitectures: string[] | null }[];
+        syscalls: { names: string[]; action: string; args?: { value: number }[]; includes?: { caps?: string[] } }[];
+      };
+      if (change === 'syscall') profile.syscalls.push({ names: ['bpf'], action: 'SCMP_ACT_ALLOW' });
+      if (change === 'argument') profile.syscalls.find((rule) => rule.args !== undefined)!.args![0].value += 1;
+      if (change === 'architecture') profile.archMap[0].subArchitectures!.push('SCMP_ARCH_AARCH64');
+      if (change === 'capability') delete profile.syscalls.find((rule) => rule.includes?.caps !== undefined)!.includes;
+      if (change === 'default-action') profile.defaultAction = 'SCMP_ACT_ALLOW';
+      const fixture = runtimeFixture({ observedHostConfig: { SecurityOpt: [`seccomp=${JSON.stringify(profile)}`] } });
+      await expectStoppedProfileRejection(fixture, 'seccomp profile');
+    },
+  );
   it.each(['workspace', '/'])(
     'rejects a non-canonical workspace source %s before provisioning',
     async (workspaceRoot) => {

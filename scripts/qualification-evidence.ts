@@ -3,7 +3,12 @@
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, renameSync, writeFileSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { waitForQualificationProcess, type SmokeChildExit } from '../src/docker-workload/qualification-process.js';
+import {
+  QualificationTimeoutError,
+  waitForQualificationProcess,
+  type SmokeChildExit,
+} from '../src/docker-workload/qualification-process.js';
+import { errorMessage } from '../src/utils/error-message.js';
 
 const MAX_SCRIPT_OUTPUT_BYTES = 50 * 1024 * 1024;
 
@@ -194,7 +199,6 @@ async function runQualificationScript(
   let capturedBytes = 0;
   let captureFailure: Error | undefined;
   let observedExit: SmokeChildExit = { code: null, signal: null, timedOut: false };
-  let deadlineReached = false;
   let child;
   try {
     child = spawn(process.execPath, ['--import', 'tsx', scriptPath, ...options.arguments], {
@@ -215,20 +219,18 @@ async function runQualificationScript(
       error: errorMessage(error),
     };
   }
-  const deadline = setTimeout(() => {
-    deadlineReached = true;
-  }, options.timeoutMs);
-  deadline.unref();
   child.once('exit', (code, signal) => {
     observedExit = { code, signal, timedOut: false };
   });
-  const closed = new Promise<void>((resolvePromise) => child.once('close', () => resolvePromise()));
   const capture = (destination: number, output: NodeJS.WriteStream, chunk: Buffer): void => {
-    output.write(chunk);
     if (captureFailure !== undefined) return;
     const remaining = MAX_SCRIPT_OUTPUT_BYTES - capturedBytes;
     try {
-      if (remaining > 0) writeSync(destination, chunk.subarray(0, remaining));
+      if (remaining > 0) {
+        const retained = chunk.subarray(0, remaining);
+        writeSync(destination, retained);
+        output.write(retained);
+      }
       capturedBytes += chunk.length;
       if (capturedBytes > MAX_SCRIPT_OUTPUT_BYTES) {
         captureFailure = new Error('qualification script exceeded its retained output bound');
@@ -252,22 +254,16 @@ async function runQualificationScript(
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
-    clearTimeout(deadline);
-    await closed;
     closeSync(stdoutFd);
     closeSync(stderrFd);
   }
   return {
     exit: failure === undefined ? exit : observedExit,
-    timedOut: failure !== undefined && deadlineReached,
+    timedOut: failure instanceof QualificationTimeoutError,
     error: failure === undefined ? null : failure.message,
   };
 }
 
 function serializeManifest(manifest: QualificationEvidenceManifest): string {
   return `${JSON.stringify(manifest, null, 2)}\n`;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

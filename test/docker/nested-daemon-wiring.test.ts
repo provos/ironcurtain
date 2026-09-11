@@ -661,19 +661,19 @@ describe('nested daemon — feature-off equivalence', () => {
 });
 
 describe('nested daemon — egress transports', () => {
-  it('attempts to stop both authorities when either listener fails', async () => {
-    const packageStop = vi.fn(() => Promise.reject(new Error('package stop failed')));
+  it.each(['throw', 'reject'])('stops both authorities when a listener fails by %s', async (failure) => {
+    const packageStop = vi.fn(() => {
+      const error = new Error('package stop failed');
+      if (failure === 'throw') throw error;
+      return Promise.reject(error);
+    });
     const registryStop = vi.fn(async () => {});
 
     await expect(
       stopDockerWorkloadEgress({
         networkAccess: 'packages',
-        registry: {
-          listener: { stop: registryStop },
-          socketPath: '/tmp/registry.sock',
-          snapshot: () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 }),
-        },
-        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: () => ({}) as never },
+        registry: { listener: { stop: registryStop } },
+        packages: { listener: { stop: packageStop } },
       }),
     ).rejects.toThrow(/package stop failed/u);
 

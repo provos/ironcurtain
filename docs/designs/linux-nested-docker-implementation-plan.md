@@ -35,11 +35,16 @@ criteria remain requirements and are not a claim that every matrix cell passed.
   port. macOS Desktop retains its TCP host transport.
 - [nested-daemon-identity.ts](../../src/docker-workload/nested-daemon-identity.ts)
   stages readonly account and subordinate-ID leaves for the selected numeric
-  UID/GID. Trusted initialization creates private state as that identity, then
+  UID/GID. [container-identity.ts](../../src/docker/container-identity.ts) shares
+  identity selection across agent remapping, daemon setup, relays and trust
+  staging. WSL coordinators with root UID or GID are rejected during admission,
+  before provisioning; run the coordinator as a regular WSL user.
+  Trusted initialization creates private state as that identity, then
   drops to the rootless daemon. Ownership changes are confined to generated state;
   agent entrypoints no longer recursively chown the workspace. Agent users retain
   passwordless sudo. API/state parent and child permissions are inspected as
-  `0755` and `0710` after daemon startup.
+  `0755` and `0710` after daemon startup. The child starts as `0700`; dockerd
+  changes it to `0710` through the same volume mounted as its data directory.
 - [client-toolchain.json](../../config/docker-workload/client-toolchain.json) and
   [install-docker-toolchain.sh](../../docker/install-docker-toolchain.sh) provide
   one versioned toolchain recipe. The amd64 base is

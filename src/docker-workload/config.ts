@@ -4,6 +4,8 @@ import { bindDockerEndpointExec, resolveDockerEndpoint } from '../docker/docker-
 import { z } from 'zod';
 import { release } from 'node:os';
 import { isWsl2Host, resolveDockerWorkloadEnvironment, type DockerWorkloadEnvironment } from './environment.js';
+import { resolveContainerIdentity } from '../docker/container-identity.js';
+import { assertNestedDaemonIdentity } from './nested-daemon-identity.js';
 
 const LEGACY_DOCKER_WORKLOAD_BACKENDS = ['auto', 'docker', 'apple-container'] as const;
 
@@ -268,6 +270,16 @@ export function assertDockerWorkloadVariantAdmitted(
     throw new Error(
       `secure nested Docker with the Docker runtime is supported on macOS and WSL2 with Docker Desktop, not this ${hostPlatform} host; no image, relay, daemon, or lease action was performed`,
     );
+  }
+  if (resolvedRuntimeKind === 'docker' && hostPlatform === 'linux') {
+    try {
+      assertNestedDaemonIdentity(resolveContainerIdentity(true));
+    } catch (error) {
+      throw new Error(
+        'Nested Docker on WSL requires a non-root coordinator UID and GID. Run IronCurtain as your regular WSL user; sudo remains available inside agent containers.',
+        { cause: error },
+      );
+    }
   }
 }
 
