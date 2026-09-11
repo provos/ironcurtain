@@ -1,7 +1,7 @@
 ARG IRONCURTAIN_DOCKER_SOURCE=docker:29.2.1-dind-rootless
 
-# Reuse the same builder as the fixed relay. The tiny wrapper adds
-# runc's --no-new-keyring option for ordinary runs and integrated BuildKit RUN
+# The tiny runtime wrapper adds runc's --no-new-keyring option for ordinary
+# runs and integrated BuildKit RUN
 # without admitting the keyctl syscall to the outer sidecar profile.
 FROM golang:1.26.1 AS shim-build
 WORKDIR /src
