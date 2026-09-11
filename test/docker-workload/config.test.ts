@@ -17,6 +17,10 @@ vi.mock('../../src/docker/docker-endpoint.js', async (importOriginal) => ({
 
 vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
 vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  release: () => '6.18.33.2-microsoft-standard-WSL2',
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -186,20 +190,27 @@ describe('secure nested Docker configuration', () => {
     ).not.toThrow();
   });
 
-  it('preflights only the selected runtime', async () => {
-    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).resolves.toMatchObject({
-      architecture: 'amd64',
-    });
-    expect(checkDockerAvailable).toHaveBeenCalledOnce();
-    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+  it.each(['darwin', 'linux'] as const)('preflights only the selected runtime on %s', async (platform) => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: platform });
+    try {
+      await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).resolves.toMatchObject({
+        architecture: 'amd64',
+        profile: platform === 'darwin' ? 'macos-desktop' : 'wsl-desktop',
+      });
+      expect(checkDockerAvailable).toHaveBeenCalledOnce();
+      expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
 
-    vi.clearAllMocks();
-    checkAppleContainerAvailable.mockResolvedValue({ available: true });
-    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).resolves.toMatchObject({
-      profile: 'apple-container',
-    });
-    expect(checkAppleContainerAvailable).toHaveBeenCalledOnce();
-    expect(checkDockerAvailable).not.toHaveBeenCalled();
+      vi.clearAllMocks();
+      checkAppleContainerAvailable.mockResolvedValue({ available: true });
+      await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).resolves.toMatchObject({
+        profile: 'apple-container',
+      });
+      expect(checkAppleContainerAvailable).toHaveBeenCalledOnce();
+      expect(checkDockerAvailable).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
   });
 
   it('reports selected-runtime availability failures with probe detail', async () => {
