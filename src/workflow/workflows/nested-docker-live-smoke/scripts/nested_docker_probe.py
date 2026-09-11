@@ -3456,6 +3456,7 @@ class Probe:
         self._validate_request_method(request_method, request)
         connection = self._open_connect(connect_host, 443)
         context = ssl.create_default_context(cafile=str(self._agent_ca_cert()))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         wrapped = context.wrap_socket(connection, server_hostname=sni)
         try:
             wrapped.sendall(request)
