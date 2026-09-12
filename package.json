@@ -29,7 +29,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.15.0 <27"
+    "node": "^24.0.0 || ^26.0.0"
   },
   "bin": {
     "ironcurtain": "dist/cli.js"
@@ -133,7 +133,7 @@
   },
   "overrides": {
     "minimatch": "^10.2.1",
-    "isolated-vm": "7.0.0"
+    "isolated-vm": "7.0.1"
   },
   "lint-staged": {
     "!(packages/**)/*.ts": [

@@ -4,7 +4,7 @@ This guide walks a new user from a fresh checkout to a running `vuln-discovery` 
 
 ## Prerequisites
 
-- **Node.js 22, 24, or 26** (`isolated-vm`; 24 and 26 use prebuilt binaries, Node 22 compiles from source). The pre-flight check validates your Node version and the sandbox before the workflow runs.
+- **Node.js 24 or 26** (both use prebuilt `isolated-vm` binaries). The pre-flight check validates your Node version and the sandbox before the workflow runs.
 - **Docker** running. The workflow uses Docker Agent Mode with `--network=none`, so Docker is required (not optional).
 - **LLM credentials.** Either:
   - `ANTHROPIC_API_KEY` exported in your shell or set in `~/.ironcurtain/config.json`, **or**

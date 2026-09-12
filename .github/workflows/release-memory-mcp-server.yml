@@ -22,10 +22,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          # Node 24 has an isolated-vm 7.0.0 prebuild; Node 22 does not (the root
-          # `npm ci` below would source-compile it via node-gyp on the release
-          # critical path). memory-mcp-server doesn't use isolated-vm, so the Node
-          # version only affects install/build speed here — pin a prebuilt line.
+          # Node 24 has an isolated-vm 7.0.1 prebuild. memory-mcp-server doesn't
+          # use isolated-vm, so pin a supported prebuilt line for the root install.
           node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
