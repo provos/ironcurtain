@@ -1,5 +1,5 @@
 /**
- * Rootless nested-Docker daemon sidecar for the macOS Docker Desktop backend.
+ * Rootless nested-Docker daemon sidecar for the Docker Desktop backend.
  *
  * The outer runtime remains the authority for isolation: the sidecar has no
  * host runtime socket, host namespace, broad host bind, or generic device access.
@@ -21,8 +21,9 @@
  * remain in the common Docker-workload lifecycle.
  */
 
-import { dirname, resolve } from 'node:path';
-import { z } from 'zod';
+import { DOCKER_BUILD_TRUST_WRAPPER_PATH } from '../docker/docker-build-shim.js';
+import { dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   ContainerRuntime,
   DockerContainerConfig,
@@ -32,45 +33,46 @@ import type {
   DockerTrustedDeviceMapping,
   DockerVolumeInfo,
 } from '../docker/types.js';
+import { computeHash } from '../hash.js';
+import { writeStableJsonAtomic } from '../hardened-fs.js';
+import { nestedDaemonSeccompProfile, type NestedDaemonSeccompProfile } from './nested-daemon-profile.js';
 import {
-  getFrozenClientToolchainManifestPath,
-  getFrozenProfileCeilingPath,
-  getIronCurtainPackageRoot,
-} from '../docker/docker-workload-paths.js';
-import { computeHash, sha256HexSchema } from '../hash.js';
-import { loadImmutableHostJson } from '../hardened-fs.js';
+  stageNestedDaemonIdentity,
+  prepareNestedDaemonHostConfigDirectory,
+  type NestedDaemonIdentity,
+} from './nested-daemon-identity.js';
 import {
   createPrivateDockerClient,
   createPrivateDockerWorkloadNetwork,
   preflightPrivateDockerClient,
   waitForPrivateDockerDaemonReady,
   PRIVATE_DOCKER_API_DIR,
-  PRIVATE_DOCKER_HOST,
   type PrivateDockerBootstrapObservation,
   type PrivateDockerClient,
   type PrivateDockerDaemonReadiness,
   type PrivateDockerWorkloadNetwork,
 } from './private-docker.js';
-import {
-  loadClientToolchainManifest,
-  type ClientToolchainPreflight,
-  type ClientToolchainManifest,
+import type {
+  ClientToolchainPreflight,
+  ClientToolchainManifest,
+  LoadedClientToolchainManifest,
 } from './client-toolchain.js';
 import type { LedgeredOuterCreateAuthority } from './infrastructure.js';
 import { buildContainerWorkspaceMount } from '../docker/container-workspace.js';
 
 export const DOCKER_DESKTOP_SIDECAR_API_ROOT = PRIVATE_DOCKER_API_DIR;
-export const DOCKER_DESKTOP_SIDECAR_DOCKER_HOST = PRIVATE_DOCKER_HOST;
+export const DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT = `${PRIVATE_DOCKER_API_DIR}/docker`;
+export const DOCKER_DESKTOP_SIDECAR_DOCKER_HOST = `unix://${DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT}/docker.sock`;
+export const DOCKER_DESKTOP_SIDECAR_ENTRYPOINT = '/usr/local/lib/ironcurtain/daemon-entrypoint.sh';
 export const DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT = '/home/rootless/.local/share/docker';
 // Keep BuildKit's executor tree at the common path consumed by the existing
-// build-trust runtime on both macOS backends.
+// build-trust runtime in both supported daemon placements.
 export const DOCKER_DESKTOP_SIDECAR_DATA_ROOT = '/home/codespace/.local/share/docker';
 export const DOCKER_DESKTOP_RUNC_SHIM_PATH = '/usr/local/lib/ironcurtain/runc';
 export const DOCKER_DESKTOP_RUNC_VERSION_PREFIX = 'runc version 1.3.4';
 
 const DAEMON_IMAGE_ROLE_LABEL = 'com.ironcurtain.docker-workload.image-role';
 const DAEMON_IMAGE_ROLE = 'nested-daemon';
-const ROOTLESS_USER = 'rootless';
 const STOCK_RUNC_PATH = '/usr/local/bin/runc';
 const RUNC_SHIM_RUNTIME_NAME = 'ic-no-new-keyring';
 const DEFAULT_READINESS_TIMEOUT_MS = 120_000;
@@ -78,92 +80,20 @@ const EXEC_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 5 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 2048;
 const DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
-const PROFILE_RELATIVE_PATH = 'config/docker-workload/seccomp/desktop-p2-userns.json';
-const DESKTOP_CEILING_STATUS = 'reviewed-dd-h3-sidecar-supported-not-qualified';
 const SYSTEM_PATHS_SECURITY_OPTION = 'systempaths=unconfined';
-const SYSTEM_PATHS_SCOPE = 'docker-desktop-nested-daemon-sidecar-only';
 const ONLINE_TUN_DEVICE = {
   source: '/dev/net/tun',
   target: '/dev/net/tun',
   permissions: 'rwm',
 } as const satisfies DockerTrustedDeviceMapping;
-const TUN_DEVICE_SCOPE = 'docker-desktop-online-nested-daemon-sidecar-only';
-const PROFILE_MAX_BYTES = 1024 * 1024;
 const IMMUTABLE_ID = /^sha256:[a-f0-9]{64}$/u;
 const CONTAINER_ID = /^[a-f0-9]{64}$/u;
 const CONTROL_CHARACTERS = /[^\P{Cc}\n\t]/gu;
 
-const profileCeilingSchema = z
-  .object({
-    status: z.literal(DESKTOP_CEILING_STATUS),
-    categories: z
-      .object({
-        seccomp: z
-          .object({
-            artifact: z
-              .object({
-                path: z.literal(PROFILE_RELATIVE_PATH),
-                sha256: sha256HexSchema,
-              })
-              .strict(),
-          })
-          .loose(),
-        mountMask: z
-          .object({
-            additions: z.tuple([
-              z
-                .object({
-                  option: z.literal(SYSTEM_PATHS_SECURITY_OPTION),
-                  scope: z.literal(SYSTEM_PATHS_SCOPE),
-                })
-                .loose(),
-            ]),
-          })
-          .loose(),
-        deviceAccess: z
-          .object({
-            additions: z.tuple([
-              z
-                .object({
-                  source: z.literal(ONLINE_TUN_DEVICE.source),
-                  target: z.literal(ONLINE_TUN_DEVICE.target),
-                  permissions: z.literal(ONLINE_TUN_DEVICE.permissions),
-                  scope: z.literal(TUN_DEVICE_SCOPE),
-                })
-                .loose(),
-            ]),
-          })
-          .loose(),
-      })
-      .loose(),
-  })
-  .loose();
-
-const seccompRuleSchema = z
-  .object({
-    names: z.array(z.string().min(1)),
-    action: z.string().min(1),
-    args: z.unknown().optional(),
-    includes: z.unknown().optional(),
-    excludes: z.unknown().optional(),
-  })
-  .loose();
-
-const seccompProfileSchema = z
-  .object({
-    defaultAction: z.string().min(1),
-    syscalls: z.array(seccompRuleSchema).min(1),
-  })
-  .loose();
-
 export interface DockerDesktopP2SeccompProfile {
   readonly path: string;
-  readonly sha256: string;
+  readonly definition: NestedDaemonSeccompProfile;
   readonly systemPathsSecurityOption: typeof SYSTEM_PATHS_SECURITY_OPTION;
-}
-
-export function parseDockerDesktopProfileCeiling(value: unknown): z.infer<typeof profileCeilingSchema> {
-  return profileCeilingSchema.parse(value);
 }
 
 /** The minimal runtime surface the focused sidecar lifecycle consumes. */
@@ -209,6 +139,9 @@ interface DockerDesktopActivationHandle {
 export interface StartDockerDesktopSidecarOptions {
   readonly runtime: DockerDesktopSidecarRuntime;
   readonly sidecarImage: string;
+  readonly identity: NestedDaemonIdentity;
+  readonly hostConfigDirectory: string;
+  readonly clientManifest: LoadedClientToolchainManifest;
   /** Already-canonical host workspace source shared exactly with the outer agent. */
   readonly workspaceRoot: string;
   /** Immutable image ID that the outer agent create will consume directly. */
@@ -236,6 +169,8 @@ export interface DockerDesktopSidecarEgress {
 }
 
 export interface DockerDesktopSidecarHandle {
+  /** Numeric exec identity: Docker resolves names from the underlying image, not mounted passwd. */
+  readonly execUser: string;
   readonly containerId: string;
   readonly apiVolumeName: string;
   readonly dockerHost: typeof DOCKER_DESKTOP_SIDECAR_DOCKER_HOST;
@@ -247,49 +182,13 @@ export interface DockerDesktopSidecarHandle {
   readonly seccompProfile: DockerDesktopP2SeccompProfile;
 }
 
-/** Load and bind the one reviewed P2 artifact named by the frozen ceiling. */
-export function loadDockerDesktopP2SeccompProfile(): DockerDesktopP2SeccompProfile {
-  const loadedCeiling = loadImmutableHostJson(getFrozenProfileCeilingPath(), {
-    label: 'Docker-workload profile ceiling',
-    schema: z.unknown(),
-    maxBytes: PROFILE_MAX_BYTES,
-  });
-  const ceiling = parseDockerDesktopProfileCeiling(loadedCeiling.value);
-  const artifact = ceiling.categories.seccomp.artifact;
-  const profilePath = resolve(getIronCurtainPackageRoot(), artifact.path);
-  const expectedPath = resolve(getIronCurtainPackageRoot(), PROFILE_RELATIVE_PATH);
-  if (profilePath !== expectedPath)
-    throw new Error('Docker Desktop P2 seccomp artifact resolved outside its fixed path');
-  const profile = loadImmutableHostJson(profilePath, {
-    label: 'Docker Desktop P2 seccomp profile',
-    schema: seccompProfileSchema,
-    maxBytes: PROFILE_MAX_BYTES,
-  });
-  if (profile.sha256 !== artifact.sha256) {
-    throw new Error(
-      `Docker Desktop P2 seccomp artifact hash mismatch: expected ${artifact.sha256}, got ${profile.sha256}`,
-    );
-  }
-  const unconditionalAllows = (name: string): boolean =>
-    profile.value.syscalls.some(
-      (rule) =>
-        rule.action === 'SCMP_ACT_ALLOW' &&
-        rule.names.includes(name) &&
-        rule.args === undefined &&
-        rule.includes === undefined &&
-        rule.excludes === undefined,
-    );
-  if (!unconditionalAllows('sethostname')) {
-    throw new Error('Docker Desktop P2 seccomp profile lacks the denial-proven sethostname allowance');
-  }
-  if (unconditionalAllows('keyctl')) {
-    throw new Error('Docker Desktop P2 seccomp profile must not admit keyctl; use the pinned runc compatibility shim');
-  }
-  return {
-    path: profile.path,
-    sha256: profile.sha256,
-    systemPathsSecurityOption: ceiling.categories.mountMask.additions[0].option,
-  };
+/** Render the complete trusted profile into host-private per-generation staging. */
+export function loadDockerDesktopP2SeccompProfile(directory: string): DockerDesktopP2SeccompProfile {
+  prepareNestedDaemonHostConfigDirectory(directory);
+  const definition = nestedDaemonSeccompProfile();
+  const path = join(directory, 'seccomp.json');
+  writeStableJsonAtomic(path, definition, { mode: 0o400 });
+  return { path, definition, systemPathsSecurityOption: SYSTEM_PATHS_SECURITY_OPTION };
 }
 
 /**
@@ -306,8 +205,10 @@ export async function startDockerDesktopSidecar(
   if (!IMMUTABLE_ID.test(options.outerAgentImageId)) {
     throw new Error('Docker Desktop outer agent image ID is not immutable');
   }
-  const profile = loadDockerDesktopP2SeccompProfile();
-  const clientManifest = loadClientToolchainManifest(getFrozenClientToolchainManifestPath());
+  const identityMounts = stageNestedDaemonIdentity(options.hostConfigDirectory, options.identity);
+  const execUser = `${options.identity.uid}:${options.identity.gid}`;
+  const profile = loadDockerDesktopP2SeccompProfile(options.hostConfigDirectory);
+  const clientManifest = options.clientManifest;
   const inspectedSidecarImage = await options.runtime.inspectImage(options.sidecarImage);
   if (inspectedSidecarImage === undefined)
     throw new Error(`Docker Desktop daemon image is absent: ${options.sidecarImage}`);
@@ -369,6 +270,8 @@ export async function startDockerDesktopSidecar(
           labels,
           apiVolumeName: ownedApiVolumeName,
           workspaceMount,
+          identity: options.identity,
+          identityMounts,
           egress: options.egress,
           profile,
           resources: options.resources,
@@ -395,7 +298,7 @@ export async function startDockerDesktopSidecar(
               cpus: options.resources.cpus,
               pidsLimit: options.resources.pidsLimit,
             },
-            profileRef: `${profile.path}#sha256=${profile.sha256}`,
+            profileRef: profile.path,
           },
         };
       },
@@ -408,9 +311,12 @@ export async function startDockerDesktopSidecar(
     const client = createPrivateDockerClient({
       runtime: options.runtime,
       containerId,
-      dockerCommand: 'docker',
+      // Package mode prepends the shared runc directory to PATH. That directory
+      // also contains the agent's Docker wrapper, whose interpreter and client
+      // layout do not belong to this Alpine daemon image.
+      dockerCommand: '/usr/local/bin/docker',
       dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
-      execUser: ROOTLESS_USER,
+      execUser,
       defaultTimeoutMs: EXEC_TIMEOUT_MS,
     });
     const readiness = await waitForPrivateDockerDaemonReady(client, {
@@ -421,7 +327,19 @@ export async function startDockerDesktopSidecar(
       label: 'Docker Desktop private daemon',
     });
     options.activation.recordDaemonReady(readiness);
-    await preflightRuntimeShim(options.runtime, containerId);
+    const ownership = await options.runtime.exec(
+      containerId,
+      ['stat', '-c', '%u:%g:%a', DOCKER_DESKTOP_SIDECAR_API_ROOT, DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT],
+      EXEC_TIMEOUT_MS,
+      execUser,
+    );
+    // The entrypoint creates the private child as 0700. It is also Docker's
+    // data root through the shared volume mounts below; dockerd changes it to
+    // 0710 during initialization, before this post-readiness observation.
+    if (ownership.exitCode !== 0 || ownership.stdout.trim() !== `0:0:755\n${execUser}:710`) {
+      throw new Error('nested daemon API parent or private state ownership differs from its configured identity');
+    }
+    await preflightRuntimeShim(options.runtime, containerId, execUser, sidecarRuntimeShim(options.egress));
 
     const preflight = await preflightPrivateDockerClient({
       client,
@@ -432,6 +350,7 @@ export async function startDockerDesktopSidecar(
       runtime: options.runtime,
       client,
       networkName: network.name,
+      execUser,
       generation: options.activation.generation,
     });
 
@@ -442,6 +361,7 @@ export async function startDockerDesktopSidecar(
     });
     return {
       containerId,
+      execUser,
       apiVolumeName,
       dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
       agentApiMount: {
@@ -470,31 +390,41 @@ export async function startDockerDesktopSidecar(
   }
 }
 
+function sidecarRuntimeShim(egress: DockerDesktopSidecarEgress | undefined): string {
+  return egress?.buildTrustMounts === undefined ? DOCKER_DESKTOP_RUNC_SHIM_PATH : DOCKER_BUILD_TRUST_WRAPPER_PATH;
+}
+
 function buildSidecarConfig(options: {
   readonly imageId: string;
   readonly name: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly apiVolumeName: string;
   readonly workspaceMount: DockerMount;
+  readonly identity: NestedDaemonIdentity;
+  readonly identityMounts: readonly DockerMount[];
   readonly egress?: DockerDesktopSidecarEgress;
   readonly profile: DockerDesktopP2SeccompProfile;
   readonly resources: DockerDesktopSidecarResources;
 }): DockerContainerConfig {
   const egress = options.egress;
+  const runtimeShim = sidecarRuntimeShim(egress);
   return {
     image: options.imageId,
     name: options.name,
     mounts: [
       options.workspaceMount,
+      ...options.identityMounts,
       ...(egress === undefined ? [] : [egress.caMount, ...(egress.buildTrustMounts ?? [])]),
     ],
     network: egress?.networkName ?? 'none',
+    // Egress uses fixed relay IPs; the private daemon needs no host alias.
+    extraHosts: [],
     ...(egress === undefined ? {} : { ipv4Address: egress.ipv4Address }),
     env: {
       DOCKER_TLS_CERTDIR: '',
       DOCKERD_ROOTLESS_ROOTLESSKIT_NET: egress === undefined ? 'none' : 'slirp4netns',
-      XDG_RUNTIME_DIR: DOCKER_DESKTOP_SIDECAR_API_ROOT,
-      PATH: `${dirname(DOCKER_DESKTOP_RUNC_SHIM_PATH)}:${DEFAULT_PATH}`,
+      XDG_RUNTIME_DIR: DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT,
+      PATH: `${dirname(runtimeShim)}:${DEFAULT_PATH}`,
       ...(egress === undefined
         ? {}
         : {
@@ -507,13 +437,13 @@ function buildSidecarConfig(options: {
     },
     command: [
       'dockerd',
-      `--add-runtime=${RUNC_SHIM_RUNTIME_NAME}=${DOCKER_DESKTOP_RUNC_SHIM_PATH}`,
+      `--add-runtime=${RUNC_SHIM_RUNTIME_NAME}=${runtimeShim}`,
       `--default-runtime=${RUNC_SHIM_RUNTIME_NAME}`,
       `--host=${DOCKER_DESKTOP_SIDECAR_DOCKER_HOST}`,
       '--storage-driver=vfs',
       `--data-root=${DOCKER_DESKTOP_SIDECAR_DATA_ROOT}`,
-      `--exec-root=${DOCKER_DESKTOP_SIDECAR_API_ROOT}/exec`,
-      `--pidfile=${DOCKER_DESKTOP_SIDECAR_API_ROOT}/docker.pid`,
+      `--exec-root=${DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT}/exec`,
+      `--pidfile=${DOCKER_DESKTOP_SIDECAR_PRIVATE_API_ROOT}/docker.pid`,
       '--iptables=false',
       '--bridge=none',
       '--ip-forward=false',
@@ -528,13 +458,13 @@ function buildSidecarConfig(options: {
           name: options.apiVolumeName,
           target: DOCKER_DESKTOP_SIDECAR_API_ROOT,
           readonly: false,
-          // Copy-up is required: the image supplies this directory as
-          // uid/gid 1000, mode 0700 without CAP_CHOWN.
+          // Copy-up supplies the root-owned parent. The entrypoint creates
+          // its private child as the selected identity without CAP_CHOWN.
           noCopy: false,
         },
         {
           name: options.apiVolumeName,
-          target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT,
+          target: dirname(DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT),
           readonly: false,
           // The API-root mount already initialized this same volume. Do not
           // copy stock daemon state into it again through the second target.
@@ -542,16 +472,16 @@ function buildSidecarConfig(options: {
         },
         {
           name: options.apiVolumeName,
-          target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT,
+          target: dirname(DOCKER_DESKTOP_SIDECAR_DATA_ROOT),
           readonly: false,
           noCopy: true,
         },
       ],
       ...(egress === undefined ? {} : { devices: [ONLINE_TUN_DEVICE] }),
       tmpfs: [
-        '/run:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
-        '/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
-        '/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000',
+        `/run:rw,nosuid,nodev,noexec,size=64m,uid=${options.identity.uid},gid=${options.identity.gid}`,
+        `/tmp:rw,nosuid,nodev,noexec,size=64m,uid=${options.identity.uid},gid=${options.identity.gid}`,
+        `/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=${options.identity.uid},gid=${options.identity.gid}`,
       ],
       readOnlyRootfs: true,
       securityOptions: [options.profile.systemPathsSecurityOption],
@@ -581,10 +511,10 @@ function assertStoppedSidecarProfile(
   if (effectiveInspect.Name !== `/${config.name}`) mismatch('container name');
   if (effectiveInspect.Image !== config.image || effectiveConfig.Image !== config.image) mismatch('immutable image ID');
   if (state.Status !== 'created' || state.Running !== false) mismatch('container is not stopped in created state');
-  if (effectiveConfig.User !== ROOTLESS_USER || effectiveConfig.WorkingDir !== '/home/rootless') {
+  if (effectiveConfig.User !== '0:0' || effectiveConfig.WorkingDir !== '/home/rootless') {
     mismatch('image user or working directory');
   }
-  assertExactValue(effectiveConfig.Entrypoint, ['dockerd-entrypoint.sh'], 'image entrypoint', mismatch);
+  assertExactValue(effectiveConfig.Entrypoint, [DOCKER_DESKTOP_SIDECAR_ENTRYPOINT], 'image entrypoint', mismatch);
   assertExactValue(effectiveConfig.Cmd, config.command, 'daemon command', mismatch);
 
   const expectedEnv = {
@@ -670,12 +600,7 @@ function assertStoppedSidecarProfile(
   } catch {
     mismatch('seccomp profile');
   }
-  const expectedSeccomp = loadImmutableHostJson(profile.path, {
-    label: 'Docker Desktop P2 seccomp profile adjudication',
-    schema: seccompProfileSchema,
-    maxBytes: PROFILE_MAX_BYTES,
-  }).value;
-  assertExactValue(effectiveSeccomp, expectedSeccomp, 'seccomp profile', mismatch);
+  assertExactValue(effectiveSeccomp, profile.definition, 'seccomp profile', mismatch);
 
   const expectedDevices = (config.trustedCreateOptions?.devices ?? []).map((device) => ({
     PathOnHost: device.source,
@@ -692,8 +617,7 @@ function assertStoppedSidecarProfile(
   });
   assertExactValue(actualDevices, expectedDevices, 'device mappings', mismatch);
 
-  const expectedExtraHosts = config.network === 'none' ? [] : ['host.docker.internal:host-gateway'];
-  assertStringSet(hostConfig.ExtraHosts, expectedExtraHosts, 'extra hosts', mismatch);
+  assertStringSet(hostConfig.ExtraHosts, config.extraHosts ?? [], 'extra hosts', mismatch);
   const networks = recordField(networkSettings, 'Networks', mismatch);
   if (Object.keys(networks).length !== 1) mismatch('attached networks');
   const endpoint = asRecord(networks[config.network], 'attached networks', mismatch);
@@ -755,7 +679,7 @@ function stringArray(value: unknown, field: string, mismatch: (field: string) =>
 }
 
 function assertExactValue(actual: unknown, expected: unknown, field: string, mismatch: (field: string) => never): void {
-  if (computeHash(actual) !== computeHash(expected)) mismatch(field);
+  if (!isDeepStrictEqual(actual, expected)) mismatch(field);
 }
 
 function assertStringSet(
@@ -856,30 +780,24 @@ function assertApiVolume(
   }
 }
 
-async function preflightRuntimeShim(runtime: DockerDesktopSidecarRuntime, containerId: string): Promise<void> {
-  const resolved = await runtime.exec(
-    containerId,
-    ['/bin/sh', '-c', 'command -v runc'],
-    EXEC_TIMEOUT_MS,
-    ROOTLESS_USER,
-  );
-  if (resolved.exitCode !== 0 || resolved.stdout.trim() !== DOCKER_DESKTOP_RUNC_SHIM_PATH) {
-    throw new Error(
-      `Docker Desktop daemon PATH did not select the baked runc shim at ${DOCKER_DESKTOP_RUNC_SHIM_PATH}`,
-    );
+async function preflightRuntimeShim(
+  runtime: DockerDesktopSidecarRuntime,
+  containerId: string,
+  execUser: string,
+  runtimeShim: string,
+): Promise<void> {
+  const resolved = await runtime.exec(containerId, ['/bin/sh', '-c', 'command -v runc'], EXEC_TIMEOUT_MS, execUser);
+  if (resolved.exitCode !== 0 || resolved.stdout.trim() !== runtimeShim) {
+    throw new Error(`Docker Desktop daemon PATH did not select the protected runc shim at ${runtimeShim}`);
   }
-  const version = await runtime.exec(
-    containerId,
-    [DOCKER_DESKTOP_RUNC_SHIM_PATH, '--version'],
-    EXEC_TIMEOUT_MS,
-    ROOTLESS_USER,
-  );
+  const version = await runtime.exec(containerId, [runtimeShim, '--version'], EXEC_TIMEOUT_MS, execUser);
   if (version.exitCode !== 0 || !version.stdout.startsWith(DOCKER_DESKTOP_RUNC_VERSION_PREFIX)) {
     throw new Error('Docker Desktop baked runc shim did not hand off to the pinned runc version');
   }
 }
 
 interface ActivationCanaryOptions {
+  readonly execUser: string;
   readonly runtime: DockerDesktopSidecarRuntime;
   readonly client: PrivateDockerClient;
   readonly networkName: string;
@@ -923,7 +841,7 @@ async function runDockerDesktopActivationCanary(options: ActivationCanaryOptions
         dockerfilePath,
       ],
       EXEC_TIMEOUT_MS,
-      ROOTLESS_USER,
+      options.execUser,
     );
     assertDockerSuccess(prepare, 'activation canary context preparation');
     const built = await execDocker(
@@ -986,7 +904,7 @@ async function runDockerDesktopActivationCanary(options: ActivationCanaryOptions
       options.client.containerId,
       ['/bin/rm', '-rf', contextRoot],
       EXEC_TIMEOUT_MS,
-      ROOTLESS_USER,
+      options.execUser,
     );
     assertDockerSuccess(removed, 'activation context cleanup');
   });

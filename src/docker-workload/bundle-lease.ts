@@ -1,3 +1,4 @@
+import { dockerEndpointSchema, type DockerEndpoint } from '../docker/docker-endpoint.js';
 /** Durable host-only lease for one secure nested Docker authority bundle. */
 
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from 'node:fs';
@@ -13,8 +14,9 @@ import {
   timestampSchema,
 } from '../zod-helpers.js';
 import { acquireProcessLock, ProcessLockBusyError } from './process-lock.js';
+import { resourceWatchdogPolicySchema } from '../docker/resource-watchdog.js';
 
-export const DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION = 1;
+export const DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION = 2;
 export const MAX_DOCKER_WORKLOAD_LEASE_BYTES = 1024 * 1024;
 
 const absolutePathSchema = z
@@ -73,9 +75,8 @@ const outerResourceSchema = z
     }
   });
 
-const leaseSchema = z
+const leaseBaseSchema = z
   .object({
-    schemaVersion: z.literal(DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION),
     leaseId: identifierSchema,
     bundleId: identifierSchema,
     generation: identifierSchema,
@@ -91,17 +92,6 @@ const leaseSchema = z
         apiRoot: absolutePathSchema,
         exchangeRoot: absolutePathSchema,
         stagingRoot: absolutePathSchema,
-      })
-      .strict(),
-    bindings: z
-      .object({
-        // Accepted only for backward-compatible recovery of version-1 leases.
-        // New leases persist no catalog/profile/toolchain authority.
-        catalogSha256: sha256Schema.optional(),
-        innerDockerCatalogSha256: sha256Schema.optional(),
-        profileSha256: sha256Schema.optional(),
-        watchdogPolicySha256: sha256Schema,
-        toolchainDigest: sha256Schema.optional(),
       })
       .strict(),
     coordinator: z
@@ -121,8 +111,43 @@ const leaseSchema = z
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
-  .strict()
+  .strict();
+
+// Keep version-1 values intact while their original supervisor can still be
+// running. Updates and cleanup must never upgrade an existing generation.
+const legacyLeaseBindingsSchema = z
+  .object({
+    catalogSha256: sha256Schema.optional(),
+    innerDockerCatalogSha256: sha256Schema.optional(),
+    profileSha256: sha256Schema.optional(),
+    watchdogPolicySha256: sha256Schema,
+    toolchainDigest: sha256Schema.optional(),
+  })
+  .strict();
+const leaseBindingsSchema = z.object({ watchdogPolicy: resourceWatchdogPolicySchema }).strict();
+const leaseSchema = z
+  .discriminatedUnion('schemaVersion', [
+    leaseBaseSchema.extend({ schemaVersion: z.literal(1), bindings: legacyLeaseBindingsSchema }),
+    leaseBaseSchema.extend({
+      schemaVersion: z.literal(DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION),
+      bindings: leaseBindingsSchema,
+      dockerEndpoint: dockerEndpointSchema.optional(),
+    }),
+  ])
   .superRefine((lease, context) => {
+    if (lease.schemaVersion === 2 && (lease.runtimeKind === 'docker') !== (lease.dockerEndpoint !== undefined)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'new Docker leases require exactly one captured Docker endpoint; Apple leases must not have one',
+      });
+    }
+    if (
+      lease.schemaVersion === 2 &&
+      (lease.bindings.watchdogPolicy.targetRoot !== lease.paths.stateRoot ||
+        lease.bindings.watchdogPolicy.cleanupInventoryGapMs !== lease.cleanupInventoryGapMs)
+    ) {
+      context.addIssue({ code: 'custom', message: 'lease watchdog policy must match state root and cleanup interval' });
+    }
     const requestIds = lease.resources.map((resource) => resource.requestId);
     const requestedNames = lease.resources.map((resource) => `${resource.kind}:${resource.requestedName}`);
     if (new Set(requestIds).size !== requestIds.length) {
@@ -193,8 +218,9 @@ export interface CreateDockerWorkloadLeaseOptions {
   readonly bundleId: string;
   readonly generation: string;
   readonly runtimeKind: DockerWorkloadLease['runtimeKind'];
+  readonly dockerEndpoint?: DockerEndpoint;
   readonly paths: DockerWorkloadLeasePaths;
-  readonly bindings: DockerWorkloadLeaseBindings;
+  readonly bindings: z.infer<typeof leaseBindingsSchema>;
   readonly cleanupInventoryGapMs: number;
   readonly coordinatorPid?: number;
   readonly now?: Date;
@@ -222,8 +248,9 @@ export function createDockerWorkloadLease(
     sequence: 0,
     status: 'admitting',
     runtimeKind: options.runtimeKind,
+    ...(options.dockerEndpoint === undefined ? {} : { dockerEndpoint: options.dockerEndpoint }),
     paths: options.paths,
-    bindings: { watchdogPolicySha256: options.bindings.watchdogPolicySha256 },
+    bindings: leaseBindingsSchema.parse(options.bindings),
     coordinator: {
       pid: options.coordinatorPid ?? process.pid,
       startedAt: now,
@@ -278,6 +305,7 @@ export function loadDockerWorkloadLease(path: string): DockerWorkloadLease {
   return validated.data;
 }
 
+/** Active qualification creates must hold the lifecycle claim through runtime creation and observation. */
 export function requestDockerWorkloadOuterResource(
   path: string,
   generation: string,
@@ -285,7 +313,11 @@ export function requestDockerWorkloadOuterResource(
   now = new Date(),
 ): DockerWorkloadLease {
   return updateLease(path, generation, now, (lease) => {
-    if (lease.status !== 'admitting') throw new Error('outer resources may be requested only during admission');
+    if (lease.status !== 'admitting' && !(lease.status === 'active' && isQualificationObserver(lease, request))) {
+      throw new Error(
+        'outer resources may be requested only during admission, except active Docker qualification observers',
+      );
+    }
     lease.resources.push({
       ...request,
       ownershipLabelValue: lease.generation,
@@ -305,14 +337,26 @@ export function observeDockerWorkloadOuterResource(
   now = new Date(),
 ): DockerWorkloadLease {
   return updateLease(path, generation, now, (lease) => {
-    if (lease.status !== 'admitting' && lease.status !== 'revoking') {
+    const resource = requiredResource(lease, requestId);
+    if (
+      lease.status !== 'admitting' &&
+      lease.status !== 'revoking' &&
+      !(lease.status === 'active' && isQualificationObserver(lease, resource))
+    ) {
       throw new Error('outer resources may be observed only during admission or crash reconciliation');
     }
-    const resource = requiredResource(lease, requestId);
     if (resource.observedId !== null) throw new Error(`outer resource was already observed: ${requestId}`);
     resource.observedId = immutableId;
     resource.observedAt = now.toISOString();
   });
+}
+
+/** The only outer resource added after admission is a host qualification helper. */
+function isQualificationObserver(
+  lease: DockerWorkloadLease,
+  resource: Pick<RequestOuterResourceOptions, 'kind' | 'role'>,
+): boolean {
+  return lease.runtimeKind === 'docker' && resource.kind === 'container' && resource.role === 'qualification-observer';
 }
 
 export function activateDockerWorkloadLease(path: string, generation: string, now = new Date()): DockerWorkloadLease {

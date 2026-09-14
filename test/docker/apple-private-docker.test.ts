@@ -240,8 +240,24 @@ describe('private Docker Engine adapter and provisioning', () => {
     expect(operations).not.toContain('image load');
   });
 
+  it('preflights the selected artifact architecture before loading its archive', async () => {
+    const config = createTestAppleVmDockerWorkloadBootstrap(tempDirectory);
+    const commands: (readonly string[])[] = [];
+    await expect(
+      provisionAppleVmDockerWorkload({
+        outerRuntime: execRuntime((argv) => {
+          commands.push([...argv]);
+          return respondHealthyAppleVmDaemon(argv);
+        }),
+        containerId: 'outer-vm',
+        config: { ...config, artifact: { ...config.artifact, architecture: 'amd64' } },
+      }),
+    ).rejects.toThrow(/architecture expected amd64, got arm64/u);
+    expect(commands.some((argv) => argv.includes('image'))).toBe(false);
+  });
+
   it('verifies and loads the selected archive through the exact guest path, then reinspects it', async () => {
-    const manifest = loadClientToolchainManifest(TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH);
+    const manifest = loadClientToolchainManifest(TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH, 'arm64');
     const logicalName = 'ironcurtain-claude-code:latest';
     const entry = writeOciArchiveFixture({
       directory: tempDirectory,
@@ -292,7 +308,6 @@ describe('private Docker Engine adapter and provisioning', () => {
             dockerImageId: entry.configDigest,
             manifestDigest: entry.manifestDigest,
             archivePath: resolve(tempDirectory, entry.archive.fileName),
-            archiveSha256: entry.archive.sha256,
             archiveSizeBytes: entry.archive.sizeBytes,
           },
           clientToolchainManifestPath: manifest.path,

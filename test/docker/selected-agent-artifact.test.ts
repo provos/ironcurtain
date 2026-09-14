@@ -41,7 +41,7 @@ describe('selected agent artifact', () => {
     expect(isSelectedAgentCaptureAlias('ironcurtain-capture-unstructured:latest')).toBe(false);
   });
 
-  it('exports and canonicalizes only the current selected Apple image, then reuses the cache', async () => {
+  it.each([1, 2])('exports schema 2 and reuses a verified schema %s cache', async (cacheSchemaVersion) => {
     const logicalName = 'ironcurtain-claude-code:latest';
     const buildHash = 'a'.repeat(64);
     const fixtureDirectory = mkdtempSync(join(directory, 'fixture-'));
@@ -94,6 +94,11 @@ describe('selected agent artifact', () => {
       architecture: 'arm64',
       cacheRoot,
     });
+    const metadata = JSON.parse(readFileSync(join(dirname(first.archivePath), 'artifact.json'), 'utf8')) as unknown;
+    expect(metadata).toMatchObject({ schemaVersion: 2 });
+    expect(metadata).not.toHaveProperty('archive.sha256');
+    expect(first).not.toHaveProperty('archiveSha256');
+    if (cacheSchemaVersion === 1) writeLegacyMetadata(first.archivePath);
     const second = await prepareSelectedAgentArtifact({
       runtime,
       logicalName,
@@ -345,7 +350,7 @@ describe('selected agent artifact', () => {
     expect(captureReference).toMatch(/^ironcurtain-capture-/u);
   });
 
-  it('bounds old cache entries while preserving a lease-staged hardlink', async () => {
+  it('bounds mixed-version cache entries while preserving a lease-staged legacy hardlink', async () => {
     const logicalName = 'ironcurtain-claude-code:latest';
     const buildHash = 'd'.repeat(64);
     const fixtureDirectories = Array.from({ length: 5 }, (_, index) =>
@@ -386,10 +391,12 @@ describe('selected agent artifact', () => {
       });
 
     const first = await prepareCurrent();
+    writeLegacyMetadata(first.archivePath);
     const stagedArchive = join(directory, 'lease-staged.oci.tar');
     linkSync(first.archivePath, stagedArchive);
     selected = 1;
     const second = await prepareCurrent();
+    writeLegacyMetadata(second.archivePath);
     const old = new Date(Date.now() - 2 * 60 * 60_000);
     utimesSync(dirname(second.archivePath), old, old);
     selected = 2;
@@ -449,7 +456,7 @@ describe('selected agent artifact', () => {
     await expect(verifySelectedAgentArtifactArchive(artifact)).rejects.toThrow(/size mismatch/u);
   });
 
-  it('invalidates and rebuilds a same-size poisoned cache archive', async () => {
+  it.each([1, 2])('rebuilds same-size OCI corruption in schema %s caches', async (cacheSchemaVersion) => {
     const logicalName = 'ironcurtain-claude-code:latest';
     const buildHash = 'f'.repeat(64);
     const fixtureDirectory = mkdtempSync(join(directory, 'fixture-'));
@@ -485,8 +492,11 @@ describe('selected agent artifact', () => {
       architecture: 'arm64',
       cacheRoot,
     });
+    if (cacheSchemaVersion === 1) writeLegacyMetadata(first.archivePath);
     const poisoned = readFileSync(first.archivePath);
-    poisoned[0] = poisoned[0] === 0 ? 1 : 0;
+    const labelOffset = poisoned.indexOf('artifact-poison-rebuild-test');
+    expect(labelOffset).toBeGreaterThan(0);
+    poisoned[labelOffset] ^= 1;
     chmodSync(first.archivePath, 0o600);
     writeFileSync(first.archivePath, poisoned);
     chmodSync(first.archivePath, 0o400);
@@ -501,6 +511,21 @@ describe('selected agent artifact', () => {
 
     expect(saves).toBe(2);
     expect(rebuilt.archiveSizeBytes).toBe(first.archiveSizeBytes);
+    const metadata = JSON.parse(readFileSync(join(dirname(rebuilt.archivePath), 'artifact.json'), 'utf8')) as unknown;
+    expect(metadata).toMatchObject({ schemaVersion: 2 });
+    expect(metadata).not.toHaveProperty('archive.sha256');
     await expect(verifySelectedAgentArtifactArchive(rebuilt)).resolves.toBeUndefined();
   });
 });
+
+/** A stale legacy checksum must not replace full OCI descriptor verification. */
+function writeLegacyMetadata(archivePath: string): void {
+  const path = join(dirname(archivePath), 'artifact.json');
+  const metadata = JSON.parse(readFileSync(path, 'utf8')) as { readonly archive: Readonly<Record<string, unknown>> };
+  chmodSync(path, 0o600);
+  writeFileSync(
+    path,
+    JSON.stringify({ ...metadata, schemaVersion: 1, archive: { ...metadata.archive, sha256: '0'.repeat(64) } }),
+  );
+  chmodSync(path, 0o400);
+}

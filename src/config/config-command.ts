@@ -1720,7 +1720,7 @@ async function handleNestedDocker(
   requestedDockerWorkload: UserConfig['dockerWorkload'],
 ): Promise<void> {
   p.note(
-    'Currently requires macOS with Docker Desktop or, on Apple silicon, Apple Container installed.',
+    'Requires macOS or WSL2 with Docker Desktop, or Apple Container on Apple silicon. Native Linux Engine is not yet qualified.',
     'Availability',
   );
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return

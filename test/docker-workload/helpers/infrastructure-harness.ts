@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach } from 'vitest';
 import { loadResourceWatchdogPolicy } from '../../../src/docker/resource-watchdog.js';
+import { resolveDockerWorkloadConfig } from '../../../src/docker-workload/config.js';
 import { closeDockerWorkloadLease, loadDockerWorkloadLease } from '../../../src/docker-workload/bundle-lease.js';
 import { acquireProcessLock, type ProcessLockHandle } from '../../../src/docker-workload/process-lock.js';
 import {
@@ -37,23 +38,22 @@ import type {
 import { writeOciArchiveFixture } from '../../helpers/oci-archive-fixture.js';
 import {
   DOCKER_BUILD_SHIM_PATH,
-  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
   DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
   DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
   DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND,
   DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE,
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
-  DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
-  DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
-  DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
-  DOCKER_BUILD_TRUST_WRAPPER_SHA256,
 } from '../../../src/docker/docker-build-shim.js';
 
 export const WATCHDOG_TEMPLATE_PATH = resolve('config/docker-workload/resource-watchdog-policy.json');
 export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-watchdog-supervisor-main.js');
 
 const FROZEN_CLIENT_TOOLCHAIN = loadClientToolchainManifest(
-  resolve('config/docker-workload/client-toolchain.arm64.json'),
+  resolve('config/docker-workload/client-toolchain.json'),
+  'arm64',
 );
 
 export const TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH = FROZEN_CLIENT_TOOLCHAIN.path;
@@ -113,8 +113,8 @@ export const ADMISSION_BINDINGS = {
   toolchainDigest: '6'.repeat(64),
 } as const;
 
-/** The resolved capability config hash admission records in its audit event. */
-export const ADMISSION_CONFIG_HASH = '7'.repeat(64);
+/** Complete resolved capability value recorded by admission. */
+export const ADMISSION_CONFIGURATION = resolveDockerWorkloadConfig({ enabled: true });
 
 /** Registers before/after hooks that point `IRONCURTAIN_HOME` at a fresh owner-only temp dir. */
 export function useDockerWorkloadHome(): () => string {
@@ -181,40 +181,17 @@ export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExec
   if (argv[0] === '/bin/sh' && argv[1] === '-c' && argv[2] === 'command -v runc') {
     return { exitCode: 0, stdout: `${DOCKER_BUILD_TRUST_WRAPPER_PATH}\n`, stderr: '' };
   }
-  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_WRAPPER_PATH) {
-    return {
-      exitCode: 0,
-      stdout: `${DOCKER_BUILD_TRUST_WRAPPER_SHA256}  ${DOCKER_BUILD_TRUST_WRAPPER_PATH}\n`,
-      stderr: '',
+  if (argv[0] === '/bin/cat') {
+    const inputs: Partial<Record<string, string>> = {
+      [DOCKER_BUILD_TRUST_CONTRACT_PATH]: 'fixture-contract\n',
+      [DOCKER_BUILD_TRUST_CA_CERT_PATH]: 'fixture-cert\n',
+      [DOCKER_BUILD_TRUST_CA_BUNDLE_PATH]: 'fixture-bundle\n',
+      [DOCKER_BUILD_TRUST_APT_CONFIG_PATH]: 'fixture-apt\n',
     };
+    if (inputs[argv[1]] !== undefined) return { exitCode: 0, stdout: inputs[argv[1]], stderr: '' };
   }
-  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY) {
-    return { exitCode: 0, stdout: 'directory:0:0:755\n', stderr: '' };
-  }
-  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_CONTRACT_PATH) {
-    return { exitCode: 0, stdout: 'regular file:1000:1000:444:1\n', stderr: '' };
-  }
-  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_CONTRACT_PATH) {
-    return {
-      exitCode: 0,
-      stdout: `${'4'.repeat(64)}  ${DOCKER_BUILD_TRUST_CONTRACT_PATH}\n`,
-      stderr: '',
-    };
-  }
-  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_REAL_RUNC_PATH) {
-    return {
-      exitCode: 0,
-      stdout: `regular file:0:0:755:1:${DOCKER_BUILD_TRUST_REAL_RUNC_SIZE}\n`,
-      stderr: '',
-    };
-  }
-  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_REAL_RUNC_PATH) {
-    return {
-      exitCode: 0,
-      stdout: `${DOCKER_BUILD_TRUST_REAL_RUNC_SHA256}  ${DOCKER_BUILD_TRUST_REAL_RUNC_PATH}\n`,
-      stderr: '',
-    };
-  }
+  if (argv[1] === '--ironcurtain-verify-protected-inputs-v2')
+    return { exitCode: 0, stdout: 'ironcurtain-build-trust-inputs/2\n', stderr: '' };
   if (argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === '--version') {
     return { exitCode: 0, stdout: 'runc version 1.3.4\n', stderr: '' };
   }
@@ -513,13 +490,16 @@ export function createFakeSupervisor(options: FakeSupervisorOptions): FakeSuperv
 function buildReadyStatus(leaseDir: string, now: Date, pid: number, closed: boolean): ResourceWatchdogSupervisorStatus {
   const lease = loadDockerWorkloadLease(join(leaseDir, 'lease.json'));
   const policy = loadResourceWatchdogPolicy(join(leaseDir, 'policy.json'));
+  const binding =
+    lease.schemaVersion === 1
+      ? { schemaVersion: 1 as const, policySha256: policy.sha256 }
+      : { schemaVersion: 2 as const, policy: policy.policy };
   return {
-    schemaVersion: 1,
+    ...binding,
     leaseId: lease.leaseId,
     generation: lease.generation,
     supervisorPid: pid,
     state: closed ? 'closed' : 'ready',
-    policySha256: policy.sha256,
     policyId: policy.policy.policyId,
     startedAt: now.toISOString(),
     updatedAt: now.toISOString(),

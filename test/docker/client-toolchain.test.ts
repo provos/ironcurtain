@@ -5,9 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   loadClientToolchainManifest,
   preflightClientToolchain,
-  type ClientToolchainManifest,
+  getDockerToolchainSourceReference,
+  type ClientToolchainCompatibility,
+  type DockerToolchainArchitecture,
 } from '../../src/docker-workload/client-toolchain.js';
-import { computeHash } from '../../src/hash.js';
 import type { ContainerRuntime, DockerExecResult } from '../../src/docker/types.js';
 
 const temporaryDirectories: string[] = [];
@@ -17,73 +18,87 @@ afterEach(() => {
 });
 
 describe('Docker client toolchain manifest', () => {
-  it('loads the checked-in Mac arm64 candidate and hashes its exact bytes', () => {
-    const loaded = loadClientToolchainManifest(resolve('config/docker-workload/client-toolchain.arm64.json'));
+  it.each(['amd64', 'arm64'] as const)('selects %s from the shared compatibility requirements', (architecture) => {
+    const loaded = loadClientToolchainManifest(resolve('config/docker-workload/client-toolchain.json'), architecture);
     expect(loaded.manifest).toMatchObject({
-      architecture: 'arm64',
-      generation: 'docker-rootless-29.2.1-mac-arm64-v1',
+      architecture,
+      generation: 'docker-rootless-29.2.1-v2',
       buildxVersion: '0.31.1',
       composeVersion: '5.1.0',
-      realRunc: {
-        uid: 0,
-        gid: 0,
-        mode: '0755',
-        nlink: 1,
-        size: 16_641_104,
-      },
     });
-    expect(loaded.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(loaded.manifest).not.toHaveProperty('realRunc');
+    expect(loaded.manifest).not.toHaveProperty('source');
+    expect(loaded).not.toHaveProperty('sha256');
+    expect(getDockerToolchainSourceReference(loaded.manifest)).toBe('docker:29.2.1-dind-rootless');
   });
 
   it('rejects symlink, writable, malformed, and internally incompatible manifests', () => {
     const fixture = manifestFixture();
     const symlink = join(fixture.directory, 'link.json');
     symlinkSync(fixture.path, symlink);
-    expect(() => loadClientToolchainManifest(symlink)).toThrow(/non-symlink/u);
+    expect(() => loadClientToolchainManifest(symlink, 'arm64')).toThrow(/non-symlink/u);
 
     chmodSync(fixture.path, 0o666);
-    expect(() => loadClientToolchainManifest(fixture.path)).toThrow(/group\/world writable/u);
+    expect(() => loadClientToolchainManifest(fixture.path, 'arm64')).toThrow(/group\/world writable/u);
     chmodSync(fixture.path, 0o600);
     writeFileSync(fixture.path, '{\n', { mode: 0o600 });
-    expect(() => loadClientToolchainManifest(fixture.path)).toThrow(/not valid JSON/u);
+    expect(() => loadClientToolchainManifest(fixture.path, 'arm64')).toThrow(/not valid JSON/u);
 
     writeFileSync(
       fixture.path,
       `${JSON.stringify({ ...fixture.manifest, docker: { ...fixture.manifest.docker, clientApiVersion: '1.99' } })}\n`,
       { mode: 0o600 },
     );
-    expect(() => loadClientToolchainManifest(fixture.path)).toThrow(/outside the compatible range/u);
+    expect(() => loadClientToolchainManifest(fixture.path, 'arm64')).toThrow(/outside the compatible range/u);
   });
 });
 
 describe('Docker client toolchain preflight', () => {
-  it('proves the exact connected tuple and records its digest', async () => {
+  it.each(['amd64', 'arm64'] as const)(
+    'checks the connected %s tuple and records version provenance',
+    async (architecture) => {
+      const fixture = manifestFixture();
+      const loaded = loadClientToolchainManifest(fixture.path, architecture);
+      const runtime = runtimeFixture({ architecture });
+      const tuple = { dockerCli: '29.2.1', dockerDaemon: '29.2.1', buildx: '0.31.1', compose: '5.1.0' };
+      const result = await preflightClientToolchain({
+        runtime,
+        containerId: 'agent-id',
+        manifest: loaded,
+      });
+      expect(result).toMatchObject({
+        architecture,
+        dockerApi: { actual: '1.53' },
+        toolchain: tuple,
+      });
+      expect(runtime.exec).toHaveBeenNthCalledWith(
+        1,
+        'agent-id',
+        ['docker', 'version', '--format', '{{json .}}'],
+        15_000,
+      );
+    },
+  );
+
+  it('rejects either client or daemon architecture mismatching the selected target', async () => {
     const fixture = manifestFixture();
-    const loaded = loadClientToolchainManifest(fixture.path);
-    const runtime = runtimeFixture();
-    const tuple = { dockerCli: '29.2.1', dockerDaemon: '29.2.1', buildx: '0.31.1', compose: '5.1.0' };
-    const result = await preflightClientToolchain({
-      runtime,
-      containerId: 'agent-id',
-      manifest: loaded,
-    });
-    expect(result).toMatchObject({
-      architecture: 'arm64',
-      dockerApi: { actual: '1.53' },
-      toolchain: tuple,
-      toolchainDigest: computeHash(tuple),
-    });
-    expect(runtime.exec).toHaveBeenNthCalledWith(
-      1,
-      'agent-id',
-      ['docker', 'version', '--format', '{{json .}}'],
-      15_000,
-    );
+    const loaded = loadClientToolchainManifest(fixture.path, 'amd64');
+    for (const side of ['Client', 'Server'] as const) {
+      const docker = dockerVersion({}, 'amd64');
+      docker[side].Arch = 'arm64';
+      await expect(
+        preflightClientToolchain({
+          runtime: runtimeFixture({ docker: JSON.stringify(docker) }),
+          containerId: 'agent-id',
+          manifest: loaded,
+        }),
+      ).rejects.toThrow(/architecture expected amd64, got arm64/u);
+    }
   });
 
   it('fails closed for absent server data, version drift, and plugin drift', async () => {
     const fixture = manifestFixture();
-    const loaded = loadClientToolchainManifest(fixture.path);
+    const loaded = loadClientToolchainManifest(fixture.path, 'arm64');
     await expect(
       preflightClientToolchain({
         runtime: runtimeFixture({ docker: JSON.stringify({ Client: dockerVersion().Client, Server: null }) }),
@@ -111,7 +126,7 @@ describe('Docker client toolchain preflight', () => {
 
   it('rejects failed commands and unparseable plugin output', async () => {
     const fixture = manifestFixture();
-    const loaded = loadClientToolchainManifest(fixture.path);
+    const loaded = loadClientToolchainManifest(fixture.path, 'arm64');
     await expect(
       preflightClientToolchain({
         runtime: runtimeFixture({ failureAt: 1 }),
@@ -132,32 +147,15 @@ describe('Docker client toolchain preflight', () => {
 function manifestFixture(): {
   readonly directory: string;
   readonly path: string;
-  readonly manifest: ClientToolchainManifest;
+  readonly manifest: ClientToolchainCompatibility;
 } {
   const directory = mkdtempSync(join(tmpdir(), 'client-toolchain-'));
   temporaryDirectories.push(directory);
   const path = join(directory, 'manifest.json');
   const manifest = {
-    schemaVersion: 1,
-    generation: 'docker-rootless-29.2.1-mac-arm64-v1',
+    schemaVersion: 2,
+    generation: 'docker-rootless-29.2.1-v2',
     platform: 'linux',
-    architecture: 'arm64',
-    realRunc: {
-      path: '/usr/local/lib/ironcurtain-docker/bin/runc',
-      sha256: 'f0ed2d355945fe2697f11f89773e07b48de0ef239962c4a0e0ae900161a23b12',
-      size: 16_641_104,
-      uid: 0,
-      gid: 0,
-      mode: '0755',
-      nlink: 1,
-      version: '1.3.4',
-      commit: 'd6d73eb',
-      specVersion: '1.2.1',
-    },
-    source: {
-      daemonImage: `docker@sha256:${'1'.repeat(64)}`,
-      daemonImageId: `sha256:${'2'.repeat(64)}`,
-    },
     docker: {
       cliVersion: '29.2.1',
       daemonVersion: '29.2.1',
@@ -168,7 +166,7 @@ function manifestFixture(): {
     },
     buildxVersion: '0.31.1',
     composeVersion: '5.1.0',
-  } as const satisfies ClientToolchainManifest;
+  } as const satisfies ClientToolchainCompatibility;
   writeFileSync(path, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
   return { directory, path, manifest };
 }
@@ -179,6 +177,7 @@ function runtimeFixture(
     readonly buildx?: string;
     readonly compose?: string;
     readonly failureAt?: number;
+    readonly architecture?: DockerToolchainArchitecture;
   } = {},
 ): Pick<ContainerRuntime, 'exec'> {
   let calls = 0;
@@ -186,7 +185,13 @@ function runtimeFixture(
     exec: vi.fn(async (): Promise<DockerExecResult> => {
       calls += 1;
       if (calls === options.failureAt) return { exitCode: 1, stdout: '', stderr: 'daemon unavailable' };
-      if (calls === 1) return { exitCode: 0, stdout: options.docker ?? JSON.stringify(dockerVersion()), stderr: '' };
+      if (calls === 1) {
+        return {
+          exitCode: 0,
+          stdout: options.docker ?? JSON.stringify(dockerVersion({}, options.architecture)),
+          stderr: '',
+        };
+      }
       if (calls === 2) {
         return {
           exitCode: 0,
@@ -199,15 +204,18 @@ function runtimeFixture(
   };
 }
 
-function dockerVersion(serverOverrides: Readonly<Record<string, string>> = {}) {
+function dockerVersion(
+  serverOverrides: Readonly<Record<string, string>> = {},
+  architecture: DockerToolchainArchitecture = 'arm64',
+) {
   return {
-    Client: { Version: '29.2.1', ApiVersion: '1.53', Os: 'linux', Arch: 'arm64' },
+    Client: { Version: '29.2.1', ApiVersion: '1.53', Os: 'linux', Arch: architecture },
     Server: {
       Version: '29.2.1',
       ApiVersion: '1.53',
       MinAPIVersion: '1.44',
       Os: 'linux',
-      Arch: 'arm64',
+      Arch: architecture,
       ...serverOverrides,
     },
   };

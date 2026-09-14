@@ -11,7 +11,6 @@ const MAX_ARCHIVE_ENTRIES = 100_000;
 
 export interface VerifyOciImageArchiveOptions {
   readonly archivePath: string;
-  readonly expectedArchiveSha256: string;
   readonly expectedSizeBytes: number;
   readonly manifestDigest: string;
   readonly configDigest: string;
@@ -22,15 +21,17 @@ export interface VerifyOciImageArchiveOptions {
 
 export interface VerifiedOciImageArchive {
   readonly archivePath: string;
-  readonly archiveSha256: string;
   readonly sizeBytes: number;
   readonly manifestDigest: string;
   readonly configDigest: string;
   readonly layerDigests: readonly string[];
+  /** Byte ranges of verified layer blobs, in overlay order, for bounded file reads. */
+  readonly layerEntries: readonly { readonly offset: number; readonly size: number; readonly mediaType: string }[];
 }
 
 interface ArchiveEntry {
   readonly size: number;
+  readonly offset?: number;
   readonly digest?: string;
   readonly content?: Buffer;
 }
@@ -41,7 +42,6 @@ interface ArchiveEntry {
  * duplicate paths, unlisted blob hashes, and tuple mismatches fail closed.
  */
 export async function verifyOciImageArchive(options: VerifyOciImageArchiveOptions): Promise<VerifiedOciImageArchive> {
-  assertSha256(options.expectedArchiveSha256, 'archive sha256');
   assertDigest(options.manifestDigest, 'manifest digest');
   assertDigest(options.configDigest, 'config digest');
   if (!options.archivePath.startsWith('/')) throw new Error('OCI image archive path must be absolute');
@@ -74,7 +74,7 @@ export async function verifyOciImageArchive(options: VerifyOciImageArchiveOption
       autoClose: true,
       highWaterMark: STREAM_CHUNK_BYTES,
     });
-    const reader = new HashedStreamReader(stream);
+    const reader = new StreamReader(stream);
     const entries = new Map<string, ArchiveEntry>();
     for (;;) {
       const header = await reader.readExact(TAR_BLOCK_BYTES);
@@ -116,6 +116,7 @@ export async function verifyOciImageArchive(options: VerifyOciImageArchiveOption
         throw new Error(`OCI image archive metadata entry is too large: ${name}`);
       }
       const contentChunks: Buffer[] = [];
+      const offset = reader.bytesRead;
       const entryHash = createHash('sha256');
       let remaining = size;
       while (remaining > 0) {
@@ -139,22 +140,19 @@ export async function verifyOciImageArchive(options: VerifyOciImageArchiveOption
       }
       entries.set(name, {
         size,
+        offset,
         digest,
         ...(shouldCapture ? { content: Buffer.concat(contentChunks) } : {}),
       });
     }
 
-    const archiveSha256 = reader.digest();
     if (reader.bytesRead !== options.expectedSizeBytes) {
       throw new Error(
         `OCI image archive read-size mismatch: expected ${options.expectedSizeBytes}, got ${reader.bytesRead}`,
       );
     }
-    if (archiveSha256 !== options.expectedArchiveSha256) {
-      throw new Error('OCI image archive sha256 mismatch');
-    }
 
-    return validateOciMetadata(entries, options, archiveSha256);
+    return validateOciMetadata(entries, options);
   } finally {
     if (stream) stream.destroy();
     else closeSync(descriptor);
@@ -164,7 +162,6 @@ export async function verifyOciImageArchive(options: VerifyOciImageArchiveOption
 function validateOciMetadata(
   entries: ReadonlyMap<string, ArchiveEntry>,
   options: VerifyOciImageArchiveOptions,
-  archiveSha256: string,
 ): VerifiedOciImageArchive {
   const layout = parseJsonEntry(entries, 'oci-layout') as { imageLayoutVersion?: unknown };
   if (layout.imageLayoutVersion !== '1.0.0') throw new Error('OCI image archive layout version must be 1.0.0');
@@ -275,11 +272,15 @@ function validateOciMetadata(
 
   return {
     archivePath: options.archivePath,
-    archiveSha256,
     sizeBytes: options.expectedSizeBytes,
     manifestDigest: options.manifestDigest,
     configDigest: options.configDigest,
     layerDigests: layers.map((layer) => layer.digest),
+    layerEntries: layers.map((layer) => {
+      const entry = entries.get(blobPath(layer.digest));
+      if (entry?.offset === undefined) throw new Error('verified OCI layer has no archive byte range');
+      return { offset: entry.offset, size: entry.size, mediaType: layer.mediaType };
+    }),
   };
 }
 
@@ -355,12 +356,10 @@ function validateDockerLoadMetadata(
   }
 }
 
-class HashedStreamReader {
+class StreamReader {
   private readonly iterator: AsyncIterator<string | Buffer>;
   private pending = Buffer.alloc(0);
   private ended = false;
-  private readonly hash = createHash('sha256');
-  private finalized = false;
   bytesRead = 0;
 
   constructor(stream: NodeJS.ReadableStream & AsyncIterable<string | Buffer>) {
@@ -385,7 +384,6 @@ class HashedStreamReader {
       const take = Math.min(remaining, this.pending.length);
       const chunk = this.pending.subarray(0, take);
       chunks.push(chunk);
-      this.hash.update(chunk);
       this.bytesRead += take;
       this.pending = this.pending.subarray(take);
       remaining -= take;
@@ -399,12 +397,6 @@ class HashedStreamReader {
       if (chunk === null) return;
       if (!isZeroBlock(chunk)) throw new Error('OCI image archive contains data after the tar end marker');
     }
-  }
-
-  digest(): string {
-    if (this.finalized) throw new Error('OCI image archive hash was already finalized');
-    this.finalized = true;
-    return this.hash.digest('hex');
   }
 
   private truncated(): never {
@@ -478,10 +470,6 @@ function blobPath(digest: string): string {
 
 function assertDigest(value: string, label: string): void {
   if (!/^sha256:[a-f0-9]{64}$/u.test(value)) throw new Error(`OCI image archive ${label} is invalid`);
-}
-
-function assertSha256(value: string, label: string): void {
-  if (!/^[a-f0-9]{64}$/u.test(value)) throw new Error(`OCI image archive ${label} is invalid`);
 }
 
 function isZeroBlock(value: Buffer): boolean {

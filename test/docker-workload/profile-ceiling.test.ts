@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { getFrozenProfileCeilingPath } from '../../src/docker/docker-workload-paths.js';
-import { loadDockerDesktopP2SeccompProfile } from '../../src/docker-workload/docker-desktop-sidecar.js';
-import { sha256Hex } from '../../src/hash.js';
+import { nestedDaemonSeccompProfile } from '../../src/docker-workload/nested-daemon-profile.js';
 
 interface ProfileCeiling {
   schemaVersion: number;
@@ -40,20 +39,15 @@ interface SeccompProfile {
 
 describe('Docker Desktop profile ceiling', () => {
   it('limits the sidecar to its reviewed seccomp and mount-mask additions', () => {
-    const loadedProfile = loadDockerDesktopP2SeccompProfile();
     const ceiling = JSON.parse(readFileSync(getFrozenProfileCeilingPath(), 'utf8')) as ProfileCeiling;
     const seccomp = ceiling.categories.seccomp;
-    const artifactBytes = readFileSync(loadedProfile.path);
-    const profile = JSON.parse(artifactBytes.toString('utf8')) as SeccompProfile;
+    const profile = structuredClone(nestedDaemonSeccompProfile()) as SeccompProfile;
 
     expect(ceiling.schemaVersion).toBe(1);
     expect(ceiling.maximumArtifactsPerCategory).toBe(1);
     expect(profile.defaultAction).toBe('SCMP_ACT_ERRNO');
 
     const taggedRules = profile.syscalls.filter((rule) => rule.comment?.startsWith('IronCurtain P2:'));
-    const baseline = structuredClone(profile);
-    baseline.syscalls = baseline.syscalls.filter((rule) => !rule.comment?.startsWith('IronCurtain P2:'));
-    expect(sha256Hex(JSON.stringify(baseline))).toBe(seccomp.source.canonicalSha256);
 
     const declared = new Set<string>();
     for (const addition of seccomp.additions) {

@@ -110,7 +110,6 @@ export async function canonicalizeDockerSaveArchive(
 
     const verified = await verifyOciImageArchive({
       archivePath: options.outputArchivePath,
-      expectedArchiveSha256: archive.sha256,
       expectedSizeBytes: archive.sizeBytes,
       manifestDigest: graph.manifestDigest,
       configDigest: graph.configDigest,
@@ -441,18 +440,16 @@ function writeCanonicalArchive(
     | { readonly name: string; readonly content: Buffer }
     | { readonly name: string; readonly filePath: string }
   )[],
-): { readonly sha256: string; readonly sizeBytes: number } {
+): { readonly sizeBytes: number } {
   const descriptor = openSync(
     path,
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
     0o600,
   );
-  const hash = createHash('sha256');
   let sizeBytes = 0;
   let failed = false;
   const write = (bytes: Buffer): void => {
     writeAll(descriptor, bytes);
-    hash.update(bytes);
     sizeBytes += bytes.length;
   };
   try {
@@ -485,7 +482,7 @@ function writeCanonicalArchive(
     closeSync(descriptor);
     if (failed) rmSync(path, { force: true });
   }
-  return { sha256: hash.digest('hex'), sizeBytes };
+  return { sizeBytes };
 }
 
 function regularFileSize(path: string): number {
@@ -533,12 +530,16 @@ function writeAll(descriptor: number, bytes: Buffer): void {
   while (offset < bytes.length) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);
 }
 
-class StreamReader {
+export class StreamReader {
   private readonly iterator: AsyncIterator<string | Buffer>;
   private pending = Buffer.alloc(0);
   private ended = false;
+  bytesRead = 0;
 
-  constructor(stream: NodeJS.ReadableStream & AsyncIterable<string | Buffer>) {
+  constructor(
+    stream: NodeJS.ReadableStream & AsyncIterable<string | Buffer>,
+    private readonly maxBytes = Infinity,
+  ) {
     this.iterator = stream[Symbol.asyncIterator]();
   }
 
@@ -558,6 +559,8 @@ class StreamReader {
         continue;
       }
       const lengthToTake = Math.min(remaining, this.pending.length);
+      this.bytesRead += lengthToTake;
+      if (this.bytesRead > this.maxBytes) throw new Error('tar stream exceeds its expanded byte limit');
       chunks.push(this.pending.subarray(0, lengthToTake));
       this.pending = this.pending.subarray(lengthToTake);
       remaining -= lengthToTake;
@@ -578,7 +581,7 @@ class StreamReader {
   }
 }
 
-function parseTarPath(header: Buffer): string {
+export function parseTarPath(header: Buffer): string {
   const name = readTarString(header.subarray(0, 100));
   const prefix = readTarString(header.subarray(345, 500));
   const path = prefix ? `${prefix}/${name}` : name;
@@ -591,14 +594,14 @@ function parseTarPath(header: Buffer): string {
   return path.replace(/\/$/u, '');
 }
 
-function verifyTarChecksum(header: Buffer): void {
+export function verifyTarChecksum(header: Buffer): void {
   const expected = parseTarOctal(header.subarray(148, 156), 'checksum');
   let actual = 0;
   for (let index = 0; index < header.length; index += 1) actual += index >= 148 && index < 156 ? 32 : header[index];
   if (actual !== expected) throw new Error('Docker-save source tar checksum mismatch');
 }
 
-function parseTarOctal(value: Buffer, field: string): number {
+export function parseTarOctal(value: Buffer, field: string): number {
   const text = readTarString(value).trim();
   if (!/^[0-7]+$/u.test(text)) throw new Error(`Docker-save source tar ${field} is invalid`);
   const parsed = Number.parseInt(text, 8);
@@ -606,14 +609,14 @@ function parseTarOctal(value: Buffer, field: string): number {
   return parsed;
 }
 
-function readTarString(value: Buffer): string {
+export function readTarString(value: Buffer): string {
   const end = value.indexOf(0);
   const text = value.subarray(0, end === -1 ? value.length : end).toString('utf8');
   if (text.includes('\uFFFD')) throw new Error('Docker-save source tar header is not UTF-8');
   return text;
 }
 
-function isZero(value: Buffer): boolean {
+export function isZero(value: Buffer): boolean {
   return value.every((byte) => byte === 0);
 }
 

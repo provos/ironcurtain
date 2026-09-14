@@ -63,6 +63,7 @@ try {
     bundleId: config.bundleId,
     generation: config.generation,
     runtimeKind: 'docker',
+    dockerEndpoint: { host: 'unix:///var/run/docker.sock' },
     paths: {
       workspaceRoot: join(config.controlDir, 'workspace'),
       stateRoot,
@@ -73,11 +74,7 @@ try {
       stagingRoot: join(stateRoot, 'staging'),
     },
     bindings: {
-      catalogSha256: '2'.repeat(64),
-      innerDockerCatalogSha256: '7'.repeat(64),
-      profileSha256: '3'.repeat(64),
-      watchdogPolicySha256: rendered.sha256,
-      toolchainDigest: '6'.repeat(64),
+      watchdogPolicy: rendered.policy,
     },
     cleanupInventoryGapMs: config.template.cleanupInventoryGapMs,
   });

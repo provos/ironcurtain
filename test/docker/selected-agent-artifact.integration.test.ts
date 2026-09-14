@@ -37,7 +37,6 @@ describe.skipIf(!ready)('selected Apple agent artifact', () => {
 
         const verified = await verifyOciImageArchive({
           archivePath: artifact.archivePath,
-          expectedArchiveSha256: artifact.archiveSha256,
           expectedSizeBytes: artifact.archiveSizeBytes,
           manifestDigest: artifact.manifestDigest,
           configDigest: artifact.dockerImageId,

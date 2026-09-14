@@ -59,10 +59,6 @@
         "sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
         "canonicalSha256": "afb4934b023cfceaaec1a9d752ca3f801aaa96eb2e59abe6e7ea16976948e080"
       },
-      "artifact": {
-        "path": "config/docker-workload/seccomp/desktop-p2-userns.json",
-        "sha256": "5693eddf4a993ba182346c7570def97b49d5b97c02b961f2329f47e5a629a5f5"
-      },
       "additions": [
         {
           "syscall": "clone",
@@ -164,7 +160,12 @@
           "namespaceInterpretation": "Umount2 is available only for nested OCI/image lifecycle mounts inside RootlessKit's user/mount namespace; outer mounts remain outside that namespace.",
           "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
         }
-      ]
+      ],
+      "historicalArtifact": {
+        "path": "config/docker-workload/seccomp/desktop-p2-userns.json",
+        "sha256": "5693eddf4a993ba182346c7570def97b49d5b97c02b961f2329f47e5a629a5f5"
+      },
+      "operationalDefinition": "src/docker-workload/nested-daemon-profile.ts"
     },
     "apparmor": {
       "eligibleRuleClasses": ["exact-bundle-private-runtime-path", "nested-user-mount-namespace"],

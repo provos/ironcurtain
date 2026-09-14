@@ -66,6 +66,7 @@ interface PrepareSeam {
   makeProxy: (socketPath: string) => DockerProxy;
   makeMitm: (options: MitmProxyOptions) => MitmProxy;
   publicStartError?: Error;
+  publicStopError?: Error;
   publicReturnedSocketPath?: string;
   publicCreateSocket: boolean;
   stops: { proxy: number; mitm: number; public: number };
@@ -85,7 +86,6 @@ const seam = vi.hoisted<PrepareSeam>(() => ({
     dockerImageId: `sha256:${'c'.repeat(64)}`,
     manifestDigest: `sha256:${'d'.repeat(64)}`,
     archivePath: '/tmp/test-selected-agent-artifact/selected-agent.oci.tar',
-    archiveSha256: 'e'.repeat(64),
     archiveSizeBytes: 1,
   },
   prepareArtifactCalls: 0,
@@ -128,16 +128,6 @@ vi.mock('../../src/docker/runtime-trust.js', async (importOriginal) => {
         const path = join(orientationDir, name);
         writeFileSync(path, contents, { mode: 0o444 });
       }
-      return {
-        schemaVersion: 1,
-        generation: `runtime-trust-v1:${'1'.repeat(64)}`,
-        containerCertificatePath: '/etc/ironcurtain/ca-cert.pem',
-        containerBundlePath: '/etc/ironcurtain/ca-bundle.pem',
-        caCertificateSha256: '1'.repeat(64),
-        publicRootsSha256: '2'.repeat(64),
-        bundleSha256: '3'.repeat(64),
-        publicRootCount: 1,
-      };
     },
   };
 });
@@ -166,6 +156,7 @@ vi.mock('../../src/docker/package-egress-proxy.js', async (importOriginal) => ({
       },
       async stop() {
         seam.stops.public += 1;
+        if (seam.publicStopError !== undefined) throw seam.publicStopError;
       },
     };
   },
@@ -175,7 +166,28 @@ vi.mock('../../src/docker/package-egress-proxy.js', async (importOriginal) => ({
 vi.mock('../../src/docker-workload/config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/docker-workload/config.js')>()),
   assertDockerWorkloadVariantAdmitted: () => {},
-  assertAdmittedDockerWorkloadRuntimeAvailable: async () => {},
+  assertAdmittedDockerWorkloadRuntimeAvailable: async () => ({
+    profile: 'apple-container',
+    architecture: 'arm64',
+    egressTransport: 'unix',
+  }),
+}));
+
+vi.mock('../../src/docker-workload/toolchain-source.js', () => ({
+  resolveDockerToolchainSource: async () => ({
+    architecture: 'arm64',
+    imageId: `sha256:${'a'.repeat(64)}`,
+    reference: `docker@sha256:${'a'.repeat(64)}`,
+  }),
+}));
+
+vi.mock('../../src/docker/selected-image-file.js', () => ({
+  readSelectedImageRealRunc: async () => {
+    const elf = Buffer.alloc(64);
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+    elf.writeUInt16LE(183, 18);
+    return elf;
+  },
 }));
 
 // Image construction/export is not relevant to the post-admission cleanup
@@ -229,6 +241,7 @@ beforeEach(() => {
   seam.runtime = runtime.runtime;
   seam.ca = createMockCA(tempDir);
   seam.publicStartError = undefined;
+  seam.publicStopError = undefined;
   seam.publicReturnedSocketPath = undefined;
   seam.publicCreateSocket = true;
   seam.handle = undefined;
@@ -342,6 +355,30 @@ async function prepare(
 }
 
 describe('prepareDockerInfrastructure — Docker-workload lease teardown on failure (§8.3)', () => {
+  it('rejects runtime drift from a previously prepared environment before provisioning', async () => {
+    await expect(
+      prepare('offline', {
+        mode: 'build-if-stale',
+        logicalName: seam.artifact.logicalName,
+        imageRef: seam.artifact.logicalName,
+        buildHash: seam.artifact.buildHash,
+        dockerWorkloadEnvironment: { profile: 'wsl-desktop', architecture: 'amd64', egressTransport: 'unix' },
+      }),
+    ).rejects.toThrow('Prepared nested-Docker runtime changed');
+    expect(seam.prepareArtifactCalls).toBe(0);
+    expect(seam.stops).toEqual({ proxy: 0, mitm: 0, public: 0 });
+  });
+
+  it('preserves the startup failure as primary when listener rollback also fails', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.publicStartError = new Error('package bind failed');
+    seam.publicStopError = new Error('package cleanup failed');
+    await expect(prepare('packages')).rejects.toMatchObject({
+      cause: seam.publicStartError,
+      errors: [seam.publicStartError, seam.publicStopError],
+    });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 1 });
+  });
   it('threads the exact CLI-prepared artifact without resolving or exporting it again', async () => {
     const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
     const { computeAgentImageBuildHash } = await import('../../src/docker/docker-infrastructure.js');

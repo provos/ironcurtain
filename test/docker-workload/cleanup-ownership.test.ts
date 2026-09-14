@@ -1,3 +1,4 @@
+import { createLegacyDockerWorkloadLease as createDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   activateDockerWorkloadLease,
   closeDockerWorkloadLease,
-  createDockerWorkloadLease,
   heartbeatDockerWorkloadLease,
   loadDockerWorkloadLease,
   observeDockerWorkloadOuterResource,

@@ -37,7 +37,6 @@ import {
 import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 import type { DockerWorkloadNetworkAccess } from './config.js';
 import {
-  DOCKER_BUILD_TRUST_CONTRACT_PATH,
   DOCKER_BUILD_TRUST_FAILURE_ALLOWED_CODES,
   DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
   DOCKER_BUILD_TRUST_FAILURE_MAX_CODE_BYTES,
@@ -58,6 +57,7 @@ import {
   dockerBuildShimExecFor,
   execDockerBuildShimPreflight as execBuildShimPreflight,
   preflightDockerBuildShimAgent,
+  preflightDockerBuildTrust,
 } from './docker-build-shim-preflight.js';
 
 /**
@@ -79,9 +79,7 @@ const APPLE_VM_BUILD_TRUST_CANARY_NONCE = 'IRONCURTAIN_BUILD_TRUST_CANARY_OK/1';
 const CA_GENERATION_PATTERN = /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const BUNDLE_GENERATION_TAG_SUFFIX_PATTERN =
   /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const IMMUTABLE_IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/u;
-const TRUST_CONTRACT_METADATA_PATTERN = /^regular file:([0-9]{1,10}):([0-9]{1,10}):([0-7]{1,4}):([0-9]{1,10})$/u;
 
 export interface AppleVmDockerWorkloadEgressLedgers {
   readonly registry: () => RegistryEgressLedgerSnapshot;
@@ -89,10 +87,9 @@ export interface AppleVmDockerWorkloadEgressLedgers {
 }
 
 /**
- * Both macOS product backends have a nested-daemon implementation. Apple runs
- * the daemon inside the agent VM; Docker Desktop uses a separate rootless
- * sidecar. This is an implementation check, not a qualification or enablement
- * claim.
+ * Both runtime kinds have a nested-daemon implementation. Apple runs the daemon
+ * inside the agent VM; Docker Desktop on macOS or WSL2 uses a separate rootless
+ * sidecar. This is an implementation check, not a qualification or enablement claim.
  */
 export function assertNestedDaemonBackendImplemented(runtimeKind: ContainerRuntimeKind): void {
   switch (runtimeKind) {
@@ -194,123 +191,6 @@ async function readBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promise
   }
 }
 
-function trustContractMetadataIsQualified(
-  observed: string,
-  expected: { readonly mode: number; readonly nlink: number },
-): boolean {
-  const match = TRUST_CONTRACT_METADATA_PATTERN.exec(observed);
-  if (match === null) return false;
-  const [, uidText, gidText, modeText, nlinkText] = match;
-  const uid = Number.parseInt(uidText, 10);
-  const gid = Number.parseInt(gidText, 10);
-  const mode = Number.parseInt(modeText, 8);
-  const nlink = Number.parseInt(nlinkText, 10);
-  return uid <= 0xffff_ffff && gid <= 0xffff_ffff && mode === expected.mode && nlink === expected.nlink;
-}
-
-/** Create and verify package-build state, then prove PATH selects the staged shim and runc wrapper. */
-export async function preflightAppleVmDockerBuildShim(
-  exec: AppleVmDaemonExec,
-  contract: DockerBuildShimStagingContract,
-  canary: DockerBuildTrustCanaryContract,
-): Promise<void> {
-  await preflightDockerBuildShimAgent(exec, contract);
-
-  const runtimePath = await execBuildShimPreflight(
-    exec,
-    ['/bin/sh', '-c', `command -v ${contract.buildTrustPreflight.executable}`],
-    'nested-Docker build-trust runtime PATH resolution',
-  );
-  if (runtimePath !== contract.buildTrustPreflight.expectedPath) {
-    throw new Error(
-      `nested-Docker build-trust runtime PATH resolution selected "${runtimePath}"; ` +
-        `expected "${contract.buildTrustPreflight.expectedPath}"`,
-    );
-  }
-  const runtimeDigest = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/sha256sum', DOCKER_BUILD_TRUST_WRAPPER_PATH],
-    'nested-Docker build-trust runtime digest preflight',
-  );
-  if (runtimeDigest !== `${contract.buildTrustWrapperArtifact.sha256}  ${DOCKER_BUILD_TRUST_WRAPPER_PATH}`) {
-    throw new Error('nested-Docker build-trust runtime failed its guest digest check');
-  }
-  const trustContract = contract.buildTrustPreflight.trustContract;
-  const trustContractParentMetadata = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/stat', '--format=%F:%u:%g:%a', trustContract.parentDirectory.path],
-    'nested-Docker build-trust contract parent metadata preflight',
-  );
-  const expectedTrustContractParentMetadata =
-    `directory:${trustContract.parentDirectory.uid}:${trustContract.parentDirectory.gid}:` +
-    trustContract.parentDirectory.mode.toString(8);
-  if (trustContractParentMetadata !== expectedTrustContractParentMetadata) {
-    throw new Error(
-      `nested-Docker build-trust contract parent metadata was "${trustContractParentMetadata}"; ` +
-        `expected "${expectedTrustContractParentMetadata}"`,
-    );
-  }
-  const trustContractMetadata = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/stat', '--format=%F:%u:%g:%a:%h', trustContract.path],
-    'nested-Docker build-trust contract metadata preflight',
-  );
-  if (!trustContractMetadataIsQualified(trustContractMetadata, trustContract)) {
-    throw new Error(
-      `nested-Docker build-trust contract metadata was "${trustContractMetadata}"; ` +
-        `expected a regular mode ${trustContract.mode.toString(8)} one-link file ` +
-        '(UID/GID are diagnostic only)',
-    );
-  }
-  const trustContractDigest = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/sha256sum', trustContract.path],
-    'nested-Docker build-trust contract digest preflight',
-  );
-  if (trustContractDigest !== `${canary.buildTrustContractSha256}  ${trustContract.path}`) {
-    throw new Error('nested-Docker build-trust contract failed its guest digest check');
-  }
-  const realRunc = contract.buildTrustPreflight.realRunc;
-  const realRuncMetadata = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/stat', '--format=%F:%u:%g:%a:%h:%s', realRunc.path],
-    'nested-Docker selected-image real-runc metadata preflight',
-  );
-  const expectedRealRuncMetadata =
-    `regular file:${realRunc.outerUid}:${realRunc.outerGid}:` +
-    `${realRunc.mode.toString(8)}:${realRunc.nlink}:${realRunc.size}`;
-  if (realRuncMetadata !== expectedRealRuncMetadata) {
-    throw new Error(
-      `nested-Docker selected-image real-runc metadata was "${realRuncMetadata}"; ` +
-        `expected "${expectedRealRuncMetadata}"`,
-    );
-  }
-  const realRuncDigest = await execBuildShimPreflight(
-    exec,
-    ['/usr/bin/sha256sum', realRunc.path],
-    'nested-Docker selected-image real-runc digest preflight',
-  );
-  if (realRuncDigest !== `${realRunc.sha256}  ${realRunc.path}`) {
-    throw new Error('nested-Docker selected-image real-runc failed its outer-view digest check');
-  }
-  const runtimeVersionArgv = [
-    contract.buildTrustPreflight.expectedPath,
-    ...contract.buildTrustPreflight.versionArgv.slice(1),
-  ];
-  const runtimeVersion = await execBuildShimPreflight(
-    exec,
-    runtimeVersionArgv,
-    'nested-Docker build-trust runtime version preflight',
-    DOCKER_BUILD_SHIM_ROOT_USER,
-  );
-  if (!runtimeVersion.startsWith(contract.buildTrustPreflight.expectedVersionPrefix.trimEnd())) {
-    throw new Error(
-      `nested-Docker build-trust runtime version was "${runtimeVersion}"; ` +
-        `expected prefix "${contract.buildTrustPreflight.expectedVersionPrefix.trimEnd()}"`,
-    );
-  }
-}
-
 function sameSnapshot(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -381,6 +261,8 @@ async function removeBuildTrustCanaryImage(exec: AppleVmDaemonExec, reference: s
   }
 }
 
+// Host preflight already compares exact protected source contents. The no-network
+// canary checks that the runtime injects those sources into a build executor.
 function buildTrustCanaryDockerfile(localBaseImage: string, canary: DockerBuildTrustCanaryContract): string {
   return (
     `FROM ${localBaseImage}\n` +
@@ -388,9 +270,9 @@ function buildTrustCanaryDockerfile(localBaseImage: string, canary: DockerBuildT
     '[ "$NODE_EXTRA_CA_CERTS" = "/dev/ironcurtain/ca-cert.pem" ]; ' +
     '[ "$SSL_CERT_FILE" = "/dev/ironcurtain/ca-bundle.pem" ]; ' +
     `[ "$APT_CONFIG" = "/dev/ironcurtain/apt.conf" ]; ` +
-    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/ca-cert.pem | /usr/bin/cut -d' ' -f1)" = "${canary.caCertificateSha256}" ]; ` +
-    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/ca-bundle.pem | /usr/bin/cut -d' ' -f1)" = "${canary.caBundleSha256}" ]; ` +
-    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/apt.conf | /usr/bin/cut -d' ' -f1)" = "${canary.aptConfigSha256}" ]; ` +
+    `[ "$(/usr/bin/wc -c < /dev/ironcurtain/ca-cert.pem)" = "${Buffer.byteLength(canary.caCertificate)}" ]; ` +
+    `[ "$(/usr/bin/wc -c < /dev/ironcurtain/ca-bundle.pem)" = "${Buffer.byteLength(canary.caBundle)}" ]; ` +
+    `[ "$(/usr/bin/wc -c < /dev/ironcurtain/apt.conf)" = "${Buffer.byteLength(canary.aptConfig)}" ]; ` +
     '[ ! -e /dev/ironcurtain/ca-key.pem ]; ' +
     '[ ! -w /dev/ironcurtain/ca-cert.pem ]; ' +
     '[ ! -w /dev/ironcurtain/ca-bundle.pem ]; ' +
@@ -416,11 +298,7 @@ async function runAppleVmDockerBuildTrustCanary(
   let baseTagged = false;
   let outputImageId: string | undefined;
   try {
-    if (
-      !IMMUTABLE_IMAGE_ID_PATTERN.test(immutableImageId) ||
-      !CA_GENERATION_PATTERN.test(canary.caGeneration) ||
-      !SHA256_PATTERN.test(canary.buildTrustContractSha256)
-    ) {
+    if (!IMMUTABLE_IMAGE_ID_PATTERN.test(immutableImageId) || !CA_GENERATION_PATTERN.test(canary.caGeneration)) {
       throw new Error('nested-Docker build-trust canary received invalid image or CA generation metadata');
     }
     const selectedByName = await inspectBuildTrustCanaryImage(exec, selectedLogicalName);
@@ -436,21 +314,6 @@ async function runAppleVmDockerBuildTrustCanary(
     ) {
       throw new Error('nested-Docker build-trust reserved canary image tag already exists');
     }
-    await execBuildShimPreflight(
-      exec,
-      [
-        '/bin/sh',
-        '-c',
-        'observed=$(/usr/bin/sha256sum "$1" | /usr/bin/cut -d" " -f1); ' +
-          '[ "$observed" = "$2" ] && ' +
-          '/usr/bin/grep --fixed-strings --line-regexp --quiet "  \\"caGeneration\\": \\"$3\\"," "$1"',
-        'ironcurtain-build-trust-contract',
-        DOCKER_BUILD_TRUST_CONTRACT_PATH,
-        canary.buildTrustContractSha256,
-        canary.caGeneration,
-      ],
-      `nested-Docker build-trust contract/CA generation validation (${canary.caGeneration})`,
-    );
     await execBuildShimPreflight(
       exec,
       [
@@ -661,7 +524,8 @@ export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWork
     throw new Error('nested-Docker package-build contracts do not match the admitted network access');
   }
   if (options.dockerBuildShim !== undefined && options.dockerBuildTrustCanary !== undefined) {
-    await preflightAppleVmDockerBuildShim(exec, options.dockerBuildShim, options.dockerBuildTrustCanary);
+    await preflightDockerBuildShimAgent(exec, options.dockerBuildShim);
+    await preflightDockerBuildTrust(exec, options.dockerBuildShim, options.dockerBuildTrustCanary);
   }
   const provisioning = await provisionAppleVmDockerWorkload({
     outerRuntime: options.runtime,

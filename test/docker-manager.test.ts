@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   createDockerManager,
   buildCreateArgs,
@@ -233,6 +233,10 @@ describe('DockerManager', () => {
     mock = createMockExec();
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   describe('buildCreateArgs', () => {
     it('builds correct docker create arguments', () => {
       const args = buildCreateArgs(sampleConfig);
@@ -318,14 +322,14 @@ describe('DockerManager', () => {
       expect(args).not.toContain('--add-host=host.docker.internal:host-gateway');
     });
 
-    it('uses default host-gateway when extraHosts is empty array', () => {
+    it('suppresses the default host-gateway when extraHosts is explicitly empty', () => {
       const config: DockerContainerConfig = {
         ...sampleConfig,
         extraHosts: [],
       };
       const args = buildCreateArgs(config);
 
-      expect(args).toContain('--add-host=host.docker.internal:host-gateway');
+      expect(args.some((arg) => arg.startsWith('--add-host'))).toBe(false);
     });
 
     it('emits --user when config.user is set (issue #232 Linux UID remap)', () => {
@@ -945,6 +949,91 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('captured endpoint', () => {
+    const routingOverrides = {
+      DOCKER_HOST: 'unix:///changed.sock',
+      DOCKER_CONTEXT: 'changed-context',
+      DOCKER_TLS: '1',
+      DOCKER_TLS_VERIFY: '1',
+      DOCKER_CERT_PATH: '/changed/certs',
+      DOCKER_DEFAULT_PLATFORM: 'linux/arm64',
+    };
+
+    beforeEach(() => {
+      for (const [key, value] of Object.entries(routingOverrides)) vi.stubEnv(key, value);
+      vi.stubEnv('BUILDX_BUILDER', 'changed-builder');
+    });
+
+    function expectCapturedEnvironment(env: NodeJS.ProcessEnv | undefined): void {
+      expect(env?.DOCKER_HOST).toBe('unix:///captured.sock');
+      for (const key of Object.keys(routingOverrides).filter((key) => key !== 'DOCKER_HOST')) {
+        expect(env).not.toHaveProperty(key);
+      }
+    }
+
+    it('sanitizes outer exec while preserving explicitly requested inner routing and platform values', async () => {
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        endpoint: { host: 'unix:///captured.sock' },
+      });
+      const innerRouting = { ...routingOverrides, DOCKER_HOST: 'unix:///inner.sock' };
+      await manager.exec('agent', ['true'], undefined, undefined, undefined, {
+        ...innerRouting,
+        BUILDX_BUILDER: 'inner-builder',
+      });
+      expect(mock.calls[0].args.slice(0, 3)).toEqual(['--host', 'unix:///captured.sock', 'exec']);
+      for (const [key, value] of Object.entries(innerRouting)) {
+        expect(mock.calls[0].args).toContain(`${key}=${value}`);
+      }
+      expect(mock.calls[0].args).toContain('BUILDX_BUILDER');
+      expect(mock.calls[0].opts.env?.BUILDX_BUILDER).toBe('inner-builder');
+      expectCapturedEnvironment(mock.calls[0].opts.env);
+    });
+
+    it('uses the captured endpoint and server platform for outer image inspection and create', async () => {
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        endpoint: { host: 'unix:///captured.sock' },
+      });
+      mock.setResponse('[{"Id":"image-id"}]');
+      await manager.inspectImage('image');
+      await manager.create(sampleConfig);
+      expect(mock.calls[0].args.slice(0, 4)).toEqual(['--host', 'unix:///captured.sock', 'image', 'inspect']);
+      expect(mock.calls[1].args.slice(0, 3)).toEqual(['--host', 'unix:///captured.sock', 'create']);
+      for (const call of mock.calls) expectCapturedEnvironment(call.opts.env);
+    });
+
+    it.each(['build', 'pull', 'load'] as const)(
+      'keeps inherited routing and platform overrides out of streamed %s operations',
+      async (operation) => {
+        const spawnMock = createMockSpawn();
+        const manager = createDockerManager(mock.mockExec, undefined, {
+          endpoint: { host: 'unix:///captured.sock' },
+          spawn: spawnMock.spawn,
+          stdoutSink: nullSink(),
+          stderrSink: nullSink(),
+        });
+        const pending =
+          operation === 'build'
+            ? manager.buildImage('img:latest', '/Dockerfile', '/ctx')
+            : operation === 'pull'
+              ? manager.pullImage('img:latest')
+              : manager.loadImageArchive('/image.tar');
+        await Promise.resolve();
+        spawnMock.handles[0].exit(0);
+        await pending;
+        const call = spawnMock.calls[0];
+        expect(call.args.slice(0, 2)).toEqual(['--host', 'unix:///captured.sock']);
+        expectCapturedEnvironment(call.options?.env);
+        if (operation === 'build') {
+          expect(call.args.slice(2, 5)).toEqual(['build', '--builder', 'default']);
+          expect(call.options?.env?.BUILDX_BUILDER).toBe('changed-builder');
+          expect(call.options?.env?.DOCKER_BUILDKIT).toBe('1');
+        }
+        expect(process.env.DOCKER_HOST).toBe(routingOverrides.DOCKER_HOST);
+        expect(process.env.DOCKER_DEFAULT_PLATFORM).toBe(routingOverrides.DOCKER_DEFAULT_PLATFORM);
+      },
+    );
+  });
+
   describe('buildImage', () => {
     it('passes labels as --label flags', async () => {
       const spawnMock = createMockSpawn();
@@ -1190,6 +1279,32 @@ describe('DockerManager', () => {
   // (impractical) or fake timers (which leak across tests when an
   // assertion fails mid-test, breaking unrelated suites).
   describe('spawnWithIdleTimeout', () => {
+    it.each([undefined, 'merge', 'replace'] as const)(
+      'applies the %s environment mode at the final spawn boundary',
+      async (envMode) => {
+        vi.stubEnv('IRONCURTAIN_TEST_INHERITED', 'from-parent');
+        vi.stubEnv('IRONCURTAIN_TEST_OVERRIDE', 'from-parent');
+        const spawnMock = createMockSpawn();
+        const env = { IRONCURTAIN_TEST_OVERRIDE: 'from-child' };
+        const pending = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+          idleTimeoutMs: 60_000,
+          operation: 'docker pull',
+          env,
+          envMode,
+          spawn: spawnMock.spawn,
+          stdoutSink: nullSink(),
+          stderrSink: nullSink(),
+        });
+        spawnMock.handles[0].exit(0);
+        await pending;
+        const childEnv = spawnMock.calls[0].options?.env;
+        expect(childEnv?.IRONCURTAIN_TEST_OVERRIDE).toBe('from-child');
+        if (envMode === 'replace') expect(childEnv).toEqual(env);
+        else expect(childEnv?.IRONCURTAIN_TEST_INHERITED).toBe('from-parent');
+        expect(process.env.IRONCURTAIN_TEST_OVERRIDE).toBe('from-parent');
+      },
+    );
+
     it('rejects with a labeled error when the child stays silent', async () => {
       const spawnMock = createMockSpawn();
       const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {

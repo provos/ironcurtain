@@ -10,6 +10,7 @@ import {
   DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
   DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
   DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
   DOCKER_BUILD_TRUST_CONTRACT_PATH,
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
   getDockerBuildShimStagingContract,
@@ -18,6 +19,10 @@ import {
   APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
   APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
 } from '../../src/docker-workload/apple-vm-daemon.js';
+import { APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR } from '../../src/docker-workload/apple-private-docker.js';
+import { resolveDockerWorkloadConfig } from '../../src/docker-workload/config.js';
+import { dockerWorkloadSessionMetadata } from '../../src/docker/docker-infrastructure.js';
+import { updateSessionMetadata } from '../../src/session/session-metadata.js';
 
 const state = vi.hoisted<{
   infrastructure: unknown;
@@ -66,7 +71,9 @@ vi.mock('../../src/session/index.js', () => ({
 vi.mock('../../src/session/session-metadata.js', () => ({ updateSessionMetadata: vi.fn() }));
 vi.mock('../../src/docker/claude-md-seed.js', () => ({ buildDockerClaudeMd: () => '' }));
 
-vi.mock('../../src/docker/docker-infrastructure.js', () => ({
+vi.mock('../../src/docker/docker-infrastructure.js', async (importOriginal) => ({
+  buildAgentContainerConfig: (await importOriginal<typeof import('../../src/docker/docker-infrastructure.js')>())
+    .buildAgentContainerConfig,
   prepareDockerInfrastructure: async (
     _config: unknown,
     _mode: unknown,
@@ -90,8 +97,9 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   buildAgentUidRemap: () => ({}),
   buildDockerOwnershipLabels: (options: { bundleId: string }) => ({ bundleLabel: options.bundleId }),
   buildDockerDesktopTransportCreateLimits: () => ({}),
-  buildNestedDockerAgentTrustedCreateOptions: (namedVolumeMounts: readonly unknown[]) =>
-    namedVolumeMounts.length === 0 ? undefined : { namedVolumeMounts },
+  buildDockerAgentTrustedCreateOptions: (
+    await importOriginal<typeof import('../../src/docker/docker-infrastructure.js')>()
+  ).buildDockerAgentTrustedCreateOptions,
   buildUdsSocketMounts: () => [],
   buildDockerWorkloadEgressMounts: (infra: {
     dockerWorkloadEgress?: { registry?: { socketPath: string }; packages?: { socketPath: string } };
@@ -115,15 +123,8 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
         ]
       : []),
   ],
-  buildDockerBuildShimMounts: (infra: {
-    dockerBuildShim?: {
-      artifacts: readonly { source: string; target: string; readonly: boolean }[];
-      contract: unknown;
-    };
-  }) =>
-    infra.dockerBuildShim === undefined
-      ? []
-      : infra.dockerBuildShim.artifacts.map(({ source, target, readonly }) => ({ source, target, readonly })),
+  buildDockerBuildShimMounts: (await importOriginal<typeof import('../../src/docker/docker-infrastructure.js')>())
+    .buildDockerBuildShimMounts,
   resolveNestedDockerAgentWiring: (infra: {
     dockerWorkload?: unknown;
     runtimeKind: 'docker' | 'apple-container';
@@ -224,12 +225,11 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
         : { ...options.baseLabels, 'com.ironcurtain.docker-workload.generation': 'generation-pty-ordering' },
     );
   },
-  dockerWorkloadSessionMetadata: vi.fn(() => ({
+  dockerWorkloadSessionMetadata: vi.fn((_handle: unknown, configuration: unknown, backend: string) => ({
     leaseId: 'lease-pty-ordering',
     generation: 'generation-pty-ordering',
-    configHash: 'c'.repeat(64),
-    watchdogPolicySha256: 'w'.repeat(64),
-    backend: 'apple-container',
+    configuration,
+    backend,
   })),
   removeBundleRuntimeRoot: vi.fn(),
   selectOuterContainerResources: () => ({ memoryMb: undefined, cpus: undefined }),
@@ -293,6 +293,8 @@ describe('Apple nested Docker PTY startup ordering', () => {
     state.execPty.mockReset();
     state.execPty.mockResolvedValue(0);
     state.prepareOptions = undefined;
+    vi.mocked(dockerWorkloadSessionMetadata).mockClear();
+    vi.mocked(updateSessionMetadata).mockClear();
 
     ptyServer = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -310,7 +312,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
   });
 
   function installInfrastructure(
-    workload: { status: string; teardown(): Promise<void> },
+    workload: { status: string; teardown(): Promise<void> } | undefined,
     options: {
       networkAccess?: 'offline' | 'images' | 'packages';
       runtimeKind?: 'apple-container' | 'docker';
@@ -324,6 +326,13 @@ describe('Apple nested Docker PTY startup ordering', () => {
             'packages',
             APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
             APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+            {
+              architecture: runtimeKind === 'docker' ? 'amd64' : 'arm64',
+              dockerHost:
+                runtimeKind === 'docker'
+                  ? 'unix:///run/ironcurtain-docker/docker/docker.sock'
+                  : 'unix:///run/ironcurtain-docker/docker.sock',
+            },
           )
         : undefined;
     const docker = {
@@ -439,27 +448,24 @@ describe('Apple nested Docker PTY startup ordering', () => {
               ],
               buildTrustCanary: {
                 caGeneration: 'gen-00000000-0000-4000-8000-000000000000',
-                buildTrustContractSha256: '4'.repeat(64),
-                caCertificateSha256: '1'.repeat(64),
-                caBundleSha256: '2'.repeat(64),
-                aptConfigSha256: '3'.repeat(64),
+                buildTrustContract: 'fixture-contract\n',
+                caCertificate: 'fixture-cert\n',
+                caBundle: 'fixture-bundle\n',
+                aptConfig: 'fixture-apt\n',
               },
             },
       dockerWorkloadBootstrap:
-        runtimeKind === 'apple-container'
+        runtimeKind === 'apple-container' && workload !== undefined
           ? {
-              hostCatalogDirectory: homeDir,
-              guestCatalogDirectory: '/run/ironcurtain-catalog',
-              outerAppleCatalogPath: join(homeDir, 'apple-catalog.json'),
-              innerDockerCatalogPath: join(homeDir, 'docker-catalog.json'),
-              selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+              hostArtifactDirectory: homeDir,
+              guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
               clientToolchainManifestPath: join(homeDir, 'toolchain.json'),
             }
           : undefined,
       dockerDesktopAgentAccess:
-        runtimeKind === 'docker'
+        runtimeKind === 'docker' && workload !== undefined
           ? {
-              dockerHost: 'unix:///run/ironcurtain-docker/docker.sock',
+              dockerHost: 'unix:///run/ironcurtain-docker/docker/docker.sock',
               networkName: 'ironcurtain',
               outerEgressNetworkName: 'ic-dw-egress-pty',
               agentApiMount: {
@@ -471,7 +477,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
             }
           : undefined,
       dockerDesktopResources:
-        runtimeKind === 'docker'
+        runtimeKind === 'docker' && workload !== undefined
           ? {
               sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 352 },
               transport: { memoryMb: 64, cpus: 0.25, pidsLimit: 32 },
@@ -506,15 +512,34 @@ describe('Apple nested Docker PTY startup ordering', () => {
     };
   }
 
-  function config(): never {
+  function config(dockerWorkload = resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'offline' })): never {
     return {
       protectedPaths: [],
       userConfig: {
         modelProviders: { default: 'native' },
-        dockerWorkload: { enabled: true, acceptObservedDiskRisk: true, resources: { diskMb: null } },
+        dockerWorkload,
+        dockerResources: { memoryMb: null, cpus: null },
       },
     } as never;
   }
+
+  it('shadows the image-declared Docker state volume for a feature-disabled Docker PTY agent', async () => {
+    installInfrastructure(undefined, { runtimeKind: 'docker' });
+
+    await runPtySession({
+      config: config(resolveDockerWorkloadConfig({ enabled: false })),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      workspacePath: homeDir,
+      attach: async () => 0,
+    });
+
+    expect(state.createdConfigs).toHaveLength(2);
+    const [, agent] = state.createdConfigs;
+    expect(agent.env).not.toHaveProperty('DOCKER_HOST');
+    expect(agent.trustedCreateOptions).toEqual({
+      tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
+    });
+  });
 
   it('uses runtime-native exec and attaches only after workload activation completes', async () => {
     const events: string[] = [];
@@ -554,12 +579,23 @@ describe('Apple nested Docker PTY startup ordering', () => {
     expect(state.createdConfigs[0].tty).toBe(false);
     expect(state.createdConfigs[0].env.DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker.sock');
     expect(state.createdConfigs[0].env.IRONCURTAIN_DOCKER_NETWORK).toBe('ironcurtain');
+    expect(state.createdConfigs[0].trustedCreateOptions).toBeUndefined();
     expect(state.execPty).toHaveBeenCalledWith(
       'apple-container-id',
       ['/etc/ironcurtain/start-claude.sh'],
       expect.any(AbortSignal),
     );
     expect(state.prepareOptions).toEqual(expect.objectContaining({ proxyAgentKind: 'pty' }));
+    const configuration = resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'offline' });
+    expect(dockerWorkloadSessionMetadata).toHaveBeenCalledWith(workload, configuration, 'apple-container');
+    expect(updateSessionMetadata).toHaveBeenCalledWith(expect.any(String), {
+      dockerWorkload: {
+        leaseId: 'lease-pty-ordering',
+        generation: 'generation-pty-ordering',
+        configuration,
+        backend: 'apple-container',
+      },
+    });
     expect(attach).not.toHaveBeenCalled();
     expect(events).toEqual(['activation-start', 'activation-complete', 'attach']);
     expect(state.startAppleVmDockerWorkload).toHaveBeenCalledWith(
@@ -606,6 +642,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
           'packages',
           APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
           APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+          { architecture: 'arm64', dockerHost: 'unix:///run/ironcurtain-docker/docker.sock' },
         ),
       }),
     );
@@ -644,7 +681,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
       target: '/etc/ironcurtain',
       readonly: true,
     });
-    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).toBe('/opt/ironcurtain-build-trust/build-trust-contract.json');
+    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).toBe('/ironcurtain-build-trust/build-trust-contract.json');
     expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).not.toMatch(/^\/etc\/ironcurtain(?:\/|$)/u);
     expect(state.createdConfigs[0].mounts).toEqual(
       expect.arrayContaining([
@@ -659,17 +696,17 @@ describe('Apple nested Docker PTY startup ordering', () => {
           readonly: true,
         },
         {
-          source: join(homeDir, 'runtime', 'build-shim', 'runc'),
-          target: DOCKER_BUILD_TRUST_WRAPPER_PATH,
-          readonly: true,
-        },
-        {
-          source: join(homeDir, 'runtime', 'build-shim', 'build-trust-contract.json'),
-          target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
+          source: join(homeDir, 'runtime', 'build-shim'),
+          target: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
           readonly: true,
         },
       ]),
     );
+    expect(
+      state.createdConfigs[0].mounts.some(({ target }) =>
+        target.startsWith(`${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/`),
+      ),
+    ).toBe(false);
     expect(state.startAppleVmDockerWorkload).toHaveBeenCalledWith(
       expect.objectContaining({
         networkAccess: 'packages',
@@ -677,6 +714,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
           'packages',
           APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
           APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+          { architecture: 'arm64', dockerHost: 'unix:///run/ironcurtain-docker/docker.sock' },
         ),
       }),
     );
@@ -731,6 +769,19 @@ describe('Apple nested Docker PTY startup ordering', () => {
 
     expect(state.createdConfigs).toHaveLength(2);
     const [transport, agent] = state.createdConfigs;
+    expect(agent.env.DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker/docker.sock');
+    expect(agent.trustedCreateOptions).toEqual({
+      namedVolumeMounts: [
+        {
+          name: 'ic-desktop-api-pty',
+          target: '/run/ironcurtain-docker',
+          readonly: true,
+          noCopy: true,
+        },
+      ],
+      tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
+      pidsLimit: 128,
+    });
     const ordinaryNetwork = agent.network;
     expect(transport.network).toBe('bridge');
     expect(state.transportLedgerRoles).toEqual(['network', 'proxy']);

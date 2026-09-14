@@ -17,7 +17,6 @@ describe('OCI image archive verification', () => {
     const fixture = makeFixture();
     const verified = await verify(fixture.directory, fixture.entry);
     expect(verified).toMatchObject({
-      archiveSha256: fixture.entry.archive.sha256,
       sizeBytes: fixture.entry.archive.sizeBytes,
       manifestDigest: fixture.entry.manifestDigest,
       configDigest: fixture.entry.configDigest,
@@ -98,7 +97,6 @@ function verify(directory: string, entry: ReturnType<typeof writeOciArchiveFixtu
 function verifyOptions(directory: string, entry: ReturnType<typeof writeOciArchiveFixture>) {
   return {
     archivePath: join(directory, entry.archive.fileName),
-    expectedArchiveSha256: entry.archive.sha256,
     expectedSizeBytes: entry.archive.sizeBytes,
     manifestDigest: entry.manifestDigest,
     configDigest: entry.configDigest,

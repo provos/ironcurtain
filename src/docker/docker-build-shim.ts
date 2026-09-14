@@ -7,6 +7,7 @@
  * build-proxy artifact, state directory, or preflight.
  */
 
+import type { DockerToolchainArchitecture } from '../docker-workload/client-toolchain.js';
 import type { DockerWorkloadNetworkAccess } from '../docker-workload/config.js';
 import {
   PRIVATE_DOCKER_API_DIR,
@@ -24,15 +25,12 @@ export const DOCKER_BUILDX_STATE_DIRECTORY = `${DOCKER_PACKAGE_BUILD_RUNTIME_DIR
 export const DOCKER_BUILDX_INSTANCES_DIRECTORY = `${DOCKER_BUILDX_STATE_DIRECTORY}/instances`;
 export const DOCKER_BUILDX_DEFAULT_BUILDER = 'default';
 export const DOCKER_BUILD_REAL_CLIENT = PRIVATE_DOCKER_CLIENT;
-export const DOCKER_BUILD_TRUST_WRAPPER_PATH = `${DOCKER_BUILD_SHIM_DIRECTORY}/runc`;
-export const DOCKER_BUILD_TRUST_CONTRACT_PATH = '/opt/ironcurtain-build-trust/build-trust-contract.json';
+export const DOCKER_BUILD_TRUST_WRAPPER_PATH = '/ironcurtain-build-trust/runc';
+export const DOCKER_BUILD_TRUST_CONTRACT_PATH = '/ironcurtain-build-trust/build-trust-contract.json';
 export const DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY = buildTrustRuntimeContract.trustContract.parentDirectory.path;
 export const DOCKER_BUILD_TRUST_CA_CERT_PATH = `${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/ca-cert.pem`;
 export const DOCKER_BUILD_TRUST_CA_BUNDLE_PATH = `${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/ca-bundle.pem`;
 export const DOCKER_BUILD_TRUST_APT_CONFIG_PATH = `${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/apt.conf`;
-export const DOCKER_BUILD_TRUST_WRAPPER_PACKAGE_PATH = buildTrustRuntimeContract.wrapper.packagePath;
-export const DOCKER_BUILD_TRUST_WRAPPER_SHA256 = buildTrustRuntimeContract.wrapper.sha256;
-export const DOCKER_BUILD_TRUST_WRAPPER_SIZE = buildTrustRuntimeContract.wrapper.size;
 export const DOCKER_BUILD_TRUST_WRAPPER_PACKAGE_MODE = parseContractMode(
   buildTrustRuntimeContract.wrapper.packageMode,
   'wrapper package mode',
@@ -42,10 +40,7 @@ export const DOCKER_BUILD_TRUST_WRAPPER_GUEST_MODE = parseContractMode(
   'wrapper guest mode',
 );
 export const DOCKER_BUILD_TRUST_REAL_RUNC_PATH = buildTrustRuntimeContract.realRunc.path;
-export const DOCKER_BUILD_TRUST_REAL_RUNC_SHA256 = buildTrustRuntimeContract.realRunc.sha256;
-export const DOCKER_BUILD_TRUST_REAL_RUNC_SIZE = buildTrustRuntimeContract.realRunc.size;
 export const DOCKER_BUILD_TRUST_REAL_RUNC_VERSION = buildTrustRuntimeContract.realRunc.version;
-export const DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS = buildTrustRuntimeContract.realRunc.ownerPairs;
 export const DOCKER_BUILD_TRUST_REAL_RUNC_NLINK = buildTrustRuntimeContract.realRunc.nlink;
 export const DOCKER_BUILD_TRUST_REAL_RUNC_MODE = parseContractMode(
   buildTrustRuntimeContract.realRunc.mode,
@@ -102,8 +97,6 @@ export interface DockerBuildShimArtifact {
 export interface DockerBuildTrustStaticArtifact {
   readonly targetPath: string;
   readonly packagePath: string;
-  readonly sha256: string;
-  readonly size: number;
   readonly packageMode: number;
   readonly guestMode: number;
 }
@@ -123,14 +116,15 @@ export interface DockerBuildShimDirectory {
 export interface DockerBuildTrustCanaryContract {
   /** Authenticated host CA generation embedded in the exact staged trust contract. */
   readonly caGeneration: string;
-  readonly buildTrustContractSha256: string;
-  readonly caCertificateSha256: string;
-  readonly caBundleSha256: string;
-  readonly aptConfigSha256: string;
+  readonly buildTrustContract: string;
+  readonly caCertificate: string;
+  readonly caBundle: string;
+  readonly aptConfig: string;
 }
 
 /** Runtime-facing contract; source paths are chosen inside the bundle root. */
 export interface DockerBuildShimStagingContract {
+  readonly admittedDockerHost: string;
   readonly shimArtifact: DockerBuildShimArtifact;
   readonly proxyConfigArtifact: DockerBuildShimArtifact;
   readonly buildTrustWrapperArtifact: DockerBuildTrustStaticArtifact;
@@ -153,13 +147,8 @@ export interface DockerBuildShimStagingContract {
       readonly path: string;
       readonly parentDirectory: {
         readonly path: string;
-        readonly uid: number;
-        readonly gid: number;
         readonly mode: number;
-        readonly ownerPairs: readonly [
-          { readonly uid: 0; readonly gid: 0 },
-          { readonly uid: 65534; readonly gid: 65534 },
-        ];
+        readonly requiresEffectiveReadOnly: true;
       };
       readonly mode: number;
       readonly nlink: number;
@@ -167,10 +156,6 @@ export interface DockerBuildShimStagingContract {
     };
     readonly realRunc: {
       readonly path: string;
-      readonly sha256: string;
-      readonly size: number;
-      readonly outerUid: number;
-      readonly outerGid: number;
       readonly mode: number;
       readonly nlink: number;
     };
@@ -199,13 +184,18 @@ export function renderDockerBuildProxyConfig(packageProxyUrl: string): string {
 }
 
 /** Render the argv-preserving Bash shim installed ahead of the pinned client. */
-export function renderDockerBuildShim(registryProxyUrl: string): string {
+export function renderDockerBuildShim(registryProxyUrl: string, dockerHost: string = PRIVATE_DOCKER_HOST): string {
   assertCanonicalProxyUrl(registryProxyUrl, 'registry');
+  // This endpoint comes from the admitted topology and is embedded in Bash.
+  // Admit only a private API socket with shell-inert, canonical components.
+  if (!/^unix:\/\/\/run\/ironcurtain-docker\/(?:[a-zA-Z0-9_-]+\/)*docker\.sock$/u.test(dockerHost)) {
+    throw new Error('nested-Docker package build requires a canonical private Docker socket endpoint');
+  }
   return `#!/bin/bash
 set -u
 
 REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}
-ADMITTED_DOCKER_HOST=${PRIVATE_DOCKER_HOST}
+ADMITTED_DOCKER_HOST=${dockerHost}
 REGISTRY_PROXY=${registryProxyUrl}
 BUILD_CONFIG_DIR=${DOCKER_BUILD_PROXY_CONFIG_DIRECTORY}
 BUILDX_STATE_DIR=${DOCKER_BUILDX_STATE_DIRECTORY}
@@ -586,6 +576,12 @@ export function getDockerBuildShimStagingContract(
   networkAccess: DockerWorkloadNetworkAccess,
   packageProxyUrl?: string,
   registryProxyUrl?: string,
+  options?: {
+    readonly architecture: DockerToolchainArchitecture;
+    readonly dockerHost: string;
+    readonly uid?: number;
+    readonly gid?: number;
+  },
 ): DockerBuildShimStagingContract | undefined {
   if (networkAccess !== 'packages') return undefined;
   if (packageProxyUrl === undefined) {
@@ -600,11 +596,15 @@ export function getDockerBuildShimStagingContract(
   if (packageProxyUrl === registryProxyUrl) {
     throw new Error('nested-Docker package and registry proxy URLs must be distinct');
   }
+  if (options?.dockerHost === undefined) {
+    throw new Error('nested-Docker package build staging requires an explicit private Docker endpoint');
+  }
 
   return {
+    admittedDockerHost: options.dockerHost,
     shimArtifact: {
       targetPath: DOCKER_BUILD_SHIM_PATH,
-      content: renderDockerBuildShim(registryProxyUrl),
+      content: renderDockerBuildShim(registryProxyUrl, options.dockerHost),
       mode: 0o555,
     },
     proxyConfigArtifact: {
@@ -614,9 +614,7 @@ export function getDockerBuildShimStagingContract(
     },
     buildTrustWrapperArtifact: {
       targetPath: DOCKER_BUILD_TRUST_WRAPPER_PATH,
-      packagePath: DOCKER_BUILD_TRUST_WRAPPER_PACKAGE_PATH,
-      sha256: DOCKER_BUILD_TRUST_WRAPPER_SHA256,
-      size: DOCKER_BUILD_TRUST_WRAPPER_SIZE,
+      packagePath: buildTrustRuntimeContract.wrapper.packagePaths[options.architecture],
       packageMode: DOCKER_BUILD_TRUST_WRAPPER_PACKAGE_MODE,
       guestMode: DOCKER_BUILD_TRUST_WRAPPER_GUEST_MODE,
     },
@@ -630,8 +628,8 @@ export function getDockerBuildShimStagingContract(
     },
     writableDirectories: [DOCKER_BUILDX_STATE_DIRECTORY, DOCKER_BUILDX_INSTANCES_DIRECTORY].map((path) => ({
       path,
-      uid: 1000,
-      gid: 1000,
+      uid: options.uid ?? 1000,
+      gid: options.gid ?? 1000,
       mode: 0o700,
     })),
     preflight: {
@@ -642,16 +640,14 @@ export function getDockerBuildShimStagingContract(
     buildTrustPreflight: {
       executable: 'runc',
       expectedPath: DOCKER_BUILD_TRUST_WRAPPER_PATH,
-      versionArgv: ['runc', '--version'],
+      versionArgv: [DOCKER_BUILD_TRUST_WRAPPER_PATH, '--version'],
       expectedVersionPrefix: `runc version ${DOCKER_BUILD_TRUST_REAL_RUNC_VERSION}\n`,
       trustContract: {
         path: DOCKER_BUILD_TRUST_CONTRACT_PATH,
         parentDirectory: {
           path: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
-          uid: buildTrustRuntimeContract.trustContract.parentDirectory.uid,
-          gid: buildTrustRuntimeContract.trustContract.parentDirectory.gid,
           mode: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY_MODE,
-          ownerPairs: buildTrustRuntimeContract.trustContract.parentDirectory.ownerPairs,
+          requiresEffectiveReadOnly: true,
         },
         mode: DOCKER_BUILD_TRUST_CONTRACT_MODE,
         nlink: DOCKER_BUILD_TRUST_CONTRACT_NLINK,
@@ -659,10 +655,6 @@ export function getDockerBuildShimStagingContract(
       },
       realRunc: {
         path: DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
-        sha256: DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
-        size: DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
-        outerUid: DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS[0].uid,
-        outerGid: DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS[0].gid,
         mode: DOCKER_BUILD_TRUST_REAL_RUNC_MODE,
         nlink: DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
       },

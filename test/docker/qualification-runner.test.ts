@@ -48,12 +48,101 @@ describe('trusted Vitest release-suite runner', () => {
     ).resolves.toMatchObject({ testCount: 2 });
   });
 
+  it('passes explicit live-test opt-ins to the qualification executor', async () => {
+    const fixture = runnerFixture();
+    const execute = reportExecutor(fixture, report());
+    const environment = { DESKTOP_RELAY_UDS_INTEGRATION: '1' };
+    await runVitestQualificationSuite({ ...fixture.options, environment, execute });
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ environment }));
+  });
+
   it('rejects a nonzero child exit without treating its report as a pass', async () => {
     const fixture = runnerFixture();
     await expect(
       runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, report(), 1) }),
     ).rejects.toThrow(/exited nonzero/u);
   });
+
+  it('reports failed assertions instead of successful Docker build noise on stderr', async () => {
+    const fixture = runnerFixture();
+    const value = report();
+    const failed = {
+      ...value,
+      success: false,
+      testResults: [
+        {
+          ...value.testResults[0],
+          name: fixture.options.testFiles[0],
+          status: 'failed',
+          assertionResults: [
+            { status: 'failed', fullName: 'revokes the old socket', failureMessages: ['expected stream to close'] },
+          ],
+        },
+      ],
+    };
+    const execute = outputExecutor((path) => writeFileSync(path, JSON.stringify(failed)), 1, {
+      stdout: 'JSON report written',
+      stderr: 'Successfully built the Docker image',
+    });
+    const error = await runVitestQualificationSuite({ ...fixture.options, execute }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('revokes the old socket\nexpected stream to close');
+    expect((error as Error).message).toContain(join(fixture.reportDirectory, 'apple.vitest.json'));
+    expect((error as Error).message).not.toContain('Successfully built');
+  });
+
+  it('reports suite startup failures without assertion results', async () => {
+    const fixture = runnerFixture();
+    const execute = outputExecutor(
+      (path) =>
+        writeFileSync(
+          path,
+          JSON.stringify({ testResults: [{ name: 'startup.test.ts', status: 'failed', message: 'Import failed' }] }),
+        ),
+      1,
+    );
+    await expect(runVitestQualificationSuite({ ...fixture.options, execute })).rejects.toThrow(
+      'startup.test.ts\nImport failed',
+    );
+  });
+
+  it('bounds report diagnostics while retaining the full report on disk', async () => {
+    const fixture = runnerFixture();
+    const execute = outputExecutor(
+      (path) =>
+        writeFileSync(
+          path,
+          JSON.stringify({ testResults: [{ name: 'large.test.ts', status: 'failed', message: 'x'.repeat(20_000) }] }),
+        ),
+      1,
+    );
+    const error = await runVitestQualificationSuite({ ...fixture.options, execute }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('large.test.ts');
+    expect((error as Error).message.length).toBeLessThan(8500);
+    expect(existsSync(join(fixture.reportDirectory, 'apple.vitest.json'))).toBe(true);
+  });
+
+  it.each(['', '{{', JSON.stringify({ testResults: [null, { assertionResults: [null] }] })])(
+    'falls back to bounded tails of both streams when the failure report is unusable (%s)',
+    async (contents) => {
+      const fixture = runnerFixture();
+      const execute = outputExecutor((path) => writeFileSync(path, contents), 1, {
+        stdout: `discarded stdout prefix${'x'.repeat(9000)}stdout failure`,
+        stderr: `discarded stderr prefix${'y'.repeat(9000)}stderr failure`,
+      });
+      const error = await runVitestQualificationSuite({ ...fixture.options, execute }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toContain('exited nonzero (1)');
+      expect(message).toContain('stdout (tail):');
+      expect(message).toContain('stdout failure');
+      expect(message).toContain('stderr (tail):');
+      expect(message).toContain('stderr failure');
+      expect(message).not.toContain('discarded');
+      expect(message.length).toBeLessThan(8500);
+    },
+  );
 
   it.each([
     ['zero tests', report(0), /zero tests/u],
@@ -234,12 +323,16 @@ function successfulExecutor(): QualificationCommandExecutor {
   return vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
 }
 
-function outputExecutor(write: (path: string) => void, exitCode = 0): QualificationCommandExecutor {
+function outputExecutor(
+  write: (path: string) => void,
+  exitCode = 0,
+  output = { stdout: '', stderr: '' },
+): QualificationCommandExecutor {
   const executor: QualificationCommandExecutor = async (options) => {
     const outputArgument = options.args.find((argument) => argument.startsWith('--outputFile='));
     if (outputArgument === undefined) throw new Error('runner did not provide output file');
     write(outputArgument.slice('--outputFile='.length));
-    return { exitCode, stdout: '', stderr: '' };
+    return { exitCode, ...output };
   };
   return vi.fn(executor);
 }

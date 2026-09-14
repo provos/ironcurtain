@@ -10,53 +10,21 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { rootCertificates } from 'node:tls';
-import { sha256Hex } from '../hash.js';
 
 export const CONTAINER_RUNTIME_CA_CERT = '/etc/ironcurtain/ca-cert.pem';
 export const CONTAINER_RUNTIME_CA_BUNDLE = '/etc/ironcurtain/ca-bundle.pem';
-export const RUNTIME_TRUST_METADATA_FILE = 'runtime-trust.json';
-export const RUNTIME_TRUST_SCHEMA_VERSION = 1;
-export const RUNTIME_TRUST_SCHEMA = 'runtime-trust-v1';
-
-export interface RuntimeTrustMetadata {
-  readonly schemaVersion: typeof RUNTIME_TRUST_SCHEMA_VERSION;
-  readonly generation: string;
-  readonly caCertificateSha256: string;
-  readonly publicRootsSha256: string;
-  readonly bundleSha256: string;
-  readonly publicRootCount: number;
-  readonly containerCertificatePath: typeof CONTAINER_RUNTIME_CA_CERT;
-  readonly containerBundlePath: typeof CONTAINER_RUNTIME_CA_BUNDLE;
-}
-
-/** Stage immutable public trust files and return their evidence metadata. */
+/** Stage the normalized public certificate and complete public-root bundle. */
 export function stageRuntimeTrust(
   orientationDir: string,
   caCertificatePem: string,
   publicRoots: readonly string[] = rootCertificates,
-): RuntimeTrustMetadata {
+): void {
   const normalizedCa = normalizeCertificate(caCertificatePem, 'IronCurtain CA certificate');
   const normalizedRoots = [...new Set(publicRoots.map((pem) => normalizeCertificate(pem, 'public root')))].sort();
-  const rootsPem = `${normalizedRoots.join('\n')}\n`;
   const bundlePem = `${normalizedRoots.join('\n')}\n${normalizedCa}\n`;
-  const caCertificateSha256 = sha256Hex(normalizedCa);
-  const publicRootsSha256 = sha256Hex(rootsPem);
-  const bundleSha256 = sha256Hex(bundlePem);
-  const metadata: RuntimeTrustMetadata = {
-    schemaVersion: RUNTIME_TRUST_SCHEMA_VERSION,
-    generation: `${RUNTIME_TRUST_SCHEMA}:${caCertificateSha256}`,
-    caCertificateSha256,
-    publicRootsSha256,
-    bundleSha256,
-    publicRootCount: normalizedRoots.length,
-    containerCertificatePath: CONTAINER_RUNTIME_CA_CERT,
-    containerBundlePath: CONTAINER_RUNTIME_CA_BUNDLE,
-  };
 
   writePublicFileAtomic(orientationDir, basename(CONTAINER_RUNTIME_CA_CERT), `${normalizedCa}\n`);
   writePublicFileAtomic(orientationDir, basename(CONTAINER_RUNTIME_CA_BUNDLE), bundlePem);
-  writePublicFileAtomic(orientationDir, RUNTIME_TRUST_METADATA_FILE, `${JSON.stringify(metadata, null, 2)}\n`);
-  return metadata;
 }
 
 /** TLS environment shared by every Docker agent adapter. */

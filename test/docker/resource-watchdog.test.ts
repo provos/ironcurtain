@@ -56,7 +56,7 @@ describe('resource watchdog', () => {
       schedule: false,
     });
     const attestation = await watchdog.start();
-    expect(attestation.policyHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(attestation.policy).toEqual(policy);
     expect(onSoftEvidence).toHaveBeenCalledWith(sample);
     expect(onTrip).not.toHaveBeenCalled();
     now += 200;

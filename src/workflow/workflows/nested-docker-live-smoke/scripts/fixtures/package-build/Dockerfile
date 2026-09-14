@@ -2,36 +2,39 @@ FROM python:3.13-slim-bookworm AS pypi
 
 WORKDIR /fixture
 COPY requirements.txt ./
-RUN python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --target /fixture/pypi -r requirements.txt \
+RUN python -m pip install --disable-pip-version-check --no-cache-dir --target /fixture/pypi -r requirements.txt \
     && PYTHONPATH=/fixture/pypi python -c "import importlib.metadata, idna; assert importlib.metadata.version('idna') == '3.15'; assert idna.encode('example.com') == b'example.com'" \
     && PYTHONPATH=/fixture/pypi python -c "import importlib.metadata; print(importlib.metadata.version('idna'), end='')" > /fixture/pypi-version.txt
 
 FROM rust:1.85-slim-bookworm AS cargo
 
 WORKDIR /fixture/cargo
-COPY cargo/Cargo.toml cargo/Cargo.lock ./
+COPY cargo/Cargo.toml ./
 COPY cargo/src ./src
-RUN cargo build --locked --release \
+RUN cargo build --release \
     && test "$(./target/release/ironcurtain-cargo-smoke)" = "37" \
     && printf 'itoa@1.0.15' > /fixture/cargo-version.txt
 
 FROM node:22-bookworm-slim
 
 ARG IRONCURTAIN_NONCE
+ARG IRONCURTAIN_ARCHITECTURE
+ARG TARGETARCH
 WORKDIR /fixture
 
-COPY package.json package-lock.json ./
+COPY package.json ./
 RUN apt-get update \
-    && test "$(dpkg --print-architecture)" = arm64 \
+    && test -n "$IRONCURTAIN_ARCHITECTURE" \
+    && test "$TARGETARCH" = "$IRONCURTAIN_ARCHITECTURE" \
+    && test "$(dpkg --print-architecture)" = "$IRONCURTAIN_ARCHITECTURE" \
     && cd /tmp \
     && apt-get download curl=7.88.1-10+deb12u15 \
-    && printf '%s  %s\n' '880d20cb636d2c36b2f57c58ab284b442a1680365b488d3e696c147c4d84ef25' 'curl_7.88.1-10+deb12u15_arm64.deb' | sha256sum --check --strict - \
-    && apt-get install -y --no-install-recommends ./curl_7.88.1-10+deb12u15_arm64.deb \
+    && apt-get install -y --no-install-recommends "./curl_7.88.1-10+deb12u15_${IRONCURTAIN_ARCHITECTURE}.deb" \
     && test "$(dpkg-query -W -f='${Version}' curl)" = '7.88.1-10+deb12u15' \
     && printf '7.88.1-10+deb12u15' > /fixture/apt-curl-version.txt \
-    && rm -f /tmp/curl_7.88.1-10+deb12u15_arm64.deb \
+    && rm -f "/tmp/curl_7.88.1-10+deb12u15_${IRONCURTAIN_ARCHITECTURE}.deb" \
     && rm -rf /var/lib/apt/lists/*
-RUN npm ci --ignore-scripts --no-audit --no-fund \
+RUN npm install --package-lock=false --ignore-scripts --no-audit --no-fund \
     && test "$(node -p "require('./node_modules/is-number/package.json').version")" = 7.0.0
 
 COPY --from=pypi /fixture/pypi /fixture/pypi

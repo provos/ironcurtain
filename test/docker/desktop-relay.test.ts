@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { join } from 'node:path';
 import type { ExecFileFn } from '../../src/docker/docker-manager.js';
 import {
   assertDesktopRelayContainerInspect,
@@ -8,6 +11,7 @@ import {
   createDesktopRelayExposure,
   DESKTOP_RELAY_PROFILE,
   DESKTOP_RELAY_UPLINK_NETWORK,
+  FIXED_RELAY_UNIX_TARGET,
   type CreateDesktopRelayExposureOptions,
   type DesktopRelayCreateAuthority,
   type DesktopRelayConfig,
@@ -20,16 +24,79 @@ const config: DesktopRelayConfig = {
   bundleId: 'ic-bundle-test',
   containerName: 'ic-relay-test',
   isolatedNetworkName: 'ic-relay-net-test',
-  uplinkNetworkName: DESKTOP_RELAY_UPLINK_NETWORK,
   imageId: `sha256:${'a'.repeat(64)}`,
   ipv4Subnet: '172.31.44.0/24',
   ipv6Subnet: 'fd00:1c:44::/64',
   relayIpv4Address: '172.31.44.2',
   listenPort: 8443,
-  targetHost: '192.168.65.2',
-  targetPort: 9443,
+  upstream: { kind: 'tcp', host: '192.168.65.2', port: 9443 },
   requiredProxyAuthorization: REQUIRED_PROXY_AUTHORIZATION,
 };
+
+const unixConfig: DesktopRelayConfig = {
+  ...config,
+  upstream: { kind: 'unix', socketPath: '/tmp/ic-relay/policy.sock', runtimeUid: 1500, runtimeGid: 100 },
+};
+
+describe('Unix fixed relay boundary', () => {
+  it('mounts only the fixed socket, using the explicit non-root identity and no uplink or host alias', () => {
+    const args = buildDesktopRelayCreateArgs(unixConfig);
+    expect(args).toContain('type=bind,source=/tmp/ic-relay/policy.sock,target=/run/ironcurtain-upstream.sock,readonly');
+    expect(args).toContain('1500:100');
+    expect(args.slice(args.indexOf('--target-unix'), args.indexOf('--target-unix') + 2)).toEqual([
+      '--target-unix',
+      '/run/ironcurtain-upstream.sock',
+    ]);
+    for (const forbidden of ['--add-host', '--publish', '--target', 'bridge']) expect(args).not.toContain(forbidden);
+    expect(() =>
+      assertDesktopRelayContainerInspect(containerInspect({}, unixConfig), unixConfig, undefined, true),
+    ).not.toThrow();
+  });
+
+  it.each([
+    { socketPath: 'relative.sock' },
+    { socketPath: '/tmp/../run/policy.sock' },
+    { socketPath: '/tmp/socket,readonly=false' },
+    { socketPath: '/tmp/socket\n' },
+    { runtimeUid: 0 },
+    { runtimeUid: 1.5 },
+    { runtimeUid: 0xffff_ffff },
+    { runtimeGid: -1 },
+  ])('rejects invalid Unix upstream input %j', (change) => {
+    expect(() =>
+      buildDesktopRelayCreateArgs({
+        ...unixConfig,
+        upstream: {
+          kind: 'unix',
+          socketPath: '/tmp/ic-relay/policy.sock',
+          runtimeUid: 1500,
+          runtimeGid: 100,
+          ...change,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it.each(['source', 'target', 'writable', 'extra mount', 'uplink', 'user', 'host alias'])(
+    'rejects observed %s drift',
+    (change) => {
+      const inspected = containerInspect({}, unixConfig);
+      const mounts = inspected.Mounts as Record<string, unknown>[];
+      if (change === 'source') mounts[0].Source = '/tmp/another-bundle/policy.sock';
+      if (change === 'target') mounts[0].Destination = '/run/other.sock';
+      if (change === 'writable') mounts[0].RW = true;
+      if (change === 'extra mount') mounts.push({ ...mounts[0], Source: '/workspace', Destination: '/workspace' });
+      if (change === 'uplink')
+        (inspected.NetworkSettings as { Networks: Record<string, unknown> }).Networks.bridge = {
+          IPAddress: '172.30.0.7',
+        };
+      if (change === 'user') (inspected.Config as Record<string, unknown>).User = '0:0';
+      if (change === 'host alias')
+        (inspected.HostConfig as Record<string, unknown>).ExtraHosts = ['host.docker.internal:host-gateway'];
+      expect(() => assertDesktopRelayContainerInspect(inspected, unixConfig, undefined, true)).toThrow();
+    },
+  );
+});
 
 function containerInspect(
   overrides: Record<string, unknown> = {},
@@ -42,7 +109,10 @@ function containerInspect(
     Name: `/${relayConfig.containerName}`,
     Image: relayConfig.imageId,
     Config: {
-      User: '65532:65532',
+      User:
+        relayConfig.upstream.kind === 'unix'
+          ? `${relayConfig.upstream.runtimeUid}:${relayConfig.upstream.runtimeGid}`
+          : '65532:65532',
       Entrypoint: ['/ironcurtain-fixed-relay'],
       Cmd: command,
       Env: ['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'],
@@ -64,20 +134,34 @@ function containerInspect(
       NanoCpus: DESKTOP_RELAY_PROFILE.nanoCpus,
       PidsLimit: DESKTOP_RELAY_PROFILE.pidsLimit,
       NetworkMode: relayConfig.isolatedNetworkName,
-      ExtraHosts: relayConfig.targetHost === 'host.docker.internal' ? ['host.docker.internal:host-gateway'] : null,
+      ExtraHosts:
+        relayConfig.upstream.kind === 'tcp' && relayConfig.upstream.host === 'host.docker.internal'
+          ? ['host.docker.internal:host-gateway']
+          : null,
       Binds: null,
       PortBindings: {},
       LogConfig: { Type: 'local', Config: { 'max-size': '1m', 'max-file': '1', compress: 'false' } },
       Ulimits: [{ Name: 'nofile', Soft: 128, Hard: 128 }],
     },
-    Mounts: [],
+    Mounts:
+      relayConfig.upstream.kind === 'unix'
+        ? [
+            {
+              Type: 'bind',
+              Source: relayConfig.upstream.socketPath,
+              Destination: FIXED_RELAY_UNIX_TARGET,
+              RW: false,
+              Propagation: 'rprivate',
+            },
+          ]
+        : [],
     NetworkSettings: {
       Networks: {
         [relayConfig.isolatedNetworkName]: {
           IPAMConfig: { IPv4Address: relayConfig.relayIpv4Address },
           IPAddress: relayConfig.relayIpv4Address,
         },
-        [relayConfig.uplinkNetworkName]: { IPAddress: '172.30.0.7' },
+        ...(relayConfig.upstream.kind === 'tcp' ? { [DESKTOP_RELAY_UPLINK_NETWORK]: { IPAddress: '172.30.0.7' } } : {}),
       },
     },
     State: { Running: true },
@@ -133,6 +217,12 @@ describe('Desktop fixed relay profile', () => {
     ]);
   });
 
+  it('renders the same network arguments for equivalent IPv6 notation', () => {
+    expect(buildDesktopRelayNetworkCreateArgs({ ...config, ipv6Subnet: 'FD00:001c:0044:0:0:0:0:0/64' })).toEqual(
+      buildDesktopRelayNetworkCreateArgs(config),
+    );
+  });
+
   it('renders a mountless, non-root, bounded fixed-destination container', () => {
     const args = buildDesktopRelayCreateArgs(config);
     expect(args).toContain('--read-only');
@@ -141,7 +231,7 @@ describe('Desktop fixed relay profile', () => {
     expect(args).toContain('65532:65532');
     expect(args).toContain(config.imageId);
     expect(args).toContain(`${config.relayIpv4Address}:${config.listenPort}`);
-    expect(args).toContain(`${config.targetHost}:${config.targetPort}`);
+    expect(args).toContain('192.168.65.2:9443');
     expect(args).not.toContain('--publish');
     expect(args).not.toContain('--volume');
     expect(args).not.toContain('--privileged');
@@ -153,9 +243,8 @@ describe('Desktop fixed relay profile', () => {
     { ipv4Subnet: '172.31.44.1/24' },
     { relayIpv4Address: '172.31.45.2' },
     { ipv6Subnet: 'fd00:1c:44::/48' },
-    { targetHost: 'example.test' },
+    { upstream: { kind: 'tcp' as const, host: 'example.test', port: 9443 } },
     { isolatedNetworkName: 'bridge' },
-    { uplinkNetworkName: 'ic-uplink-test' },
   ])(
     'rejects non-frozen input $imageId$ipv4Subnet$relayIpv4Address$ipv6Subnet$targetHost$isolatedNetworkName',
     (change) => {
@@ -186,7 +275,10 @@ describe('Desktop fixed relay profile', () => {
   });
 
   it('allows only the frozen Docker Desktop host alias and binds it to host-gateway', () => {
-    const hostGatewayConfig = { ...config, targetHost: 'host.docker.internal' };
+    const hostGatewayConfig: DesktopRelayConfig = {
+      ...config,
+      upstream: { kind: 'tcp', host: 'host.docker.internal', port: 9443 },
+    };
     expect(buildDesktopRelayCreateArgs(hostGatewayConfig)).toContain('host.docker.internal:host-gateway');
     expect(() =>
       assertDesktopRelayContainerInspect(containerInspect({}, hostGatewayConfig), hostGatewayConfig, undefined, true),
@@ -224,8 +316,29 @@ describe('Desktop fixed relay profile', () => {
     { EnableIPv6: false },
     { Options: { 'com.docker.network.bridge.gateway_mode_ipv4': 'nat' } },
     { IPAM: { Config: [{ Subnet: config.ipv4Subnet, Gateway: '172.31.44.1' }, { Subnet: config.ipv6Subnet }] } },
+    { IPAM: { Config: [{ Subnet: config.ipv4Subnet }, { Subnet: 'fd00:1c:45::/64' }] } },
+    { IPAM: { Config: [{ Subnet: config.ipv4Subnet }, { Subnet: 'fd00:1c:44::1/64' }] } },
+    { IPAM: { Config: [{ Subnet: config.ipv4Subnet }, { Subnet: 'fd00:1c:44::/48' }] } },
+    { IPAM: { Config: [{ Subnet: config.ipv6Subnet }, { Subnet: 'FD00:001c:0044:0:0:0:0:0/64' }] } },
   ])('rejects effective network boundary drift', (change) => {
     expect(() => assertDesktopRelayNetworkInspect(networkInspect(change), config)).toThrow();
+  });
+
+  it.each([
+    ['fd00:001c:0044:0000::/64', 'fd00:1c:44::/64'],
+    ['FD00:001c:0044:0:0:0:0:0/64', 'fd00:1c:44::/64'],
+    ['fd00:1c:44::/64', 'fd00:001c:0044:0000::/64'],
+  ])('accepts equivalent IPv6 subnet notation %s observed as %s', (requested, observed) => {
+    expect(() =>
+      assertDesktopRelayNetworkInspect(
+        networkInspect({ IPAM: { Config: [{ Subnet: config.ipv4Subnet }, { Subnet: observed }] } }),
+        { ...config, ipv6Subnet: requested },
+      ),
+    ).not.toThrow();
+  });
+
+  it.each(['fd00:1c:44::1/64', 'fd00:1c:44:0:1::/64'])('rejects IPv6 subnet host bits in %s', (ipv6Subnet) => {
+    expect(() => buildDesktopRelayNetworkCreateArgs({ ...config, ipv6Subnet })).toThrow(/canonical network address/);
   });
 });
 
@@ -252,7 +365,6 @@ function exposureOptions(
     mode,
     imageId: config.imageId,
     isolatedNetworkName: config.isolatedNetworkName,
-    uplinkNetworkName: config.uplinkNetworkName,
     ipv4Subnet: config.ipv4Subnet,
     ipv6Subnet: config.ipv6Subnet,
     requiredProxyAuthorization: REQUIRED_PROXY_AUTHORIZATION,
@@ -260,8 +372,7 @@ function exposureOptions(
       containerName: config.containerName,
       relayIpv4Address: config.relayIpv4Address,
       listenPort: config.listenPort,
-      targetHost: config.targetHost,
-      targetPort: config.targetPort,
+      upstream: config.upstream,
     },
     ...(mode === 'packages'
       ? {
@@ -269,8 +380,7 @@ function exposureOptions(
             containerName: 'ic-package-relay-test',
             relayIpv4Address: '172.31.44.3',
             listenPort: 8080,
-            targetHost: 'host.docker.internal',
-            targetPort: 9080,
+            upstream: { kind: 'tcp' as const, host: 'host.docker.internal', port: 9080 },
           },
         }
       : {}),
@@ -287,7 +397,7 @@ function fakeRelayExec(
   const registryId = 'b'.repeat(64);
   const packageId = 'd'.repeat(64);
   const configsById = new Map<string, DesktopRelayConfig>([
-    [registryId, { ...config }],
+    [registryId, { ...config, upstream: options.registry.upstream }],
     ...(options.package === undefined
       ? []
       : ([
@@ -298,8 +408,7 @@ function fakeRelayExec(
               containerName: options.package.containerName,
               relayIpv4Address: options.package.relayIpv4Address,
               listenPort: options.package.listenPort,
-              targetHost: options.package.targetHost,
-              targetPort: options.package.targetPort,
+              upstream: options.package.upstream,
             },
           ],
         ] as const)),
@@ -335,6 +444,50 @@ function fakeRelayExec(
 }
 
 describe('Desktop fixed relay exposure lifecycle', () => {
+  it('adjudicates a real Unix socket source without connecting a bridge uplink', async () => {
+    const root = mkdtempSync('/tmp/ic-relay-');
+    const socketPath = join(root, 'policy.sock');
+    const server = createServer();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(socketPath, resolve);
+      });
+      const calls: string[][] = [];
+      const base = exposureOptions(createAuthority([]));
+      const options: CreateDesktopRelayExposureOptions = {
+        ...base,
+        registry: { ...base.registry, upstream: { kind: 'unix', socketPath, runtimeUid: 1500, runtimeGid: 100 } },
+      };
+      const exposure = await createDesktopRelayExposure(fakeRelayExec(calls, options), options);
+      expect(exposure.registry.containerId).toBe('b'.repeat(64));
+      expect(calls.some((args) => args[0] === 'network' && args[1] === 'connect')).toBe(false);
+      expect(calls.find((args) => args[0] === 'container' && args[1] === 'create')).toContain('--target-unix');
+    } finally {
+      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-socket source and rolls back the exact created network', async () => {
+    const root = mkdtempSync('/tmp/ic-relay-');
+    const socketPath = join(root, 'policy.sock');
+    writeFileSync(socketPath, 'not a socket');
+    try {
+      const calls: string[][] = [];
+      const base = exposureOptions(createAuthority([]));
+      const options: CreateDesktopRelayExposureOptions = {
+        ...base,
+        registry: { ...base.registry, upstream: { kind: 'unix', socketPath, runtimeUid: 1500, runtimeGid: 100 } },
+      };
+      await expect(createDesktopRelayExposure(fakeRelayExec(calls, options), options)).rejects.toThrow('not a socket');
+      expect(calls).toContainEqual(['network', 'rm', 'c'.repeat(64)]);
+      expect(calls.some((args) => args[0] === 'container' && args[1] === 'create')).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('precommits and adjudicates one shared network and one images relay before start', async () => {
     const calls: string[][] = [];
     const events: string[] = [];
@@ -374,8 +527,8 @@ describe('Desktop fixed relay exposure lifecycle', () => {
     expect(calls.filter((args) => args[0] === 'network' && args[1] === 'create')).toHaveLength(1);
     expect(calls.filter((args) => args[0] === 'container' && args[1] === 'create')).toHaveLength(2);
     expect(calls.filter((args) => args[0] === 'network' && args[1] === 'connect')).toEqual([
-      ['network', 'connect', config.uplinkNetworkName, 'b'.repeat(64)],
-      ['network', 'connect', config.uplinkNetworkName, 'd'.repeat(64)],
+      ['network', 'connect', DESKTOP_RELAY_UPLINK_NETWORK, 'b'.repeat(64)],
+      ['network', 'connect', DESKTOP_RELAY_UPLINK_NETWORK, 'd'.repeat(64)],
     ]);
     const packageCreate = calls.filter((args) => args[0] === 'container' && args[1] === 'create')[1];
     expect(packageCreate).toContain('host.docker.internal:host-gateway');

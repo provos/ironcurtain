@@ -338,11 +338,10 @@ async function createDockerSession(
       // bundle is ephemeral and never resumed, so overwriting here is safe.
       const resolvedDockerWorkload = sessionConfig.config.userConfig.dockerWorkload;
       if (infra.dockerWorkload && !options.resumeSessionId && resolvedDockerWorkload?.enabled === true) {
-        const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
         updateSessionMetadata(sessionId, {
           dockerWorkload: dockerWorkloadSessionMetadata(
             infra.dockerWorkload,
-            dockerWorkloadConfigHash(resolvedDockerWorkload),
+            resolvedDockerWorkload,
             infra.runtimeKind,
           ),
         });

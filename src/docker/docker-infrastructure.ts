@@ -1,3 +1,5 @@
+import { bindDockerEndpointExec } from './docker-endpoint.js';
+import { DOCKER_AGENT_VOLUME_SHADOW } from './docker-agent-volume-shadow.js';
 /**
  * Shared Docker session infrastructure setup.
  *
@@ -19,7 +21,10 @@ import {
   lstatSync,
   writeFileSync,
   unlinkSync,
+  renameSync,
 } from 'node:fs';
+import { validateToolchainExecutable } from './toolchain-executable.js';
+import { readHardenedFile } from '../hardened-fs.js';
 import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { quote } from 'shell-quote';
@@ -47,7 +52,13 @@ import { defaultExecFile, IRONCURTAIN_LABEL_BUNDLE } from './docker-manager.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
-import type { ContainerRuntime, DockerMount, DockerNamedVolumeMount, DockerTrustedCreateOptions } from './types.js';
+import type {
+  ContainerRuntime,
+  DockerContainerConfig,
+  DockerMount,
+  DockerNamedVolumeMount,
+  DockerTrustedCreateOptions,
+} from './types.js';
 import { createContainerRuntime, resolveRuntimeKind, type ContainerRuntimeKind } from './container-runtime.js';
 import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
@@ -77,14 +88,18 @@ import {
   CONTAINER_RUNTIME_CA_BUNDLE,
   renderAptProxyConfig,
   stageRuntimeTrust,
-  type RuntimeTrustMetadata,
 } from './runtime-trust.js';
-import { getFrozenWatchdogPolicyTemplatePath, getIronCurtainPackageRoot } from './docker-workload-paths.js';
+import {
+  getFrozenClientToolchainManifestPath,
+  getFrozenWatchdogPolicyTemplatePath,
+  getIronCurtainPackageRoot,
+} from './docker-workload-paths.js';
 import { prepareSelectedAgentArtifact, type SelectedAgentArtifact } from './selected-agent-artifact.js';
 import {
   assertAdmittedDockerWorkloadRuntimeAvailable,
   assertDockerWorkloadVariantAdmitted,
   formatDockerWorkloadStatus,
+  resolvedDockerWorkloadConfigSchema,
   type DockerWorkloadNetworkAccess,
   type ResolvedDockerWorkloadConfig,
 } from '../docker-workload/config.js';
@@ -102,6 +117,7 @@ import {
 import {
   dockerBuildShimExecFor,
   preflightDockerBuildShimAgent,
+  preflightDockerBuildTrust,
 } from '../docker-workload/docker-build-shim-preflight.js';
 import {
   APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
@@ -118,37 +134,39 @@ import {
   type AppleVmDockerWorkloadBootstrapConfig,
 } from '../docker-workload/apple-private-docker.js';
 import {
+  PRIVATE_DOCKER_HOST,
   PRIVATE_DOCKER_WORKLOAD_NETWORK,
   PRIVATE_DOCKER_WORKLOAD_NETWORK_ENV,
 } from '../docker-workload/private-docker.js';
-import type {
-  DockerDesktopSidecarHandle,
-  DockerDesktopSidecarResources,
+import {
+  DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+  type DockerDesktopSidecarHandle,
+  type DockerDesktopSidecarResources,
 } from '../docker-workload/docker-desktop-sidecar.js';
 import {
   createDesktopRelayExposure,
   DESKTOP_RELAY_HOST_GATEWAY_ALIAS,
   DESKTOP_RELAY_PROFILE,
-  DESKTOP_RELAY_UPLINK_NETWORK,
+  type FixedRelayUpstream,
   type CreateDesktopRelayExposureOptions,
   type DesktopRelayExposure,
 } from '../docker-workload/desktop-relay.js';
+import { loadClientToolchainManifest } from '../docker-workload/client-toolchain.js';
+import { resolveDockerToolchainSource, type DockerToolchainSource } from '../docker-workload/toolchain-source.js';
+import { dockerWorkloadRuntimeKind, type DockerWorkloadEnvironment } from '../docker-workload/environment.js';
+import { resolveContainerIdentity, type ContainerIdentity } from './container-identity.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import {
-  DOCKER_BUILD_PROXY_CONFIG_PATH,
-  DOCKER_BUILD_SHIM_PATH,
   DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
   DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
   DOCKER_BUILD_TRUST_CA_CERT_PATH,
   DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
   DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
   DOCKER_BUILD_TRUST_REAL_RUNC_MODE,
   DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
-  DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
-  DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
-  DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS,
   DOCKER_BUILD_TRUST_REAL_RUNC_VERSION,
-  DOCKER_BUILD_TRUST_WRAPPER_PATH,
   getDockerBuildShimStagingContract,
   type DockerBuildShimStagingContract,
   type DockerBuildTrustCanaryContract,
@@ -201,11 +219,12 @@ export function ensureSecureBundleDir(path: string): void {
 const DOCKER_BUILD_SHIM_STAGING_SUBDIR = 'package-build-runtime';
 const DOCKER_BUILD_SHIM_SOURCE_NAME = 'docker';
 const DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR = 'package-build-client';
-const DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME = 'runc';
-const DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME = 'build-trust-contract.json';
-const DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME = 'ca-cert.pem';
-const DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME = 'ca-bundle.pem';
-const DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME = 'apt.conf';
+const DOCKER_BUILD_TRUST_SOURCE_SUBDIR = 'trust';
+const DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME = 'trust/runc';
+const DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME = 'trust/build-trust-contract.json';
+const DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME = 'trust/ca-cert.pem';
+const DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME = 'trust/ca-bundle.pem';
+const DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME = 'trust/apt.conf';
 const CA_GENERATION_PATTERN = /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function writeExactStagedFile(path: string, content: string | Buffer, mode: number): void {
@@ -226,36 +245,8 @@ function writeExactStagedFile(path: string, content: string | Buffer, mode: numb
   }
 }
 
-interface StagedBuildTrustSource {
-  readonly path: string;
-  readonly destination: string;
-  readonly sha256: string;
-  readonly size: number;
-  readonly mode: '0444';
-}
-
 function readExactBuildTrustInput(path: string): Buffer {
-  const bytes = readFileSync(path);
-  const stats = lstatSync(path);
-  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o444 || stats.nlink !== 1) {
-    throw new Error(`nested-Docker build trust input ${path} failed its exact file or mode check`);
-  }
-  return bytes;
-}
-
-function stagedPublicSource(path: string, containerPath: string, destination: string): StagedBuildTrustSource {
-  const bytes = readFileSync(path);
-  const stats = lstatSync(path);
-  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o444 || stats.nlink !== 1) {
-    throw new Error(`nested-Docker build trust source ${path} failed its exact file or mode check`);
-  }
-  return {
-    path: containerPath,
-    destination,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    size: bytes.length,
-    mode: '0444' as const,
-  };
+  return readHardenedFile(path, { label: 'package build trust input', minBytes: 1, maxBytes: 2 << 20 });
 }
 
 /** Materialize the package-only build shim outside every agent-visible orientation share. */
@@ -267,179 +258,169 @@ export function stageDockerBuildShim(
     readonly caGeneration: string;
     readonly packageProxyUrl?: string;
     readonly registryProxyUrl?: string;
+    readonly architecture: 'amd64' | 'arm64';
+    readonly runtimeKind: ContainerRuntimeKind;
+    readonly uid?: number;
+    readonly gid?: number;
+    /** Required for the same-VM placement; selected from the stopped image archive. */
+    readonly protectedRealRunc?: Buffer;
   },
 ): DockerBuildShimStaging | undefined {
-  const contract = getDockerBuildShimStagingContract(networkAccess, options.packageProxyUrl, options.registryProxyUrl);
+  const contract = getDockerBuildShimStagingContract(networkAccess, options.packageProxyUrl, options.registryProxyUrl, {
+    architecture: options.architecture,
+    dockerHost: options.runtimeKind === 'docker' ? DOCKER_DESKTOP_SIDECAR_DOCKER_HOST : PRIVATE_DOCKER_HOST,
+    uid: options.uid,
+    gid: options.gid,
+  });
   if (contract === undefined) return undefined;
   if (!CA_GENERATION_PATTERN.test(options.caGeneration)) {
     throw new Error('nested-Docker package build staging requires an authenticated CA generation');
   }
-
-  const {
-    shimArtifact,
-    proxyConfigArtifact,
-    buildTrustWrapperArtifact,
-    buildTrustContractArtifact,
-    aptConfigArtifact,
-  } = contract;
-  if (
-    shimArtifact.targetPath !== DOCKER_BUILD_SHIM_PATH ||
-    shimArtifact.mode !== 0o555 ||
-    proxyConfigArtifact.targetPath !== DOCKER_BUILD_PROXY_CONFIG_PATH ||
-    proxyConfigArtifact.mode !== 0o444 ||
-    buildTrustWrapperArtifact.targetPath !== DOCKER_BUILD_TRUST_WRAPPER_PATH ||
-    buildTrustWrapperArtifact.guestMode !== 0o555 ||
-    buildTrustContractArtifact.targetPath !== DOCKER_BUILD_TRUST_CONTRACT_PATH ||
-    buildTrustContractArtifact.mode !== 0o444 ||
-    aptConfigArtifact.targetPath !== DOCKER_BUILD_TRUST_APT_CONFIG_PATH ||
-    aptConfigArtifact.mode !== 0o444
-  ) {
-    throw new Error('nested-Docker package build staging contract has an unsupported artifact layout');
+  if (options.runtimeKind !== 'docker' && options.protectedRealRunc === undefined) {
+    throw new Error('same-VM package builds require a host-staged read-only real-runc executable');
   }
-
   const stagingRoot = resolve(getBundleRuntimeRoot(bundleId), DOCKER_BUILD_SHIM_STAGING_SUBDIR);
-  ensureSecureBundleDir(stagingRoot);
-  const shimSourcePath = resolve(stagingRoot, DOCKER_BUILD_SHIM_SOURCE_NAME);
-  const proxyConfigSourceDirectory = resolve(stagingRoot, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR);
-  const buildTrustWrapperSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME);
-  const buildTrustContractSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME);
-  const caCertificateSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME);
-  const caBundleSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME);
-  const aptConfigSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME);
-  mkdirSync(proxyConfigSourceDirectory, { mode: 0o755 });
-  chmodSync(proxyConfigSourceDirectory, 0o755);
-  const configDirectoryStats = lstatSync(proxyConfigSourceDirectory);
-  if (!configDirectoryStats.isDirectory() || configDirectoryStats.isSymbolicLink()) {
-    throw new Error(`nested-Docker build proxy config source is not a real directory: ${proxyConfigSourceDirectory}`);
-  }
-
-  writeExactStagedFile(shimSourcePath, shimArtifact.content, shimArtifact.mode);
-  writeExactStagedFile(
-    resolve(proxyConfigSourceDirectory, 'config.json'),
-    proxyConfigArtifact.content,
-    proxyConfigArtifact.mode,
-  );
-  const packageWrapperPath = resolve(getIronCurtainPackageRoot(), buildTrustWrapperArtifact.packagePath);
-  const packageWrapper = readFileSync(packageWrapperPath);
-  const packageWrapperStats = lstatSync(packageWrapperPath);
-  if (
-    !packageWrapperStats.isFile() ||
-    packageWrapperStats.isSymbolicLink() ||
-    (packageWrapperStats.mode & 0o777) !== buildTrustWrapperArtifact.packageMode ||
-    packageWrapper.length !== buildTrustWrapperArtifact.size ||
-    createHash('sha256').update(packageWrapper).digest('hex') !== buildTrustWrapperArtifact.sha256
-  ) {
-    throw new Error('nested-Docker build-trust wrapper does not match its checked package manifest');
-  }
-  writeExactStagedFile(buildTrustWrapperSourcePath, packageWrapper, buildTrustWrapperArtifact.guestMode);
-
-  writeExactStagedFile(
-    caCertificateSourcePath,
-    readExactBuildTrustInput(resolve(options.orientationDir, 'ca-cert.pem')),
-    0o444,
-  );
-  writeExactStagedFile(
-    caBundleSourcePath,
-    readExactBuildTrustInput(resolve(options.orientationDir, 'ca-bundle.pem')),
-    0o444,
-  );
-  writeExactStagedFile(
-    aptConfigSourcePath,
-    renderAptProxyConfig(options.packageProxyUrl ?? APPLE_VM_PACKAGE_EGRESS_PROXY_URL),
-    aptConfigArtifact.mode,
-  );
-  const caCertificateSource = stagedPublicSource(
-    caCertificateSourcePath,
-    DOCKER_BUILD_TRUST_CA_CERT_PATH,
-    '/dev/ironcurtain/ca-cert.pem',
-  );
-  const caBundleSource = stagedPublicSource(
-    caBundleSourcePath,
-    DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-    '/dev/ironcurtain/ca-bundle.pem',
-  );
-  const aptConfigSource = stagedPublicSource(
-    aptConfigSourcePath,
-    DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
-    '/dev/ironcurtain/apt.conf',
-  );
-  const publicSources = [caCertificateSource, caBundleSource, aptConfigSource];
-  const trustContract = `${JSON.stringify(
-    {
-      schemaVersion: 1,
-      caGeneration: options.caGeneration,
-      realRunc: {
-        path: DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
-        sha256: DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
-        size: DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
-        ownerPairs: DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS,
-        nlink: DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
-        mode: DOCKER_BUILD_TRUST_REAL_RUNC_MODE.toString(8).padStart(4, '0'),
-        version: DOCKER_BUILD_TRUST_REAL_RUNC_VERSION,
-      },
-      publicSources,
-    },
-    null,
-    2,
-  )}\n`;
-  writeExactStagedFile(buildTrustContractSourcePath, trustContract, buildTrustContractArtifact.mode);
-  if (readdirSync(proxyConfigSourceDirectory).join('\n') !== 'config.json') {
-    throw new Error('nested-Docker build proxy config source must contain exactly config.json');
-  }
-  return {
-    contract,
-    artifacts: [
-      {
-        kind: 'docker-shim',
-        source: shimSourcePath,
-        target: shimArtifact.targetPath,
-        readonly: true,
-      },
-      {
-        kind: 'proxy-config',
-        source: proxyConfigSourceDirectory,
-        target: dirname(proxyConfigArtifact.targetPath),
-        readonly: true,
-      },
-      {
-        kind: 'build-trust-wrapper',
-        source: buildTrustWrapperSourcePath,
-        target: buildTrustWrapperArtifact.targetPath,
-        readonly: true,
-      },
-      {
-        kind: 'build-trust-contract',
-        source: buildTrustContractSourcePath,
-        target: buildTrustContractArtifact.targetPath,
-        readonly: true,
-      },
-      {
-        kind: 'build-trust-ca-cert',
-        source: caCertificateSourcePath,
-        target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
-        readonly: true,
-      },
-      {
-        kind: 'build-trust-ca-bundle',
-        source: caBundleSourcePath,
-        target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
-        readonly: true,
-      },
-      {
-        kind: 'build-trust-apt-config',
-        source: aptConfigSourcePath,
-        target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
-        readonly: true,
-      },
-    ],
-    buildTrustCanary: {
-      caGeneration: options.caGeneration,
-      buildTrustContractSha256: createHash('sha256').update(trustContract).digest('hex'),
-      caCertificateSha256: caCertificateSource.sha256,
-      caBundleSha256: caBundleSource.sha256,
-      aptConfigSha256: aptConfigSource.sha256,
-    },
+  ensureSecureBundleDir(dirname(stagingRoot));
+  const temporary = mkdtempSync(`${stagingRoot}.prepare-`);
+  const artifacts: DockerBuildShimStagedArtifact[] = [];
+  const stage = (
+    kind: DockerBuildShimStagedArtifact['kind'],
+    name: string,
+    target: string,
+    content: string | Buffer,
+    mode: number,
+  ): void => {
+    writeExactStagedFile(resolve(temporary, name), content, mode);
+    artifacts.push({ kind, source: resolve(stagingRoot, name), target, readonly: true });
   };
+  try {
+    // Apple Container drops a directory share when its host descendants are
+    // also mounted elsewhere. Keep the protected directory disjoint from the
+    // separately mounted CLI, client config, and real-runc sources on both backends.
+    const trustDirectory = resolve(temporary, DOCKER_BUILD_TRUST_SOURCE_SUBDIR);
+    mkdirSync(trustDirectory, { mode: 0o755 });
+    chmodSync(trustDirectory, 0o755);
+    stage(
+      'docker-shim',
+      DOCKER_BUILD_SHIM_SOURCE_NAME,
+      contract.shimArtifact.targetPath,
+      contract.shimArtifact.content,
+      contract.shimArtifact.mode,
+    );
+    const clientDirectory = resolve(temporary, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR);
+    mkdirSync(clientDirectory, { mode: 0o755 });
+    writeExactStagedFile(
+      resolve(clientDirectory, 'config.json'),
+      contract.proxyConfigArtifact.content,
+      contract.proxyConfigArtifact.mode,
+    );
+    artifacts.push({
+      kind: 'proxy-config',
+      source: resolve(stagingRoot, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR),
+      target: dirname(contract.proxyConfigArtifact.targetPath),
+      readonly: true,
+    });
+    const wrapper = readHardenedFile(
+      resolve(getIronCurtainPackageRoot(), contract.buildTrustWrapperArtifact.packagePath),
+      {
+        label: 'packaged build-trust wrapper',
+        minBytes: 64,
+        maxBytes: 32 << 20,
+      },
+    );
+    validateToolchainExecutable(wrapper, options.architecture, 'packaged build-trust wrapper');
+    stage(
+      'build-trust-wrapper',
+      DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME,
+      contract.buildTrustWrapperArtifact.targetPath,
+      wrapper,
+      contract.buildTrustWrapperArtifact.guestMode,
+    );
+    if (options.protectedRealRunc !== undefined) {
+      if (options.protectedRealRunc.length === 0 || options.protectedRealRunc.length > 128 << 20)
+        throw new Error('selected real-runc executable is outside bounds');
+      validateToolchainExecutable(options.protectedRealRunc, options.architecture, 'selected real-runc');
+      stage(
+        'build-trust-real-runc',
+        'real-runc',
+        DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
+        options.protectedRealRunc,
+        DOCKER_BUILD_TRUST_REAL_RUNC_MODE,
+      );
+    }
+    const caCertificate = readExactBuildTrustInput(resolve(options.orientationDir, 'ca-cert.pem')).toString('utf8');
+    const caBundle = readExactBuildTrustInput(resolve(options.orientationDir, 'ca-bundle.pem')).toString('utf8');
+    const aptConfig = renderAptProxyConfig(options.packageProxyUrl ?? APPLE_VM_PACKAGE_EGRESS_PROXY_URL);
+    const sources = [
+      {
+        kind: 'build-trust-ca-cert' as const,
+        name: DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME,
+        path: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+        destination: '/dev/ironcurtain/ca-cert.pem',
+        content: caCertificate,
+      },
+      {
+        kind: 'build-trust-ca-bundle' as const,
+        name: DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME,
+        path: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+        destination: '/dev/ironcurtain/ca-bundle.pem',
+        content: caBundle,
+      },
+      {
+        kind: 'build-trust-apt-config' as const,
+        name: DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME,
+        path: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+        destination: '/dev/ironcurtain/apt.conf',
+        content: aptConfig,
+      },
+    ];
+    for (const source of sources) stage(source.kind, source.name, source.path, source.content, 0o444);
+    const trustContract = `${JSON.stringify(
+      {
+        schemaVersion: 2,
+        caGeneration: options.caGeneration,
+        realRunc: {
+          path: DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
+          nlink: DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
+          mode: DOCKER_BUILD_TRUST_REAL_RUNC_MODE.toString(8).padStart(4, '0'),
+          version: DOCKER_BUILD_TRUST_REAL_RUNC_VERSION,
+          requiresEffectiveReadOnly: true,
+        },
+        publicSources: sources.map(({ path, destination, content }) => ({
+          path,
+          destination,
+          size: Buffer.byteLength(content),
+          mode: '0444',
+        })),
+      },
+      null,
+      2,
+    )}\n`;
+    stage(
+      'build-trust-contract',
+      DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME,
+      DOCKER_BUILD_TRUST_CONTRACT_PATH,
+      trustContract,
+      0o444,
+    );
+    if (existsSync(stagingRoot)) throw new Error('package build staging generation already exists');
+    chmodSync(temporary, 0o755);
+    renameSync(temporary, stagingRoot);
+    return {
+      contract,
+      artifacts,
+      buildTrustCanary: {
+        caGeneration: options.caGeneration,
+        buildTrustContract: trustContract,
+        caCertificate,
+        caBundle,
+        aptConfig,
+      },
+    };
+  } catch (error) {
+    rmSync(temporary, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 /**
@@ -526,8 +507,6 @@ export interface PreContainerInfrastructure {
   readonly docker: ContainerRuntime;
   readonly adapter: AgentAdapter;
   readonly ca: CertificateAuthority;
-  /** Hash-bound public trust material staged into the read-only orientation mount. */
-  readonly runtimeTrust: RuntimeTrustMetadata;
   readonly fakeKeys: Map<string, string>;
   readonly orientationDir: string;
   readonly systemPrompt: string;
@@ -747,26 +726,31 @@ async function createDockerDesktopRelayExposureForBundle(options: {
   readonly imageId: string;
   readonly egress: DockerWorkloadEgressCollection;
   readonly runtime: ContainerRuntime;
+  readonly identity: ContainerIdentity;
   readonly createOuterResource: CreateDesktopRelayExposureOptions['createOuterResource'];
 }): Promise<DesktopRelayExposure> {
   const authorization = options.egress.proxyAuthorization;
   if (authorization === undefined) throw new Error('Docker Desktop egress omitted its per-bundle proxy credential');
-  const registryPort = options.egress.registry.port;
-  if (registryPort === undefined) throw new Error('Docker Desktop registry authority is not listening on TCP');
-  const packagePort = options.egress.networkAccess === 'packages' ? options.egress.packages.port : undefined;
-  if (options.mode === 'packages' && packagePort === undefined) {
-    throw new Error('Docker Desktop package authority is not listening on TCP');
-  }
+  const upstream = (endpoint: DockerWorkloadEgressEndpoint<unknown>): FixedRelayUpstream =>
+    endpoint.socketPath !== undefined
+      ? {
+          kind: 'unix',
+          socketPath: endpoint.socketPath,
+          runtimeUid: options.identity.uid,
+          runtimeGid: options.identity.gid,
+        }
+      : { kind: 'tcp', host: DESKTOP_RELAY_HOST_GATEWAY_ALIAS, port: endpoint.port };
   const shortId = getBundleShortId(options.bundleId);
   const isolatedNetworkName = `ic-dw-egress-${shortId}`;
   const ipv4Subnet = await selectIronCurtainInternalSubnet(options.runtime, isolatedNetworkName);
   const addresses = dockerDesktopRelayAddresses(options.generation, ipv4Subnet);
-  return createDesktopRelayExposure(defaultExecFile, {
+  if (options.runtime.dockerEndpoint === undefined)
+    throw new Error('Nested Docker relay requires its captured endpoint');
+  return createDesktopRelayExposure(bindDockerEndpointExec(options.runtime.dockerEndpoint, defaultExecFile), {
     bundleId: `ic-${shortId}`,
     mode: options.mode,
     imageId: options.imageId,
     isolatedNetworkName,
-    uplinkNetworkName: DESKTOP_RELAY_UPLINK_NETWORK,
     ipv4Subnet: addresses.ipv4Subnet,
     ipv6Subnet: addresses.ipv6Subnet,
     requiredProxyAuthorization: authorization.header,
@@ -774,17 +758,15 @@ async function createDockerDesktopRelayExposureForBundle(options: {
       containerName: `ic-dw-registry-${shortId}`,
       relayIpv4Address: addresses.registry,
       listenPort: DESKTOP_REGISTRY_RELAY_PORT,
-      targetHost: DESKTOP_RELAY_HOST_GATEWAY_ALIAS,
-      targetPort: registryPort,
+      upstream: upstream(options.egress.registry),
     },
-    ...(options.mode === 'packages'
+    ...(options.egress.networkAccess === 'packages'
       ? {
           package: {
             containerName: `ic-dw-package-${shortId}`,
             relayIpv4Address: addresses.packages,
             listenPort: DESKTOP_PACKAGE_RELAY_PORT,
-            targetHost: DESKTOP_RELAY_HOST_GATEWAY_ALIAS,
-            targetPort: requireTcpEgressAddress({ port: packagePort }, 'package').port,
+            upstream: upstream(options.egress.packages),
           },
         }
       : {}),
@@ -809,6 +791,7 @@ export interface DockerBuildShimStagedArtifact {
     | 'docker-shim'
     | 'proxy-config'
     | 'build-trust-wrapper'
+    | 'build-trust-real-runc'
     | 'build-trust-contract'
     | 'build-trust-ca-cert'
     | 'build-trust-ca-bundle'
@@ -834,22 +817,28 @@ function dockerBuildShimMountsForConsumer(options: {
   if (options.consumer === 'private-daemon' && options.runtimeKind !== 'docker') {
     throw new Error('a separate package build-trust consumer exists only on Docker Desktop');
   }
-  return options.staging.artifacts.flatMap((artifact): DockerMount[] => {
-    const selected =
-      options.consumer === 'agent'
-        ? options.runtimeKind === 'apple-container' ||
-          artifact.kind === 'docker-shim' ||
-          artifact.kind === 'proxy-config'
-        : artifact.kind.startsWith('build-trust-');
-    if (!selected) return [];
-    if (options.consumer === 'private-daemon' && artifact.kind === 'build-trust-wrapper') {
-      if (options.privateDaemonRuncTarget === undefined) {
-        throw new Error('Docker Desktop package build-trust wrapper target is missing');
-      }
-      return [{ source: artifact.source, target: options.privateDaemonRuncTarget, readonly: true }];
+  const mounts: DockerMount[] = [];
+  const needsTrust = options.consumer === 'private-daemon' || options.runtimeKind === 'apple-container';
+  if (needsTrust) {
+    const trust = options.staging.artifacts.find(({ kind }) => kind === 'build-trust-contract');
+    if (trust === undefined) throw new Error('package build-trust staging lacks its public generation');
+    if (
+      options.privateDaemonRuncTarget !== undefined &&
+      options.privateDaemonRuncTarget !== DOCKER_BUILD_TRUST_WRAPPER_PATH
+    ) {
+      throw new Error('private daemon must use the common protected runtime wrapper path');
     }
-    return [{ source: artifact.source, target: artifact.target, readonly: true }];
-  });
+    // Mount the top-level directory itself. Individual leaves beneath a writable
+    // ancestor can be bypassed by sudo renaming that ancestor without SYS_ADMIN.
+    mounts.push({ source: dirname(trust.source), target: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY, readonly: true });
+  }
+  for (const artifact of options.staging.artifacts) {
+    const client = artifact.kind === 'docker-shim' || artifact.kind === 'proxy-config';
+    if ((options.consumer === 'agent' && client) || (needsTrust && artifact.kind === 'build-trust-real-runc')) {
+      mounts.push({ source: artifact.source, target: artifact.target, readonly: true });
+    }
+  }
+  return mounts;
 }
 
 /**
@@ -948,6 +937,8 @@ export interface CaptureSetupInput {
 }
 
 export type AgentImageResolution = {
+  readonly dockerWorkloadEnvironment?: DockerWorkloadEnvironment;
+  readonly toolchainSource?: DockerToolchainSource;
   readonly mode: 'build-if-stale' | 'selected-agent-artifact';
   readonly logicalName: string;
   readonly imageRef: string;
@@ -983,11 +974,21 @@ export async function prepareDockerInfrastructure(
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
   // read-only probe; ordinary CLI credential preflight is outside this seam.
   // Keep the feature-off path's historical profile/adapter/runtime ordering.
-  const admittedRuntimeKind = await resolveAdmittedDockerWorkloadRuntimeKind(config.userConfig);
+  const admitted = await resolveAdmittedDockerWorkload(
+    config.userConfig,
+    preparedImageResolution?.dockerWorkloadEnvironment,
+  );
+  const admittedEnvironment = admitted?.environment;
+  const admittedRuntimeKind =
+    admittedEnvironment === undefined ? undefined : dockerWorkloadRuntimeKind(admittedEnvironment);
   let dockerDesktopResources: DockerDesktopResourcePartition | undefined;
   if (admittedRuntimeKind !== undefined) {
     if (admittedRuntimeKind === 'docker') {
-      dockerDesktopResources = selectDockerDesktopResourcePartition(config.userConfig);
+      dockerDesktopResources = selectDockerDesktopResourcePartition(
+        config.userConfig,
+        undefined,
+        admittedEnvironment?.egressTransport === 'tcp',
+      );
     }
     const nestedDockerStatus = formatDockerWorkloadStatus(config.userConfig.dockerWorkload);
     if (nestedDockerStatus) logger.info(nestedDockerStatus);
@@ -1052,7 +1053,10 @@ export async function prepareDockerInfrastructure(
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(config.userConfig.containerRuntime));
-  const topology = resolveNetworkTopology(runtimeKind);
+  const topology = resolveNetworkTopology(
+    runtimeKind,
+    admittedEnvironment === undefined ? undefined : admittedEnvironment.egressTransport === 'tcp',
+  );
   const useTcp = topology !== 'uds';
 
   // Detect authentication method. Adapters with detectCredential() handle
@@ -1100,7 +1104,7 @@ export async function prepareDockerInfrastructure(
 
   const socketPath = getBundleProxySocketPath(bundleId);
 
-  const docker = createContainerRuntime(runtimeKind);
+  const docker = createContainerRuntime(runtimeKind, admittedEnvironment?.dockerEndpoint);
 
   // §8.2 step 1: admit the secure nested Docker-workload bundle — create its
   // host-owned lease before any proxy or outer resource is created. Placed
@@ -1109,7 +1113,8 @@ export async function prepareDockerInfrastructure(
   // resolved-variant guard above limits this production path to an admitted
   // backend/mode. `attestWatchdog()` (§8.2 step 3) is driven after the proxies
   // start, below.
-  const dockerWorkloadConfig = config.userConfig.dockerWorkload;
+  const dockerWorkloadConfig = admitted?.configuration;
+  const containerIdentity = resolveContainerIdentity(runtimeKind === 'docker' && !useTcp);
   let dockerWorkloadAgentImage: string | undefined;
   let dockerWorkloadImageResolution: AgentImageResolution | undefined;
   let dockerDesktopSidecarImage: string | undefined;
@@ -1117,17 +1122,23 @@ export async function prepareDockerInfrastructure(
   let admittedDockerWorkload:
     | { readonly handle: DockerWorkloadBundleHandle; readonly bootstrap?: AppleVmDockerWorkloadBootstrapConfig }
     | undefined;
-  if (dockerWorkloadConfig?.enabled === true) {
+  if (admitted !== undefined) {
+    const { environment, configuration } = admitted;
+    const toolchainSource =
+      preparedImageResolution?.toolchainSource ??
+      (await resolveDockerToolchainSource(docker, environment.architecture));
+    if (toolchainSource.architecture !== environment.architecture)
+      throw new Error('Prepared Docker toolchain platform changed');
     if (runtimeKind === 'docker') {
-      dockerDesktopSidecarImage = await ensureDockerDesktopSidecarImage(docker);
-      if (dockerWorkloadConfig.networkAccess !== 'offline') {
+      dockerDesktopSidecarImage = await ensureDockerDesktopSidecarImage(docker, toolchainSource);
+      if (configuration.networkAccess !== 'offline') {
         dockerDesktopRelayImageId = await ensureDockerDesktopRelayImage(docker);
       }
     }
     dockerWorkloadAgentImage = await adapter.getImage();
     dockerWorkloadImageResolution = preparedImageResolution;
     if (dockerWorkloadImageResolution === undefined) {
-      const built = await resolveAgentImage(dockerWorkloadAgentImage, docker);
+      const built = await resolveAgentImage(dockerWorkloadAgentImage, docker, toolchainSource);
       dockerWorkloadImageResolution =
         runtimeKind === 'apple-container'
           ? selectedAgentImageResolution(
@@ -1143,7 +1154,7 @@ export async function prepareDockerInfrastructure(
     assertPreparedImageResolution(dockerWorkloadImageResolution, dockerWorkloadAgentImage, runtimeKind);
     const artifact = dockerWorkloadImageResolution.artifact;
     admittedDockerWorkload = await admitDockerWorkloadForSession({
-      dockerWorkload: dockerWorkloadConfig,
+      dockerWorkload: configuration,
       runtime: docker,
       runtimeKind,
       bundleId,
@@ -1224,10 +1235,16 @@ export async function prepareDockerInfrastructure(
       const { createDockerWorkloadEgressListeners } = await import('./docker-workload-egress.js');
       const { PACKAGE_EGRESS_AUDIT_FILENAME } = await import('./package-egress-proxy.js');
       const { createDirectOutboundTransport } = await import('./outbound-transport.js');
-      const registrySocketPath = getBundleRegistryEgressSocketPath(bundleId);
-      const packageSocketPath = getBundlePackageEgressSocketPath(bundleId);
-      const desktopTcp = runtimeKind === 'docker';
-      const proxyAuthorization = desktopTcp ? createProxyAuthorization() : undefined;
+      const registrySocketPath =
+        runtimeKind === 'docker'
+          ? resolve(hostOnlyDir, 'registry-egress.sock')
+          : getBundleRegistryEgressSocketPath(bundleId);
+      const packageSocketPath =
+        runtimeKind === 'docker'
+          ? resolve(hostOnlyDir, 'package-egress.sock')
+          : getBundlePackageEgressSocketPath(bundleId);
+      const desktopTcp = runtimeKind === 'docker' && useTcp;
+      const proxyAuthorization = runtimeKind === 'docker' ? createProxyAuthorization() : undefined;
       const registryListen = desktopTcp ? ({ listenPort: 0 } as const) : ({ socketPath: registrySocketPath } as const);
       const packageListen = desktopTcp ? ({ listenPort: 0 } as const) : ({ socketPath: packageSocketPath } as const);
       const listeners = createDockerWorkloadEgressListeners({
@@ -1266,18 +1283,14 @@ export async function prepareDockerInfrastructure(
             };
           }
         } catch (error) {
-          const authorities =
-            listeners.networkAccess === 'packages'
-              ? [listeners.packages.listener, listeners.registry.listener]
-              : [listeners.registry.listener];
-          const cleanup = await Promise.allSettled(authorities.map((authority) => authority.stop()));
-          const failures: Error[] = cleanup.flatMap((result) =>
-            result.status === 'rejected' ? [new Error(errorMessage(result.reason), { cause: result.reason })] : [],
-          );
-          if (failures.length > 0) {
-            throw new AggregateError([error, ...failures], 'nested-Docker egress startup and rollback failed', {
-              cause: error,
-            });
+          const failures: unknown[] = [error];
+          try {
+            await stopDockerWorkloadEgress(listeners);
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          }
+          if (failures.length > 1) {
+            throw new AggregateError(failures, 'nested-Docker egress startup and rollback failed', { cause: error });
           }
           throw error;
         }
@@ -1285,9 +1298,12 @@ export async function prepareDockerInfrastructure(
         // the non-root runtime user needs each mounted socket's "other" write
         // bit. Apply modes only after every enabled listener has bound and its
         // returned path has been verified.
-        if (!desktopTcp) {
+        if (runtimeKind === 'apple-container') {
           chmodSync(registrySocketPath, 0o666);
           if (listeners.networkAccess === 'packages') chmodSync(packageSocketPath, 0o666);
+        } else if (!desktopTcp) {
+          chmodSync(registrySocketPath, 0o600);
+          if (listeners.networkAccess === 'packages') chmodSync(packageSocketPath, 0o600);
         }
       }
     }
@@ -1506,7 +1522,7 @@ export async function prepareDockerInfrastructure(
     // read-only orientation directory.
     const orientationDir = resolve(bundleDir, 'orientation');
     mkdirSync(orientationDir, { recursive: true });
-    const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);
+    stageRuntimeTrust(orientationDir, ca.certPem);
 
     if (
       runtimeKind === 'docker' &&
@@ -1524,27 +1540,40 @@ export async function prepareDockerInfrastructure(
         imageId: dockerDesktopRelayImageId,
         egress: dockerWorkloadEgress,
         runtime: docker,
+        identity: containerIdentity,
         createOuterResource: (spec, create) => ledgerOuterResourceCreate(dockerWorkload, spec, create),
       });
     }
 
-    if (dockerWorkloadConfig?.enabled === true) {
+    if (admitted !== undefined) {
+      const { environment, configuration } = admitted;
       const packageProxyUrl =
         runtimeKind === 'docker' ? dockerDesktopRelayExposure?.package?.proxyUrl : APPLE_VM_PACKAGE_EGRESS_PROXY_URL;
       const registryProxyUrl =
         runtimeKind === 'docker' ? dockerDesktopRelayExposure?.registry.proxyUrl : APPLE_VM_REGISTRY_EGRESS_PROXY_URL;
-      dockerBuildShim = stageDockerBuildShim(bundleId, dockerWorkloadConfig.networkAccess, {
+      let protectedRealRunc: Buffer | undefined;
+      if (runtimeKind === 'apple-container' && configuration.networkAccess === 'packages') {
+        const artifact = dockerWorkloadImageResolution?.artifact;
+        if (artifact === undefined) throw new Error('Apple package builds require the selected image artifact');
+        const { readSelectedImageRealRunc } = await import('./selected-image-file.js');
+        protectedRealRunc = await readSelectedImageRealRunc(artifact);
+      }
+      dockerBuildShim = stageDockerBuildShim(bundleId, configuration.networkAccess, {
+        ...(protectedRealRunc === undefined ? {} : { protectedRealRunc }),
         orientationDir,
         caGeneration: ca.generation,
+        runtimeKind,
+        architecture: environment.architecture,
+        ...containerIdentity,
         ...(packageProxyUrl === undefined ? {} : { packageProxyUrl }),
         ...(registryProxyUrl === undefined ? {} : { registryProxyUrl }),
       });
-      if ((dockerWorkloadConfig.networkAccess === 'packages') !== (dockerBuildShim !== undefined)) {
+      if ((configuration.networkAccess === 'packages') !== (dockerBuildShim !== undefined)) {
         throw new Error('nested-Docker package build staging did not match the resolved network access');
       }
     }
 
-    if (runtimeKind === 'docker' && dockerWorkload !== undefined) {
+    if (runtimeKind === 'docker' && dockerWorkload !== undefined && admitted !== undefined) {
       if (
         dockerDesktopSidecarImage === undefined ||
         dockerDesktopResources === undefined ||
@@ -1554,7 +1583,7 @@ export async function prepareDockerInfrastructure(
           'Docker Desktop nested-Docker preparation is missing its daemon image, immutable agent image, or resources',
         );
       }
-      const { DOCKER_DESKTOP_RUNC_SHIM_PATH, requireDockerDesktopSidecarRuntime, startDockerDesktopSidecar } =
+      const { requireDockerDesktopSidecarRuntime, startDockerDesktopSidecar } =
         await import('../docker-workload/docker-desktop-sidecar.js');
       const sidecarEgress =
         dockerDesktopRelayExposure === undefined
@@ -1575,13 +1604,19 @@ export async function prepareDockerInfrastructure(
                       staging: dockerBuildShim,
                       runtimeKind,
                       consumer: 'private-daemon',
-                      privateDaemonRuncTarget: DOCKER_DESKTOP_RUNC_SHIM_PATH,
+                      privateDaemonRuncTarget: DOCKER_BUILD_TRUST_WRAPPER_PATH,
                     }),
                   }),
             };
       const sidecar = await startDockerDesktopSidecar({
         runtime: requireDockerDesktopSidecarRuntime(docker),
         sidecarImage: dockerDesktopSidecarImage,
+        identity: containerIdentity,
+        hostConfigDirectory: resolve(hostOnlyDir, 'daemon'),
+        clientManifest: loadClientToolchainManifest(
+          getFrozenClientToolchainManifestPath(),
+          admitted.environment.architecture,
+        ),
         outerAgentImageId: dockerWorkloadImageResolution.immutableImageId,
         workspaceRoot: workspaceDir,
         resources: dockerDesktopResources.sidecar,
@@ -1589,6 +1624,17 @@ export async function prepareDockerInfrastructure(
         createOuterResource: (spec, create) => ledgerOuterResourceCreate(dockerWorkload, spec, create),
         activation: dockerWorkload,
       });
+      if (dockerBuildShim !== undefined) {
+        if (dockerBuildShim.contract.admittedDockerHost !== sidecar.dockerHost) {
+          throw new Error('package build shim endpoint differs from the admitted private daemon');
+        }
+        await preflightDockerBuildTrust(
+          dockerBuildShimExecFor(docker, sidecar.containerId),
+          dockerBuildShim.contract,
+          dockerBuildShim.buildTrustCanary,
+          DOCKER_BUILD_TRUST_WRAPPER_PATH,
+        );
+      }
       dockerDesktopAgentAccess = {
         dockerHost: sidecar.dockerHost,
         networkName: sidecar.network.name,
@@ -1703,7 +1749,6 @@ export async function prepareDockerInfrastructure(
       docker,
       adapter,
       ca,
-      runtimeTrust,
       fakeKeys,
       orientationDir,
       systemPrompt,
@@ -2313,19 +2358,19 @@ async function assertAppleStoppedCreateImage(
 /**
  * Build the persisted `SessionMetadata.dockerWorkload` tuple for an admitted
  * bundle (§8.4 audit surface). Pure; the caller supplies the resolved
- * capability config hash and the effective backend so the persisted record is
+ * capability configuration and the effective backend so the persisted record is
  * self-describing for post-hoc inspection.
  */
 export function dockerWorkloadSessionMetadata(
   handle: DockerWorkloadBundleHandle,
-  configHash: string,
+  configuration: ResolvedDockerWorkloadConfig,
   backend: ContainerRuntimeKind,
 ): NonNullable<SessionMetadata['dockerWorkload']> {
   return {
     leaseId: handle.leaseId,
     generation: handle.generation,
-    configHash,
-    watchdogPolicySha256: handle.loadedPolicy.sha256,
+    configuration: resolvedDockerWorkloadConfigSchema.parse(configuration),
+    watchdogPolicy: handle.loadedPolicy.policy,
     backend,
   };
 }
@@ -2359,7 +2404,8 @@ export function selectOuterContainerResources(
  */
 export function selectDockerDesktopResourcePartition(
   userConfig: Pick<ResolvedUserConfig, 'dockerResources' | 'dockerWorkload'>,
-  hostResources?: HostResources,
+  hostResources: HostResources | undefined,
+  tcpTransport: boolean,
 ): DockerDesktopResourcePartition {
   if (userConfig.dockerWorkload?.enabled !== true) {
     throw new Error('Docker Desktop resource partition requires an enabled nested-Docker workload');
@@ -2370,20 +2416,23 @@ export function selectDockerDesktopResourcePartition(
   if (memoryMb === undefined || cpus === undefined) {
     throw new Error('Docker Desktop nested Docker requires finite aggregate memory and CPU limits');
   }
+  const transport = tcpTransport
+    ? {
+        memoryMb: DOCKER_DESKTOP_TRANSPORT_MEMORY_MB,
+        cpus: DOCKER_DESKTOP_TRANSPORT_CPUS,
+        pidsLimit: DOCKER_DESKTOP_TRANSPORT_PIDS,
+      }
+    : { memoryMb: 0, cpus: 0, pidsLimit: 0 };
   const networkAccess = userConfig.dockerWorkload.networkAccess;
   const relayCount = networkAccess === 'packages' ? 2 : networkAccess === 'images' ? 1 : 0;
   const relayMemoryMb = (relayCount * DESKTOP_RELAY_PROFILE.memoryBytes) / (1024 * 1024);
   const relayCpus = (relayCount * DESKTOP_RELAY_PROFILE.nanoCpus) / 1_000_000_000;
   const relayPids = relayCount * DESKTOP_RELAY_PROFILE.pidsLimit;
   const minimumMemoryMb =
-    DOCKER_DESKTOP_SIDECAR_MEMORY_MB +
-    DOCKER_DESKTOP_TRANSPORT_MEMORY_MB +
-    DOCKER_DESKTOP_MIN_AGENT_MEMORY_MB +
-    relayMemoryMb;
-  const minimumCpus =
-    DOCKER_DESKTOP_SIDECAR_CPUS + DOCKER_DESKTOP_TRANSPORT_CPUS + DOCKER_DESKTOP_MIN_AGENT_CPUS + relayCpus;
+    DOCKER_DESKTOP_SIDECAR_MEMORY_MB + transport.memoryMb + DOCKER_DESKTOP_MIN_AGENT_MEMORY_MB + relayMemoryMb;
+  const minimumCpus = DOCKER_DESKTOP_SIDECAR_CPUS + transport.cpus + DOCKER_DESKTOP_MIN_AGENT_CPUS + relayCpus;
   const totalPids = userConfig.dockerWorkload.resources.pids.desired;
-  const sidecarPids = totalPids - DOCKER_DESKTOP_AGENT_PIDS - DOCKER_DESKTOP_TRANSPORT_PIDS - relayPids;
+  const sidecarPids = totalPids - DOCKER_DESKTOP_AGENT_PIDS - transport.pidsLimit - relayPids;
   if (sidecarPids < 16) {
     throw new Error('Docker Desktop nested Docker PID envelope cannot cover every outer container');
   }
@@ -2400,13 +2449,13 @@ export function selectDockerDesktopResourcePartition(
       pidsLimit: sidecarPids,
     },
     transport: {
-      memoryMb: DOCKER_DESKTOP_TRANSPORT_MEMORY_MB,
-      cpus: DOCKER_DESKTOP_TRANSPORT_CPUS,
-      pidsLimit: DOCKER_DESKTOP_TRANSPORT_PIDS,
+      memoryMb: transport.memoryMb,
+      cpus: transport.cpus,
+      pidsLimit: transport.pidsLimit,
     },
     agent: {
-      memoryMb: memoryMb - DOCKER_DESKTOP_SIDECAR_MEMORY_MB - DOCKER_DESKTOP_TRANSPORT_MEMORY_MB - relayMemoryMb,
-      cpus: cpus - DOCKER_DESKTOP_SIDECAR_CPUS - DOCKER_DESKTOP_TRANSPORT_CPUS - relayCpus,
+      memoryMb: memoryMb - DOCKER_DESKTOP_SIDECAR_MEMORY_MB - transport.memoryMb - relayMemoryMb,
+      cpus: cpus - DOCKER_DESKTOP_SIDECAR_CPUS - transport.cpus - relayCpus,
       pidsLimit: DOCKER_DESKTOP_AGENT_PIDS,
     },
   };
@@ -2424,14 +2473,17 @@ export function buildDockerDesktopTransportCreateLimits(partition: DockerDesktop
   };
 }
 
-/** Merge the Desktop API-volume capability and agent PID share in one place. */
-export function buildNestedDockerAgentTrustedCreateOptions(
+/** Merge Docker-runtime volume suppression, any Desktop API capability, and the agent PID share. */
+export function buildDockerAgentTrustedCreateOptions(
+  runtimeKind: ContainerRuntimeKind,
   namedVolumeMounts: readonly DockerNamedVolumeMount[],
   partition: DockerDesktopResourcePartition | undefined,
 ): DockerTrustedCreateOptions | undefined {
-  if (namedVolumeMounts.length === 0 && partition === undefined) return undefined;
+  const shadowsInheritedDockerVolume = runtimeKind === 'docker';
+  if (!shadowsInheritedDockerVolume && namedVolumeMounts.length === 0 && partition === undefined) return undefined;
   return {
     ...(namedVolumeMounts.length === 0 ? {} : { namedVolumeMounts }),
+    ...(shadowsInheritedDockerVolume ? { tmpfs: [DOCKER_AGENT_VOLUME_SHADOW.specification] } : {}),
     ...(partition === undefined ? {} : { pidsLimit: partition.agent.pidsLimit }),
   };
 }
@@ -2460,20 +2512,21 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
 }> {
   const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
-  const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
   assertNestedDaemonBackendImplemented(options.runtimeKind);
   if ((options.runtimeKind === 'apple-container') !== (options.artifact !== undefined)) {
     throw new Error('selected-agent archive staging is required only for the Apple same-VM nested daemon');
   }
-  const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
   const packageRoot = getIronCurtainPackageRoot();
   const handle = await admitDockerWorkloadBundle({
     runtime: options.runtime,
     runtimeKind: options.runtimeKind,
-    runtimeForKind: (kind) => (kind === options.runtimeKind ? options.runtime : createContainerRuntime(kind)),
+    runtimeForKind: (kind, endpoint) =>
+      kind === options.runtimeKind && (endpoint === undefined || endpoint.host === options.runtime.dockerEndpoint?.host)
+        ? options.runtime
+        : createContainerRuntime(kind, endpoint),
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
-    configHash,
+    configuration: options.dockerWorkload,
     watchdogPolicyTemplatePath: getFrozenWatchdogPolicyTemplatePath(),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
@@ -2523,8 +2576,7 @@ export function buildAgentUidRemap(skipRemap: boolean): {
   readonly env: Record<string, string>;
 } {
   if (skipRemap) return { user: undefined, env: {} };
-  const uid = process.getuid?.() ?? 1000;
-  const gid = process.getgid?.() ?? 1000;
+  const { uid, gid } = resolveContainerIdentity(true);
   return {
     user: '0:0',
     env: {
@@ -2736,7 +2788,14 @@ export async function activateNestedDockerWorkload(options: {
 }
 
 /** Stop every constructed authority even when one listener reports a failure. */
-export async function stopDockerWorkloadEgress(egress: DockerWorkloadEgressCollection | undefined): Promise<void> {
+export async function stopDockerWorkloadEgress(
+  egress:
+    | DockerWorkloadEgressSet<
+        { readonly listener: { stop(): Promise<void> } },
+        { readonly listener: { stop(): Promise<void> } }
+      >
+    | undefined,
+): Promise<void> {
   if (egress === undefined) return;
   const endpoints = egress.networkAccess === 'packages' ? [egress.packages, egress.registry] : [egress.registry];
   const results = await Promise.allSettled(
@@ -2767,6 +2826,44 @@ export interface ContainerResources {
   readonly internalNetwork?: string;
 }
 
+/** Shared agent identity, sudo capabilities, limits and nested-Docker wiring for batch and PTY. */
+export function buildAgentContainerConfig(
+  core: Pick<
+    PreContainerInfrastructure,
+    | 'runtimeKind'
+    | 'useTcp'
+    | 'dockerWorkload'
+    | 'dockerWorkloadBootstrap'
+    | 'dockerDesktopAgentAccess'
+    | 'dockerDesktopResources'
+  >,
+  userConfig: Pick<ResolvedUserConfig, 'dockerResources' | 'dockerWorkload'>,
+  config: DockerContainerConfig,
+): DockerContainerConfig {
+  const wiring = resolveNestedDockerAgentWiring(core);
+  const uidRemap = buildAgentUidRemap(core.runtimeKind === 'apple-container' || core.useTcp);
+  const resources = core.dockerDesktopResources?.agent ?? selectOuterContainerResources(userConfig);
+  // UDS sessions need no ordinary transport network. Online nested Docker
+  // creates the agent directly on its isolated relay network; Docker cannot
+  // attach another network to a container initially created on `none`.
+  const egressNetwork = !core.useTcp ? core.dockerDesktopAgentAccess?.outerEgressNetworkName : undefined;
+  return {
+    ...config,
+    network: egressNetwork ?? config.network,
+    extraHosts: egressNetwork === undefined ? config.extraHosts : [],
+    env: { ...config.env, ...wiring.env, ...uidRemap.env },
+    user: uidRemap.user,
+    resources: { memoryMb: resources.memoryMb, cpus: resources.cpus },
+    capAdd: ['SETUID', 'SETGID', 'CHOWN', 'FOWNER', 'DAC_OVERRIDE', 'AUDIT_WRITE'],
+    fullyVisibleProc: wiring.appleNestedDaemon !== undefined,
+    trustedCreateOptions: buildDockerAgentTrustedCreateOptions(
+      core.runtimeKind,
+      wiring.namedVolumeMounts,
+      core.dockerDesktopResources,
+    ),
+  };
+}
+
 /**
  * Give a networked Docker Desktop agent access to the fixed registry/package
  * relays before workload activation. The agent remains primarily attached to
@@ -2775,11 +2872,11 @@ export interface ContainerResources {
  * cleanup ownership.
  */
 export async function attachDockerDesktopAgentEgressNetwork(
-  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'docker' | 'dockerDesktopAgentAccess'>,
+  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'useTcp' | 'docker' | 'dockerDesktopAgentAccess'>,
   containerId: string,
 ): Promise<void> {
   const egressNetworkName = core.dockerDesktopAgentAccess?.outerEgressNetworkName;
-  if (egressNetworkName === undefined) return;
+  if (egressNetworkName === undefined || !core.useTcp) return;
   if (core.runtimeKind !== 'docker') {
     throw new Error('Docker Desktop outer egress network was supplied to a non-Docker runtime');
   }
@@ -3083,66 +3180,34 @@ async function createSessionContainersAttempt(
       });
     }
 
-    // Linux-only UID-remap wiring (issue #232). On Linux, run the
-    // container as root and pass the host UID/GID via env so the
-    // entrypoint can renumber codespace before dropping privileges.
-    // On macOS (useTcp), VirtioFS translates UIDs transparently —
-    // passing `--user 0:0` would actually break that translation,
-    // so we leave the container running as the baked codespace user
-    // and skip the env vars entirely.
-    const uidRemap = buildAgentUidRemap(core.runtimeKind === 'apple-container' || core.useTcp);
-
-    // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
-    // are clamped to fit the host. `null` in either field is preserved as
-    // "no flag emitted" (see clampDockerResources docs).
-    const containerResources = core.dockerDesktopResources?.agent ?? selectOuterContainerResources(config.userConfig);
-
     // Build the agent container create args for a given name + resolved labels.
     // `labels` is the base bundle labels in the ordinary case and the base merged
     // with the generation ownership label when the create is ledgered — the merge
     // itself lives in createLedgeredAgentContainer, so this closure just forwards.
     const createMainContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
-      core.docker.create({
-        image: mainImage,
-        name,
-        network: network ?? 'none',
-        mounts,
-        env: {
-          ...env,
-          // Do NOT override PATH here. Docker `-e PATH=...` REPLACES the image's
-          // PATH (it does not append), which would discard the base image's real
-          // PATH — including the NVM directory where `node`/`npm` live on the x86
-          // devcontainer base. Bare-`node` workflow helpers would then fail to
-          // resolve. The workflow venv bin is instead prepended to the live
-          // `$PATH` at exec time (see buildWorkflowExecCommand), which is
-          // base-image-agnostic and preserves the image's own PATH.
-          ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
-          ...uidRemap.env,
-        },
-        user: uidRemap.user,
-        command: ['sleep', 'infinity'],
-        ...bundleLabels,
-        labels,
-        resources: { memoryMb: containerResources.memoryMb, cpus: containerResources.cpus },
-        extraHosts,
-        capAdd: [
-          'SETUID', // sudo setuid
-          'SETGID', // sudo setgid
-          'CHOWN', // apt-get chown on installed files
-          'FOWNER', // apt-get set permissions on files it doesn't own
-          'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
-          'AUDIT_WRITE', // sudo audit logging
-        ],
-        // Only an admitted nested-Docker bundle opts out of the OCI
-        // masked/read-only path sets; a fully visible /proc is what lets the
-        // nested daemon boot AND lets its runc mount procfs for inner
-        // containers.
-        fullyVisibleProc: nestedDaemon !== undefined,
-        trustedCreateOptions: buildNestedDockerAgentTrustedCreateOptions(
-          nestedDockerWiring.namedVolumeMounts,
-          core.dockerDesktopResources,
-        ),
-      });
+      core.docker.create(
+        buildAgentContainerConfig(core, config.userConfig, {
+          image: mainImage,
+          name,
+          network: network ?? 'none',
+          mounts,
+          env: {
+            ...env,
+            // Do NOT override PATH here. Docker `-e PATH=...` REPLACES the image's
+            // PATH (it does not append), which would discard the base image's real
+            // PATH — including the NVM directory where `node`/`npm` live on the x86
+            // devcontainer base. Bare-`node` workflow helpers would then fail to
+            // resolve. The workflow venv bin is instead prepended to the live
+            // `$PATH` at exec time (see buildWorkflowExecCommand), which is
+            // base-image-agnostic and preserves the image's own PATH.
+            ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
+          },
+          command: ['sleep', 'infinity'],
+          ...bundleLabels,
+          labels,
+          extraHosts,
+        }),
+      );
 
     // §8.2 step 1: ledger the agent container before create when a
     // Docker-workload bundle is admitted; ordinary sessions keep the
@@ -3536,7 +3601,10 @@ export async function ensureDockerImage(
   agentId: AgentId,
   userConfig: ResolvedUserConfig,
 ): Promise<AgentImageResolution> {
-  const admittedRuntimeKind = await resolveAdmittedDockerWorkloadRuntimeKind(userConfig);
+  const admitted = await resolveAdmittedDockerWorkload(userConfig);
+  const admittedEnvironment = admitted?.environment;
+  const admittedRuntimeKind =
+    admittedEnvironment === undefined ? undefined : dockerWorkloadRuntimeKind(admittedEnvironment);
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
 
@@ -3544,15 +3612,22 @@ export async function ensureDockerImage(
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(userConfig.containerRuntime));
-  const docker = createContainerRuntime(runtimeKind);
-  if (userConfig.dockerWorkload?.enabled === true && runtimeKind === 'docker') {
-    selectDockerDesktopResourcePartition(userConfig);
-    await ensureDockerDesktopSidecarImage(docker);
-    if (userConfig.dockerWorkload.networkAccess !== 'offline') {
-      await ensureDockerDesktopRelayImage(docker);
+  const docker = createContainerRuntime(runtimeKind, admittedEnvironment?.dockerEndpoint);
+  let toolchainSource: DockerToolchainSource | undefined;
+  if (admitted !== undefined) {
+    toolchainSource = await resolveDockerToolchainSource(docker, admitted.environment.architecture);
+    if (runtimeKind === 'docker') {
+      selectDockerDesktopResourcePartition(userConfig, undefined, admitted.environment.egressTransport === 'tcp');
+      await ensureDockerDesktopSidecarImage(docker, toolchainSource);
+      if (admitted.configuration.networkAccess !== 'offline') {
+        await ensureDockerDesktopRelayImage(docker);
+      }
     }
   }
-  const resolved = await resolveAgentImage(image, docker);
+  const resolved: AgentImageResolution = {
+    ...(await resolveAgentImage(image, docker, toolchainSource)),
+    ...(admittedEnvironment === undefined ? {} : { dockerWorkloadEnvironment: admittedEnvironment }),
+  };
   if (userConfig.dockerWorkload?.enabled === true && runtimeKind === 'apple-container') {
     const artifact = await prepareSelectedAgentArtifact({
       runtime: docker,
@@ -3565,16 +3640,28 @@ export async function ensureDockerImage(
   return resolved;
 }
 
-async function resolveAdmittedDockerWorkloadRuntimeKind(
+async function resolveAdmittedDockerWorkload(
   userConfig: Pick<ResolvedUserConfig, 'containerRuntime' | 'dockerWorkload'>,
-): Promise<ContainerRuntimeKind | undefined> {
+  preparedEnvironment?: AgentImageResolution['dockerWorkloadEnvironment'],
+): Promise<
+  | {
+      readonly configuration: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>;
+      readonly environment: DockerWorkloadEnvironment;
+    }
+  | undefined
+> {
   const workload = userConfig.dockerWorkload;
   if (workload?.enabled !== true) return undefined;
 
   const runtimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
   assertDockerWorkloadVariantAdmitted(workload, runtimeKind);
-  await assertAdmittedDockerWorkloadRuntimeAvailable(runtimeKind);
-  return runtimeKind;
+  if (preparedEnvironment !== undefined) {
+    if (dockerWorkloadRuntimeKind(preparedEnvironment) !== runtimeKind)
+      throw new Error('Prepared nested-Docker runtime changed');
+    return { configuration: workload, environment: preparedEnvironment };
+  }
+  const environment = await assertAdmittedDockerWorkloadRuntimeAvailable(runtimeKind);
+  return { configuration: workload, environment };
 }
 
 function selectedAgentImageResolution(
@@ -3583,6 +3670,10 @@ function selectedAgentImageResolution(
 ): AgentImageResolution {
   return {
     mode: 'selected-agent-artifact',
+    ...(built.dockerWorkloadEnvironment === undefined
+      ? {}
+      : { dockerWorkloadEnvironment: built.dockerWorkloadEnvironment }),
+    ...(built.toolchainSource === undefined ? {} : { toolchainSource: built.toolchainSource }),
     logicalName: built.logicalName,
     imageRef: built.logicalName,
     buildHash: built.buildHash,
@@ -3653,6 +3744,7 @@ async function buildImageFromCleanContext(
   dockerDir: string,
   dockerfile: string,
   labels: Record<string, string>,
+  buildArgs?: Readonly<Record<string, string>>,
 ): Promise<void> {
   const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-build-'));
   try {
@@ -3661,7 +3753,7 @@ async function buildImageFromCleanContext(
       if (!entry.isFile()) throw new Error(`unsupported Docker build-context entry: ${entry.name}`);
       copyFileSync(resolve(dockerDir, entry.name), resolve(tmpContext, entry.name));
     }
-    await docker.buildImage(image, resolve(tmpContext, dockerfile), tmpContext, labels);
+    await docker.buildImage(image, resolve(tmpContext, dockerfile), tmpContext, labels, buildArgs);
   } finally {
     rmSync(tmpContext, { recursive: true, force: true });
   }
@@ -3708,6 +3800,7 @@ async function logResolvedAgentVersion(
 }
 
 interface AgentImageBuildSpec {
+  readonly toolchainSource?: DockerToolchainSource;
   readonly dockerDir: string;
   readonly baseDockerfile: string;
   readonly baseImage: string;
@@ -3717,27 +3810,48 @@ interface AgentImageBuildSpec {
 }
 
 /** Resolve an agent image through exactly one trusted image mode. */
-export async function resolveAgentImage(image: string, docker: ContainerRuntime): Promise<AgentImageResolution> {
-  const spec = computeAgentImageBuildSpec(image);
+export async function resolveAgentImage(
+  image: string,
+  docker: ContainerRuntime,
+  toolchainSource?: DockerToolchainSource,
+): Promise<AgentImageResolution> {
+  const spec = computeAgentImageBuildSpec(image, toolchainSource);
   const buildHash = await ensureImageFromSpec(image, docker, spec);
-  return { mode: 'build-if-stale', logicalName: image, imageRef: image, buildHash };
+  return {
+    mode: 'build-if-stale',
+    logicalName: image,
+    imageRef: image,
+    buildHash,
+    ...(toolchainSource === undefined ? {} : { toolchainSource }),
+  };
 }
 
 /** Resolve the purpose-built Desktop daemon image through the normal hash-label cache. */
-export async function ensureDockerDesktopSidecarImage(runtime: ContainerRuntime): Promise<string> {
+export async function ensureDockerDesktopSidecarImage(
+  runtime: ContainerRuntime,
+  toolchainSource: DockerToolchainSource,
+): Promise<string> {
   const contextDirectory = resolve(getIronCurtainPackageRoot(), 'docker', 'nested-daemon');
   const dockerfilePath = resolve(contextDirectory, 'Dockerfile');
-  const runtimeShimPath = resolve(contextDirectory, 'runtime-shim', 'main.go');
-  const runtimeShimHash = createHash('sha256').update(readFileSync(runtimeShimPath)).digest('hex');
-  const buildHash = computeDockerBuildHash(contextDirectory, ['Dockerfile'], runtimeShimHash);
+  const buildHash = computeDockerBuildHash(
+    contextDirectory,
+    ['Dockerfile', 'entrypoint.sh', 'runtime-shim/main.go'],
+    JSON.stringify(toolchainSource),
+  );
   if (!(await isImageStale(DOCKER_DESKTOP_SIDECAR_IMAGE, runtime, buildHash))) {
     return DOCKER_DESKTOP_SIDECAR_IMAGE;
   }
 
   logger.info('Building Docker Desktop nested-daemon image...');
-  await runtime.buildImage(DOCKER_DESKTOP_SIDECAR_IMAGE, dockerfilePath, contextDirectory, {
-    'ironcurtain.build-hash': buildHash,
-  });
+  await runtime.buildImage(
+    DOCKER_DESKTOP_SIDECAR_IMAGE,
+    dockerfilePath,
+    contextDirectory,
+    {
+      'ironcurtain.build-hash': buildHash,
+    },
+    { IRONCURTAIN_DOCKER_SOURCE: toolchainSource.reference },
+  );
   logger.info('Docker Desktop nested-daemon image built successfully');
   return DOCKER_DESKTOP_SIDECAR_IMAGE;
 }
@@ -3766,20 +3880,24 @@ export async function ensureDockerDesktopRelayImage(runtime: ContainerRuntime): 
   return inspected.id;
 }
 
-function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
+function computeAgentImageBuildSpec(image: string, toolchainSource?: DockerToolchainSource): AgentImageBuildSpec {
   const packageRoot = getIronCurtainPackageRoot();
   const dockerDir = resolve(packageRoot, 'docker');
 
   // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile
   const baseDockerfile =
-    arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
+    (toolchainSource?.architecture ?? arch()) === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
       ? 'Dockerfile.base.arm64'
       : 'Dockerfile.base';
 
   // Agent images are CA-neutral. Session-specific public trust is staged in
   // the read-only orientation mount by stageRuntimeTrust().
   const baseImage = 'ironcurtain-base:latest';
-  const baseBuildHash = computeDockerBuildHash(dockerDir, [baseDockerfile]);
+  const baseBuildHash = computeDockerBuildHash(
+    dockerDir,
+    [baseDockerfile],
+    toolchainSource === undefined ? undefined : JSON.stringify(toolchainSource),
+  );
 
   const agentName = image.replace(CONTAINER_NAME_PREFIX, '').replace(':latest', '');
   const agentDockerfile = `Dockerfile.${agentName}`;
@@ -3788,7 +3906,7 @@ function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
     throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
   }
   const agentBuildHash = computeDockerBuildHash(dockerDir, [agentDockerfile], baseBuildHash);
-  return { dockerDir, baseDockerfile, baseImage, baseBuildHash, agentDockerfile, agentBuildHash };
+  return { dockerDir, baseDockerfile, baseImage, baseBuildHash, agentDockerfile, agentBuildHash, toolchainSource };
 }
 
 /** Exact build hash recorded on the current checked-in agent image. */
@@ -3806,7 +3924,14 @@ async function ensureImageFromSpec(
   // selected OCI archive already carries its base layers).
   if (!(await isImageStale(image, docker, spec.agentBuildHash))) return spec.agentBuildHash;
 
-  await ensureBaseImage(spec.baseImage, docker, spec.dockerDir, spec.baseDockerfile, spec.baseBuildHash);
+  await ensureBaseImage(
+    spec.baseImage,
+    docker,
+    spec.dockerDir,
+    spec.baseDockerfile,
+    spec.baseBuildHash,
+    spec.toolchainSource,
+  );
   logger.info(`Building Docker image ${image}...`);
   await buildImageFromCleanContext(docker, image, spec.dockerDir, spec.agentDockerfile, {
     'ironcurtain.build-hash': spec.agentBuildHash,
@@ -4024,14 +4149,22 @@ async function ensureBaseImage(
   dockerDir: string,
   dockerfile: string,
   buildHash: string,
+  toolchainSource?: DockerToolchainSource,
 ): Promise<void> {
   if (!(await isImageStale(baseImage, docker, buildHash))) return;
 
   logger.info('Building base Docker image (this may take a while on first run)...');
 
-  await buildImageFromCleanContext(docker, baseImage, dockerDir, dockerfile, {
-    'ironcurtain.build-hash': buildHash,
-  });
+  await buildImageFromCleanContext(
+    docker,
+    baseImage,
+    dockerDir,
+    dockerfile,
+    {
+      'ironcurtain.build-hash': buildHash,
+    },
+    toolchainSource === undefined ? undefined : { IRONCURTAIN_DOCKER_SOURCE: toolchainSource.reference },
+  );
   logger.info('Base Docker image built successfully');
 }
 

@@ -54,7 +54,7 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   resolveNestedDockerOuterAgentImage: (_infra: unknown, image: string) => image,
   buildAgentUidRemap: () => ({}),
   buildDockerDesktopTransportCreateLimits: () => ({}),
-  buildNestedDockerAgentTrustedCreateOptions: () => undefined,
+  buildDockerAgentTrustedCreateOptions: () => undefined,
   buildUdsSocketMounts: () => [],
   buildDockerWorkloadEgressMounts: () => [],
   dockerWorkloadEgressNetworkAccess: () => 'offline',
@@ -68,12 +68,11 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     ]);
   },
   createLedgeredAgentContainer: vi.fn(),
-  dockerWorkloadSessionMetadata: vi.fn(() => ({
+  dockerWorkloadSessionMetadata: vi.fn((_handle: unknown, configuration: unknown, backend: string) => ({
     leaseId: 'lease-1',
     generation: 'generation-1',
-    configHash: 'c'.repeat(64),
-    watchdogPolicySha256: 'w'.repeat(64),
-    backend: 'apple-container',
+    configuration,
+    backend,
   })),
   removeBundleRuntimeRoot: state.removeBundleRuntimeRoot,
   selectOuterContainerResources: () => ({ memoryMb: undefined, cpus: undefined }),

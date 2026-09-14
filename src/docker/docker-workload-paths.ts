@@ -44,7 +44,7 @@ export function getFrozenWatchdogPolicyTemplatePath(): string {
   return resolve(getFrozenDockerWorkloadDir(), 'resource-watchdog-policy.json');
 }
 
-/** Frozen Docker client/daemon/plugin compatibility manifest for Apple arm64 VMs. */
+/** Shared Linux Docker client/daemon/plugin compatibility requirements. */
 export function getFrozenClientToolchainManifestPath(): string {
-  return resolve(getFrozenDockerWorkloadDir(), 'client-toolchain.arm64.json');
+  return resolve(getFrozenDockerWorkloadDir(), 'client-toolchain.json');
 }

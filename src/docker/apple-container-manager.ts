@@ -244,6 +244,8 @@ export function parseAppleImageInfo(raw: unknown): DockerImageInfo {
     // Unlike Docker, Apple Container identifies an image by the top-level OCI
     // index/manifest descriptor rather than the config digest.
     id: canonicalSha256Digest(rawDigest),
+    architecture: 'arm64',
+    descriptorDigest: canonicalSha256Digest(rawDigest),
     repoTags: typeof entry.configuration?.name === 'string' ? [entry.configuration.name] : [],
     labels: stringRecord(variant.config?.config?.Labels),
     created: entry.configuration?.creationDate ?? variant.config?.created ?? '',
@@ -690,6 +692,7 @@ export function createAppleContainerManager(
       dockerfilePath: string,
       contextDir: string,
       labels?: Record<string, string>,
+      buildArgs?: Readonly<Record<string, string>>,
     ): Promise<void> {
       const args = ['build', '--progress', 'plain', '-t', tag, '-f', dockerfilePath];
       if (labels) {
@@ -697,6 +700,7 @@ export function createAppleContainerManager(
           args.push('--label', `${key}=${value}`);
         }
       }
+      for (const [key, value] of Object.entries(buildArgs ?? {})) args.push('--build-arg', `${key}=${value}`);
       args.push(contextDir);
       try {
         await runStreamed({

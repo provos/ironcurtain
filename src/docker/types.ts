@@ -1,3 +1,4 @@
+import type { DockerEndpoint } from './docker-endpoint.js';
 /**
  * Types for Docker container lifecycle management.
  */
@@ -122,8 +123,8 @@ export interface DockerContainerConfig {
    * bound. See `APPLE_FULLY_VISIBLE_PROC_ARGS` in `apple-container-manager.ts`
    * for the measurements and the security rationale.
    *
-   * Ignored by the Docker backend, where the nested daemon topology is not
-   * implemented at all.
+   * Ignored by the Docker backend, where the nested daemon runs in a separate
+   * outer sidecar and does not need this agent-container option.
    */
   readonly fullyVisibleProc?: boolean;
 
@@ -239,6 +240,10 @@ export interface DockerCommitOptions {
 }
 
 export interface DockerImageInfo {
+  readonly architecture?: 'amd64' | 'arm64';
+  readonly repoDigests?: readonly string[];
+  /** OCI manifest/index descriptor, when the runtime exposes it independently of config ID. */
+  readonly descriptorDigest?: string;
   readonly id: string;
   readonly repoTags: readonly string[];
   readonly labels: Readonly<Record<string, string>>;
@@ -306,6 +311,8 @@ export interface DockerNetworkCreateOptions {
  * agent containers.
  */
 export interface ContainerRuntime {
+  /** Endpoint captured for a qualified Docker workload; absent for legacy/general runtimes. */
+  readonly dockerEndpoint?: DockerEndpoint;
   /** True when this runtime can commit containers to images and manage snapshot images. */
   readonly supportsImageSnapshots: boolean;
 
@@ -404,7 +411,13 @@ export interface ContainerRuntime {
   saveImageArchive?(ref: string, archivePath: string, platform?: 'linux/amd64' | 'linux/arm64'): Promise<void>;
 
   /** Build a Docker image from a Dockerfile. Optional labels are stamped on the image. */
-  buildImage(tag: string, dockerfilePath: string, contextDir: string, labels?: Record<string, string>): Promise<void>;
+  buildImage(
+    tag: string,
+    dockerfilePath: string,
+    contextDir: string,
+    labels?: Record<string, string>,
+    buildArgs?: Readonly<Record<string, string>>,
+  ): Promise<void>;
 
   /** Read a label value from a Docker image. Returns undefined if image or label doesn't exist. */
   getImageLabel(image: string, label: string): Promise<string | undefined>;

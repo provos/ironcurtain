@@ -14,6 +14,10 @@ const createContainerRuntime = vi.fn();
 const resolveRuntimeKind = vi.fn();
 const checkAppleContainerAvailable = vi.fn();
 const checkDockerAvailable = vi.fn();
+vi.mock('../../src/docker/docker-endpoint.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker/docker-endpoint.js')>()),
+  resolveDockerEndpoint: async () => ({ host: 'unix:///var/run/docker.sock' }),
+}));
 const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
 if (hostPlatformDescriptor === undefined) {
@@ -30,6 +34,10 @@ vi.mock('../../src/docker/container-runtime.js', () => ({
 }));
 vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
 vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  release: () => '6.18.33.2-microsoft-standard-WSL2',
+}));
 
 beforeEach(() => {
   // These integration seams exercise Docker Desktop, which is admitted only
@@ -46,10 +54,22 @@ beforeEach(() => {
     throw new Error('runtime creation must not run');
   });
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
-  checkDockerAvailable.mockResolvedValue({ available: true });
+  checkDockerAvailable.mockResolvedValue({
+    available: true,
+    server: {
+      architecture: 'arm64',
+      operatingSystem: 'Docker Desktop',
+      osType: 'linux',
+      serverVersion: '29.4.1',
+      kernelVersion: '6.18',
+      cgroupVersion: '2',
+      securityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'],
+    },
+  });
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   Object.defineProperty(process, 'platform', hostPlatformDescriptor);
 });
 
@@ -58,6 +78,38 @@ function admittedAppleConfig() {
 }
 
 describe('secure nested Docker resolved-variant admission', () => {
+  it.each(['offline', 'images', 'packages'] as const)(
+    'rejects a root WSL coordinator before any %s provisioning',
+    async (networkAccess) => {
+      Object.defineProperty(process, 'platform', { ...hostPlatformDescriptor, value: 'linux' });
+      resolveRuntimeKind.mockResolvedValue('docker');
+      const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
+      for (const [uid, gid] of [
+        [0, 1102],
+        [1101, 0],
+      ]) {
+        vi.spyOn(process, 'getuid').mockReturnValue(uid);
+        vi.spyOn(process, 'getgid').mockReturnValue(gid);
+        await expect(
+          ensureDockerImage('claude-code', {
+            containerRuntime: 'docker',
+            dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, networkAccess }),
+          } as ResolvedUserConfig),
+        ).rejects.toThrow(/non-root coordinator UID and GID.*sudo remains available inside/);
+      }
+      expect(registerBuiltinAdapters).not.toHaveBeenCalled();
+      expect(createContainerRuntime).not.toHaveBeenCalled();
+      expect(checkDockerAvailable).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps non-nested and VM-backed sessions independent of the host root identity', () => {
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    vi.spyOn(process, 'getgid').mockReturnValue(0);
+    expect(() => assertDockerWorkloadVariantAdmitted(undefined, 'docker', 'linux')).not.toThrow();
+    expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'docker', 'darwin')).not.toThrow();
+    expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'apple-container', 'darwin')).not.toThrow();
+  });
   it('is a no-op for absent and explicitly disabled capability', () => {
     expect(() => assertDockerWorkloadVariantAdmitted(undefined, 'docker')).not.toThrow();
     expect(() => assertDockerWorkloadVariantAdmitted(resolveDockerWorkloadConfig(undefined), 'docker')).not.toThrow();
@@ -153,6 +205,15 @@ describe('secure nested Docker resolved-variant admission', () => {
         },
       );
       const inspectImage = vi.fn(async (reference: string) => {
+        if (reference.startsWith('docker:'))
+          return {
+            id: `sha256:${'c'.repeat(64)}`,
+            repoTags: [reference],
+            repoDigests: [`docker@sha256:${'c'.repeat(64)}`],
+            labels: {},
+            created: '',
+            architecture: 'arm64' as const,
+          };
         const buildHash = buildHashes.get(reference);
         if (buildHash === undefined) return undefined;
         if (reference === image) {

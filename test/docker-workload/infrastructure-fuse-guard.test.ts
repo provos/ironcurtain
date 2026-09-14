@@ -9,9 +9,9 @@ import { describe, expect, it } from 'vitest';
  * fail-closed on its own machinery.
  */
 describe('Docker-workload infrastructure fuse independence', () => {
-  it('does not reference the implementation fuse or the config module', () => {
+  it('does not reference the implementation fuse or import config runtime functions', () => {
     const source = readFileSync(resolve('src/docker-workload/infrastructure.ts'), 'utf8');
     expect(source).not.toContain('assertDockerWorkloadVariantAdmitted');
-    expect(source).not.toMatch(/from '\.\/config\.js'/u);
+    expect(source).not.toMatch(/^import(?! type\b)[^;]*from ['"]\.\/config\.js['"]/mu);
   });
 });

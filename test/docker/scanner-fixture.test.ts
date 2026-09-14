@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,22 @@ afterEach(() => {
 });
 
 describe('vulnerability fixture report adjudication', () => {
+  it.each([
+    ['target', 'vulnerability-target'],
+    ['patched-target', 'patched-target'],
+    ['scanner', 'vulnerability-scanner'],
+  ])('%s uses versioned build sources and its static role label', (name, component) => {
+    const dockerfile = readFileSync(
+      join('test/docker-workload/fixtures/vulnerability-fixture', `Dockerfile.${name}`),
+      'utf8',
+    );
+    expect(dockerfile).toMatch(/^# syntax=docker\/dockerfile:1\.7$/mu);
+    expect(dockerfile).toMatch(/^FROM golang:1\.24-bookworm AS build$/mu);
+    expect(dockerfile).toContain(`com.ironcurtain.docker-workload.component="${component}"`);
+    expect(dockerfile).not.toContain('@sha256:');
+    expect(dockerfile).not.toContain('ARG IRONCURTAIN_');
+  });
+
   it.each([
     ['vulnerable', [{ id: 'ICV-FIXTURE-0001', severity: 'high', evidence: 'deterministic debug diagnostic exposed' }]],
     ['patched', []],

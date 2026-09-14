@@ -3,7 +3,6 @@
 import { lstat, readdir, statfs } from 'node:fs/promises';
 import { isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { computeHash } from '../hash.js';
 import { loadImmutableHostJson } from '../hardened-fs.js';
 import { identifierSchema } from '../zod-helpers.js';
 
@@ -29,7 +28,7 @@ const stateClassSchema = z
   })
   .strict();
 
-const resourceWatchdogPolicySchema = z
+export const resourceWatchdogPolicySchema = z
   .object({
     schemaVersion: z.literal(RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION),
     policyId: identifierSchema,
@@ -129,7 +128,7 @@ export interface ResourceWatchdogCleanupProof {
 
 export interface ResourceWatchdogAttestation {
   readonly policyId: string;
-  readonly policyHash: string;
+  readonly policy: ResourceWatchdogPolicy;
   readonly firstSample: ResourceWatchdogSample;
 }
 
@@ -184,7 +183,7 @@ export class ResourceWatchdog {
     if (this.shouldSchedule) {
       this.timer = setInterval(() => void this.tick(), this.policy.sampleIntervalMs);
     }
-    return { policyId: this.policy.policyId, policyHash: computeHash(this.policy), firstSample };
+    return { policyId: this.policy.policyId, policy: resourceWatchdogPolicySchema.parse(this.policy), firstSample };
   }
 
   async tick(): Promise<ResourceWatchdogSample | undefined> {

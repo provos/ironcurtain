@@ -49,7 +49,6 @@ import {
   createMockAdapter,
   createMockCA,
   createMockDocker,
-  createMockRuntimeTrust,
   type CreateMockDockerOptions,
   type DockerCallTracker,
 } from './helpers/docker-mocks.js';
@@ -129,7 +128,6 @@ describe('DockerInfrastructure interface', () => {
         certPath: '/tmp/ca-cert.pem',
         keyPath: '/tmp/ca-key.pem',
       },
-      runtimeTrust: createMockRuntimeTrust(),
       fakeKeys: new Map(),
       orientationDir: '/tmp/test/sessions/test-session-id/orientation',
       systemPrompt: 'Test system prompt',
@@ -654,7 +652,6 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     docker: opts.docker,
     adapter: opts.adapter ?? createMockAdapter(),
     ca: createMockCA(opts.tempDir),
-    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -689,7 +686,6 @@ function makeAppleArtifactResolution(logicalName: string, immutableImageId: stri
       dockerImageId: `sha256:${'b'.repeat(64)}`,
       manifestDigest: `sha256:${'c'.repeat(64)}`,
       archivePath: '/artifacts/selected-agent.oci.tar',
-      archiveSha256: 'd'.repeat(64),
       archiveSizeBytes: 1024,
     },
   };
@@ -727,6 +723,20 @@ describe('createSessionContainers', () => {
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0].env.TEST_KEY).toBe('test-value');
     expect(createCalls[0].env.BATCH_ONLY).toBe('1');
+  });
+
+  it('shadows the image-declared Docker state volume when nested Docker is explicitly disabled', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, runtimeKind: 'docker', docker });
+    const config = makeMockConfig();
+    config.userConfig.dockerWorkload = { enabled: false };
+
+    await createSessionContainers(core, config);
+
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].trustedCreateOptions).toEqual({
+      tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
+    });
   });
 
   it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
@@ -784,6 +794,7 @@ describe('createSessionContainers', () => {
     // No Linux UID remap on apple-container.
     expect(main.user).toBeUndefined();
     expect(main.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
+    expect(main.trustedCreateOptions).toBeUndefined();
 
     // Per-file socket mounts (NOT the sockets directory).
     const mounts = main.mounts;

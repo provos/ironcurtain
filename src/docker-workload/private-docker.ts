@@ -105,7 +105,9 @@ export async function waitForPrivateDockerDaemonReady(
     }
     if (now() >= deadlineMs) {
       throw new Error(
-        `${label} did not become ready within ${options.timeoutMs}ms; dockerd log tail:\n${await readLogTail(options.readLogTail)}`,
+        `${label} did not become ready within ${options.timeoutMs}ms; last readiness probe (exit ${probe.exitCode}):\n` +
+          `${boundedDiagnostic(probe.stderr || probe.stdout || '(no diagnostic output)', LOG_TAIL_MAX_BYTES)}\n` +
+          `dockerd log tail:\n${await readLogTail(options.readLogTail)}`,
       );
     }
     await sleep(pollIntervalMs);
@@ -204,7 +206,6 @@ export interface ApplePrivateDockerImageObservation {
   readonly transport: 'apple-archive';
   readonly logicalName: string;
   readonly buildHash: string;
-  readonly archiveSha256: string;
   readonly outerImageId: string;
   readonly innerImageId: string;
 }

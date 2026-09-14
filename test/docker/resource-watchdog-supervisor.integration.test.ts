@@ -1,3 +1,4 @@
+import { createLegacyDockerWorkloadLease as createDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { createDockerWorkloadLease, loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
+import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { loadResourceWatchdogSupervisorStatus } from '../../src/docker-workload/resource-watchdog-supervisor.js';
 import type { ResourceWatchdogPolicy } from '../../src/docker/resource-watchdog.js';
 import { isRuntimeAvailable } from '../helpers/container-runtimes.js';

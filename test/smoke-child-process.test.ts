@@ -35,6 +35,24 @@ describe('smoke child process lifecycle', () => {
     expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
+  it('forwards cancellation immediately and still bounds a child that ignores it', async () => {
+    const child = fakeChild();
+    const cancellation = new AbortController();
+    const signals: NodeJS.Signals[] = [];
+    const waiting = waitForSmokeChild(child, 60_000, {
+      signal: cancellation.signal,
+      termGraceMs: 1,
+      killGraceMs: 1_000,
+      terminate: (signal) => {
+        signals.push(signal);
+        if (signal === 'SIGKILL') child.emit('exit', null, signal);
+      },
+    });
+    cancellation.abort('SIGINT');
+    await expect(waiting).resolves.toEqual({ code: null, signal: 'SIGKILL', timedOut: false });
+    expect(signals).toEqual(['SIGINT', 'SIGKILL']);
+  });
+
   it('accepts an already-empty detached process group', async () => {
     const terminate = vi.fn();
 

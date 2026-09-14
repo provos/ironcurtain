@@ -1,8 +1,12 @@
-# Client-only Docker toolchain source. Pinned to the exact digest the
-# nested-daemon image uses so both roles carry byte-identical binaries.
-FROM docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255 AS docker-toolchain
+# Both agent bases use the same assembly recipe and component release as the daemon.
+# The coordinator can substitute its once-resolved source image for this build.
+ARG IRONCURTAIN_DOCKER_SOURCE=docker:29.2.1-dind-rootless
+FROM ${IRONCURTAIN_DOCKER_SOURCE} AS docker-toolchain
+USER root
+COPY install-docker-toolchain.sh /tmp/install-docker-toolchain.sh
+RUN sh /tmp/install-docker-toolchain.sh /out
 
-FROM node:22-trixie@sha256:8433642fe11d391a7ff1f702352ac1b0ea3e378d3fb2c22de2b292036d79cd2c
+FROM node:22-trixie
 
 # Replicate the 'codespace' user (uid 1000) from the devcontainers/universal
 # image so Dockerfile.claude-code works unchanged on both platforms.
@@ -113,28 +117,11 @@ RUN npx playwright install-deps chromium && \
     npx playwright install chromium && \
     chmod -R o+rx /opt/playwright-browsers
 
-# Docker toolchain, copied verbatim from the pinned stage so the shipped bytes
-# stay auditable against the source image. Only the CLI is placed on PATH; the
-# daemon-side binaries (dockerd, rootlesskit, containerd, runc) stay off it and
-# are reached by the in-VM bootstrap through an explicit PATH.
-#
-# --chown=root:root is required, not cosmetic: COPY --from preserves the source
-# image's ownership, and `rootlesskit`/`vpnkit` are owned 1001:1001 there. On a
-# Linux host that remaps the agent to uid 1001 the runtime user would otherwise
-# OWN shipped toolchain binaries and could rewrite them.
-# The selected-image view of the pinned runc is therefore root:root; inside the
-# RootlessKit child namespace the same inode is the overflow pair 65534:65534.
-#
-# The plugins land in /usr/local/libexec/docker/cli-plugins to match the source
-# layout: the copied /usr/local/bin/docker-compose is a symlink into that exact
-# path, and it is one of the CLI's default system plugin directories, so both
-# the symlink and plugin discovery resolve.
-COPY --from=docker-toolchain --chown=root:root /usr/local/bin/ /usr/local/lib/ironcurtain-docker/bin/
-COPY --from=docker-toolchain --chown=root:root /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+# Common Docker CLI/plugin layout; daemon tools stay off the ordinary agent PATH.
+# Agent sudo can modify this tree. Apple build-trust verification remains separate.
+COPY --from=docker-toolchain --chown=root:root /out/ /
 COPY --chown=root:root --chmod=0444 apple-vm-egress-relay.mjs /usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs
-RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && \
-    ln -s /usr/sbin/iptables-legacy /usr/local/lib/ironcurtain-docker/bin/iptables && \
-    test "$(/usr/local/bin/node /usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs --version)" = \
+RUN test "$(/usr/local/bin/node /usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs --version)" = \
       "ironcurtain-apple-vm-egress-relay/1"
 
 # /run is ext4 in the agent VM, not a tmpfs, so directories created here survive
@@ -143,7 +130,7 @@ RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && 
 # directory to the runtime user.
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain && \
-    install -d -o root -g root -m 0755 /opt/ironcurtain-build-trust && \
+    install -d -o root -g root -m 0755 /ironcurtain-build-trust && \
     install -d -o codespace -g codespace -m 0700 /run/ironcurtain-docker
 
 WORKDIR /workspace

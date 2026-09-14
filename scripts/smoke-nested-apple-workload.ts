@@ -1,4 +1,6 @@
 import { isIP } from 'node:net';
+import type { ContainerRuntime } from '../src/docker/types.js';
+import { parseSmokeTarget, type SmokeTarget } from './smoke-environment.js';
 import type { DockerWorkloadNetworkAccess, DockerWorkloadRequestedConfig } from '../src/docker-workload/config.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST } from '../src/docker-workload/apple-vm-daemon.js';
 import {
@@ -25,6 +27,63 @@ export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry' | DockerD
 /** Recovery leads; every later gate proves that a fresh admission still works. */
 export const DOCKER_DESKTOP_QUALIFICATION_ARGUMENTS = DOCKER_DESKTOP_SMOKE_CASES.map(({ flag }) => [flag] as const);
 
+export function parseNestedSmokeInvocation(argv: readonly string[]): {
+  readonly mode: NestedAppleSmokeMode;
+  readonly target: SmokeTarget;
+} {
+  const parsed = parseSmokeTarget(argv);
+  const mode = parseNestedAppleSmokeMode(parsed.arguments);
+  const docker = isDockerDesktopSmokeMode(mode);
+  const target = parsed.target ?? (docker ? 'docker-desktop' : 'apple');
+  if ((target === 'apple') === docker) {
+    throw new Error(
+      'smoke environment does not match its scenario; use a Docker scenario flag for Docker environments',
+    );
+  }
+  return { mode, target };
+}
+
+/** Independently stated acceptance topology, not a projection of production's container plan. */
+export function expectedDockerSmokeTopology(
+  target: SmokeTarget,
+  networkAccess: DockerWorkloadNetworkAccess,
+): {
+  readonly ordinaryTransportCount: number;
+  readonly egressNetworkCount: number;
+  readonly relayCount: number;
+  readonly relayBridgeUplink: boolean;
+} {
+  if (target === 'apple') throw new Error('Docker outer topology does not apply to the same-VM Apple runtime');
+  return {
+    ordinaryTransportCount: target === 'docker-desktop' ? 1 : 0,
+    egressNetworkCount: networkAccess === 'offline' ? 0 : 1,
+    relayCount: networkAccess === 'packages' ? 2 : networkAccess === 'images' ? 1 : 0,
+    relayBridgeUplink: target === 'docker-desktop',
+  };
+}
+
+/** Exercise the same network boundary before and after the agent uses sudo. */
+export async function verifyAgentDirectEgressDenied(
+  runtime: Pick<ContainerRuntime, 'exec'>,
+  outerId: string,
+): Promise<void> {
+  for (const prefix of [[], ['sudo', '-n']] as const) {
+    const identity = prefix.length === 0 ? 'agent' : 'agent root';
+    // A missing tool or broken sudo must not masquerade as a network denial.
+    const ready = await runtime.exec(outerId, [...prefix, '/usr/bin/socat', '-V'], 5_000, 'codespace');
+    if (ready.exitCode !== 0) throw new Error(`Docker Desktop ${identity} direct-egress probe is unavailable`);
+    const result = await runtime.exec(
+      outerId,
+      [...prefix, '/usr/bin/socat', '-u', '/dev/null', 'TCP:1.1.1.1:443,connect-timeout=3'],
+      5_000,
+      'codespace',
+    );
+    if (result.exitCode === 0) {
+      throw new Error(`Docker Desktop ${identity} unexpectedly reached the internet without a policy proxy`);
+    }
+  }
+}
+
 /** Small Docker Official multi-architecture image with reviewed built-in applets. */
 export const PUBLIC_REGISTRY_SMOKE_IMAGE = 'busybox:1.37.0-glibc';
 
@@ -36,6 +95,9 @@ export const DOCKER_DESKTOP_OFFLINE_ARCHIVE = 'images/ironcurtain-offline-fixtur
 export const DOCKER_DESKTOP_OFFLINE_MARKER = 'ironcurtain-offline-load-run-ok';
 export const DOCKER_DESKTOP_WORKSPACE_INPUT = 'ironcurtain-workspace-input.txt';
 export const DOCKER_DESKTOP_WORKSPACE_OUTPUT = 'ironcurtain-workspace-output.txt';
+
+/** Acceptance expectation for the sidecar's private per-user API child directory. */
+export const SIDECAR_SMOKE_DOCKER_HOST = 'unix:///run/ironcurtain-docker/docker/docker.sock';
 
 const NETWORK_ID_ARGUMENT = '__IRONCURTAIN_SMOKE_NETWORK_ID__';
 const SERVER_IPV4_ARGUMENT = '__IRONCURTAIN_SMOKE_SERVER_IPV4__';
@@ -430,10 +492,13 @@ export interface InternalBridgeInspection {
 }
 
 /** Prove the live agent container received the exact nested-Docker contract. */
-export function assertExactAgentDockerEnvironment(value: string): void {
+export function assertExactAgentDockerEnvironment(
+  value: string,
+  dockerHost: string = APPLE_VM_DAEMON_DOCKER_HOST,
+): void {
   const lines = value.split(/\r?\n/u);
   const expected = {
-    DOCKER_HOST: APPLE_VM_DAEMON_DOCKER_HOST,
+    DOCKER_HOST: dockerHost,
     [APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
   } as const;
   for (const [name, expectedValue] of Object.entries(expected)) {

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertAdmittedDockerWorkloadRuntimeAvailable,
   assertDockerWorkloadVariantAdmitted,
-  dockerWorkloadConfigHash,
+  resolvedDockerWorkloadConfigSchema,
   dockerWorkloadRequestedSchema,
   formatDockerWorkloadStatus,
   resolveDockerWorkloadConfig,
@@ -10,23 +10,68 @@ import {
 
 const checkAppleContainerAvailable = vi.fn();
 const checkDockerAvailable = vi.fn();
+vi.mock('../../src/docker/docker-endpoint.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker/docker-endpoint.js')>()),
+  resolveDockerEndpoint: async () => ({ host: 'unix:///var/run/docker.sock' }),
+}));
 
 vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
 vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  release: () => '6.18.33.2-microsoft-standard-WSL2',
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
-  checkDockerAvailable.mockResolvedValue({ available: true });
+  checkDockerAvailable.mockResolvedValue({
+    available: true,
+    server: {
+      architecture: 'amd64',
+      operatingSystem: 'Docker Desktop',
+      osType: 'linux',
+      serverVersion: '29.4.1',
+      kernelVersion: '6.18',
+      cgroupVersion: '2',
+      securityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'],
+    },
+  });
 });
 
 describe('secure nested Docker configuration', () => {
+  it.each(['offline', 'images', 'packages'] as const)(
+    'parses the complete resolved %s configuration',
+    (networkAccess) => {
+      const configuration = resolveDockerWorkloadConfig({ enabled: true, networkAccess }, { memoryMb: 8192, cpus: 4 });
+      const parsed = resolvedDockerWorkloadConfigSchema.parse(configuration);
+      expect(parsed).toEqual(configuration);
+      expect(parsed).not.toBe(configuration);
+    },
+  );
+
+  it.each([
+    { networkAccess: 'public' },
+    { resources: { memoryMb: 4096, cpus: 2, pids: { desired: 512, required: false } } },
+    { resources: { memoryMb: 1, cpus: 2, pids: { desired: 512, required: false }, diskMb: null } },
+    { resources: { memoryMb: 4096, cpus: Infinity, pids: { desired: 512, required: false }, diskMb: null } },
+    { resources: { memoryMb: 4096, cpus: 2, pids: { desired: 1, required: false }, diskMb: null } },
+    { resources: { memoryMb: 4096, cpus: 2, pids: { desired: 512, required: false, extra: true }, diskMb: null } },
+    { unknown: true },
+  ])('rejects incomplete, unbounded, or extra evidence fields: %j', (override) => {
+    expect(
+      resolvedDockerWorkloadConfigSchema.safeParse({
+        ...resolveDockerWorkloadConfig({ enabled: true }),
+        ...override,
+      }).success,
+    ).toBe(false);
+  });
+
   it('resolves absence, an empty object, and explicit false to the same authority-free value', () => {
     const disabled = { enabled: false } as const;
     expect(resolveDockerWorkloadConfig(undefined)).toEqual(disabled);
     expect(resolveDockerWorkloadConfig({})).toEqual(disabled);
     expect(resolveDockerWorkloadConfig({ enabled: false, backend: 'apple-container' })).toEqual(disabled);
-    expect(dockerWorkloadConfigHash(disabled)).toBe(dockerWorkloadConfigHash(resolveDockerWorkloadConfig(undefined)));
   });
 
   it('materializes the admitted macOS developer policy when explicitly enabled', () => {
@@ -133,8 +178,8 @@ describe('secure nested Docker configuration', () => {
     const enabled = resolveDockerWorkloadConfig({ enabled: true });
     expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'apple-container', 'darwin')).not.toThrow();
     expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'docker', 'darwin')).not.toThrow();
-    expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'docker', 'linux')).toThrow(
-      /Docker runtime is supported only on macOS \(Darwin\), not linux/u,
+    expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'docker', 'linux', '6.8.0-generic')).toThrow(
+      /macOS and WSL2 with Docker Desktop/u,
     );
   });
 
@@ -145,16 +190,27 @@ describe('secure nested Docker configuration', () => {
     ).not.toThrow();
   });
 
-  it('preflights only the selected runtime', async () => {
-    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).resolves.toBeUndefined();
-    expect(checkDockerAvailable).toHaveBeenCalledOnce();
-    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+  it.each(['darwin', 'linux'] as const)('preflights only the selected runtime on %s', async (platform) => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: platform });
+    try {
+      await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).resolves.toMatchObject({
+        architecture: 'amd64',
+        profile: platform === 'darwin' ? 'macos-desktop' : 'wsl-desktop',
+      });
+      expect(checkDockerAvailable).toHaveBeenCalledOnce();
+      expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
 
-    vi.clearAllMocks();
-    checkAppleContainerAvailable.mockResolvedValue({ available: true });
-    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).resolves.toBeUndefined();
-    expect(checkAppleContainerAvailable).toHaveBeenCalledOnce();
-    expect(checkDockerAvailable).not.toHaveBeenCalled();
+      vi.clearAllMocks();
+      checkAppleContainerAvailable.mockResolvedValue({ available: true });
+      await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).resolves.toMatchObject({
+        profile: 'apple-container',
+      });
+      expect(checkAppleContainerAvailable).toHaveBeenCalledOnce();
+      expect(checkDockerAvailable).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
   });
 
   it('reports selected-runtime availability failures with probe detail', async () => {
@@ -210,9 +266,6 @@ describe('secure nested Docker configuration', () => {
     expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'packages' }))).toBe(
       'Nested Docker: enabled · network: public packages + Docker Hub/GHCR (strict proxy)',
     );
-    expect(
-      dockerWorkloadConfigHash(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'packages' })),
-    ).not.toBe(dockerWorkloadConfigHash(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'images' })));
   });
 
   it('absorbs the safe legacy disk defaults without hidden risk configuration', () => {

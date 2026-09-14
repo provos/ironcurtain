@@ -402,7 +402,7 @@ describe('config-command', () => {
     });
     expect(mocks.note).toHaveBeenCalledWith(DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING, 'Package network warning');
     expect(mocks.note).toHaveBeenCalledWith(
-      'Currently requires macOS with Docker Desktop or, on Apple silicon, Apple Container installed.',
+      'Requires macOS or WSL2 with Docker Desktop, or Apple Container on Apple silicon. Native Linux Engine is not yet qualified.',
       'Availability',
     );
     type MenuOption = { value: string; label?: string; hint?: string; disabled?: boolean };

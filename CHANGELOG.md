@@ -23,8 +23,8 @@ All notable changes to this project will be documented in this file.
 
 ### Behavior changes
 
+- **Node.js support is now limited to 24 and 26** — `isolated-vm` is pinned to 7.0.1, whose corrected engine range and prebuilt binaries cover both supported Node lines. This also picks up the upstream security fix for GHSA-864f-rcv7-6rh4. Node 22 and odd-numbered Node releases are no longer advertised as supported.
 - **Unusable MITM CA storage is replaced automatically** — instead of failing bundle startup, IronCurtain generates and atomically publishes a fresh CA for malformed, exposed, or legacy storage; valid legacy keys are rotated rather than migrated. Existing bundles retain their in-memory CA, while newly created bundles receive the replacement. First-run paths updated here now request mode `0700` when creating the IronCurtain home directory.
-- **Node.js engine floor raised to 22.15.0** (from 22.13.0). The SQLite worker entry shim registers its resolve hook via `module.registerHooks`, the synchronous module-customization API added in Node 22.15; the older async `module.register()` API cannot express the hook correctly and is now deprecated (`DEP0205`). Node 22.13/22.14 are the only versions dropped — 22.15+, 24, and 26 are unaffected, and `ironcurtain doctor` now reports sub-22.15 as a failure rather than an `ok`. CI additionally gained a `workflow_dispatch` trigger so the Node 22 job (otherwise master-push-only) can be run on demand against a PR branch.
 
 ## [0.13.0] - 2026-07-11
 

@@ -299,6 +299,7 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
         .map((line) => JSON.parse(line) as string[]);
       expect(
         invocations.some((args) => args[0] === 'container' && args[1] === 'inspect' && args.includes(CONTAINER_ID)),
+        JSON.stringify(invocations),
       ).toBe(true);
       expect(
         invocations.some(

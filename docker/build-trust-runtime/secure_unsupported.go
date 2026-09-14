@@ -13,7 +13,15 @@ func loadTrustContractSecure(_ runtimePolicy) (trustContract, error) {
 }
 
 func validateRealRunc(_ runtimePolicy, _ trustContract) error {
-	return errors.New("pinned runc validation is supported only on Linux")
+	return errors.New("selected runc validation is supported only on Linux")
+}
+
+func validateSourceFile(_ runtimePolicy, _ verifiedTrustSource) error {
+	return errors.New("protected trust validation is supported only on Linux")
+}
+
+func validateOwnExecutableReadOnly(_ runtimePolicy) error {
+	return errors.New("protected executable validation is supported only on Linux")
 }
 
 func validateEffectiveReadOnlyFile(_ int, _ string) error {

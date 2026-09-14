@@ -24,8 +24,10 @@ export interface SpawnWithIdleTimeoutOptions {
    * (e.g. `"docker pull"`, `"docker build"`).
    */
   operation: string;
-  /** Extra env vars merged on top of `process.env`. */
+  /** Child environment values; merged with `process.env` unless envMode is 'replace'. */
   env?: NodeJS.ProcessEnv;
+  /** Use 'replace' for a complete sanitized environment. Defaults to 'merge'. */
+  envMode?: 'merge' | 'replace';
   /** Stream sink for child stdout. Defaults to `process.stdout`. */
   stdoutSink?: NodeJS.WritableStream;
   /** Stream sink for child stderr. Defaults to `process.stderr`. */
@@ -62,6 +64,7 @@ export function spawnWithIdleTimeout(
     idleTimeoutMs,
     operation,
     env,
+    envMode = 'merge',
     stdoutSink = process.stdout,
     stderrSink = process.stderr,
     spawn = nodeSpawn,
@@ -73,7 +76,7 @@ export function spawnWithIdleTimeout(
     try {
       child = spawn(cmd, [...args], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: env ? { ...process.env, ...env } : process.env,
+        env: envMode === 'replace' ? (env ?? {}) : { ...process.env, ...env },
       });
     } catch (err: unknown) {
       // `spawn()` can throw synchronously on invalid options/args (the

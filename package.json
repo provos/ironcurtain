@@ -29,7 +29,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.15.0 <27"
+    "node": "^24.0.0 || ^26.0.0"
   },
   "bin": {
     "ironcurtain": "dist/cli.js"
@@ -63,14 +63,16 @@
     "bot": "tsx src/cli.ts bot",
     "config": "tsx src/cli.ts config",
     "setup": "tsx src/cli.ts setup",
-    "prepublishOnly": "npm run build && npm run check:build-trust-runtime",
+    "prepublishOnly": "npm run build:build-trust-runtime && npm run build && npm run check:build-trust-runtime",
     "test": "bash scripts/test.sh",
+    "build:build-trust-runtime": "cd docker/build-trust-runtime && node build.mjs --write",
     "test:build-trust-runtime": "cd docker/build-trust-runtime && go test ./...",
     "check:build-trust-runtime": "cd docker/build-trust-runtime && go test ./... && node --test diagnostic-codes.test.mjs && node build.mjs --check",
     "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
     "test:registry-live": "REGISTRY_EGRESS_LIVE_INTEGRATION=1 npx vitest run test/docker/registry-egress-live.integration.test.ts",
     "qualify:apple": "npm run build && tsx scripts/qualify-backend.ts --backend apple",
     "qualify:docker-desktop": "npm run build && tsx scripts/qualify-backend.ts --backend docker-desktop",
+    "qualify:wsl-desktop": "npm run build && tsx scripts/qualify-backend.ts --backend wsl-desktop",
     "smoke:nested:apple": "npm run build && tsx scripts/smoke-nested-apple.ts",
     "smoke:nested:apple:pty": "npm run build && tsx scripts/smoke-nested-apple.ts --pty",
     "smoke:nested:apple:public-registry": "npm run build && tsx scripts/smoke-nested-apple.ts --public-registry",
@@ -131,7 +133,7 @@
   },
   "overrides": {
     "minimatch": "^10.2.1",
-    "isolated-vm": "7.0.0"
+    "isolated-vm": "7.0.1"
   },
   "lint-staged": {
     "!(packages/**)/*.ts": [

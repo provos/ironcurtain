@@ -1,3 +1,4 @@
+import { createLegacyDockerWorkloadLease as createDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,6 @@ import {
 } from '../../src/docker-workload/bundle-revocation.js';
 import {
   activateDockerWorkloadLease,
-  createDockerWorkloadLease,
   loadDockerWorkloadLease,
   observeDockerWorkloadOuterResource,
   requestDockerWorkloadOuterResource,

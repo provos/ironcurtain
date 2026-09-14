@@ -14,8 +14,8 @@
  */
 
 import { createServer, type Server } from 'node:net';
-import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -33,6 +33,8 @@ import {
   TcpServerTransport,
 } from '../src/trusted-process/tcp-server-transport.js';
 import type { ContainerRuntime } from '../src/docker/types.js';
+import { buildDockerBuildShimMounts, stageDockerBuildShim } from '../src/docker/docker-infrastructure.js';
+import type { BundleId } from '../src/session/types.js';
 
 const probe = await checkAppleContainerAvailable();
 
@@ -40,6 +42,73 @@ const RUN_ID = randomUUID().slice(0, 8);
 const NETWORK_NAME = `ironcurtain-itest-net-${RUN_ID}`;
 const CONTAINER_NAME = `ironcurtain-itest-c1-${RUN_ID}`;
 const TEST_IMAGE = 'alpine/socat';
+
+describe.skipIf(!probe.available)('apple-container package staging integration', () => {
+  it('keeps every production package artifact visible alongside the protected directory mount', async () => {
+    const runtime = createAppleContainerManager();
+    const name = `ironcurtain-itest-trust-${RUN_ID}`;
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'ic-trust-mounts-')));
+    try {
+      const orientationDir = join(home, 'orientation');
+      mkdirSync(orientationDir);
+      for (const leaf of ['ca-cert.pem', 'ca-bundle.pem']) {
+        writeFileSync(join(orientationDir, leaf), `fixture-${leaf}\n`, { mode: 0o444 });
+      }
+      const realRunc = Buffer.alloc(64);
+      realRunc.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+      realRunc.writeUInt16LE(183, 18);
+      const previousHome = process.env.IRONCURTAIN_HOME;
+      let staging;
+      try {
+        process.env.IRONCURTAIN_HOME = home;
+        staging = stageDockerBuildShim(randomUUID() as BundleId, 'packages', {
+          orientationDir,
+          caGeneration: `gen-${randomUUID()}`,
+          architecture: 'arm64',
+          runtimeKind: 'apple-container',
+          packageProxyUrl: 'http://127.0.0.1:18082',
+          registryProxyUrl: 'http://127.0.0.1:18081',
+          protectedRealRunc: realRunc,
+        });
+      } finally {
+        if (previousHome === undefined) delete process.env.IRONCURTAIN_HOME;
+        else process.env.IRONCURTAIN_HOME = previousHome;
+      }
+      if (staging === undefined) throw new Error('package staging missing');
+      if (!(await runtime.imageExists(TEST_IMAGE))) await runtime.pullImage(TEST_IMAGE);
+      await runtime.create({
+        name,
+        image: TEST_IMAGE,
+        network: 'none',
+        mounts: buildDockerBuildShimMounts({ runtimeKind: 'apple-container', dockerBuildShim: staging }),
+        env: {},
+        entrypoint: '/bin/sh',
+        command: ['-c', 'sleep 300'],
+        user: '1000:1000',
+      });
+      await runtime.start(name);
+      const files = staging.artifacts.map((artifact) =>
+        artifact.kind === 'proxy-config'
+          ? { source: join(artifact.source, 'config.json'), target: `${artifact.target}/config.json` }
+          : artifact,
+      );
+      const result = await runtime.exec(name, ['sha256sum', ...files.map(({ target }) => target)], 10_000, null);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim().split('\n')).toEqual(
+        files.map(
+          ({ source, target }) => `${createHash('sha256').update(readFileSync(source)).digest('hex')}  ${target}`,
+        ),
+      );
+    } finally {
+      try {
+        await runtime.stop(name);
+        await runtime.remove(name);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
+  }, 180_000);
+});
 
 describe.skipIf(!probe.available)('apple-container runtime integration', () => {
   let docker: ContainerRuntime;

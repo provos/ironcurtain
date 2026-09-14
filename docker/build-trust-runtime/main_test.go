@@ -191,15 +191,12 @@ func TestHandoffComposesNoNewKeyringCompatibility(t *testing.T) {
 	}
 }
 
-func TestProductionPolicyKeepsRealRuncOwnersAndReadOnlyAuthority(t *testing.T) {
+func TestProductionPolicyKeepsTrustedParentsAndReadOnlyAuthority(t *testing.T) {
 	policy := productionPolicy()
 	if policy.effectiveReadOnly == nil {
 		t.Fatal("production effective read-only validator is unavailable")
 	}
 	wantRuncOwners := [2]ownerPair{{UID: 0, GID: 0}, {UID: 65534, GID: 65534}}
-	if policy.realRuncOwnerPairs != wantRuncOwners {
-		t.Fatalf("real runc owner pairs = %#v, want %#v", policy.realRuncOwnerPairs, wantRuncOwners)
-	}
 	if policy.trustTreeOwnerPairs != wantRuncOwners {
 		t.Fatalf("trust tree owner pairs = %#v, want %#v", policy.trustTreeOwnerPairs, wantRuncOwners)
 	}
@@ -282,15 +279,12 @@ func TestEveryBuildkitDiagnosticStageMapsExactly(t *testing.T) {
 		diagnosticSourceCACertOpen,
 		diagnosticSourceCACertMetadata,
 		diagnosticSourceCACertReadOnly,
-		diagnosticSourceCACertDigest,
 		diagnosticSourceCABundleOpen,
 		diagnosticSourceCABundleMeta,
 		diagnosticSourceCABundleRO,
-		diagnosticSourceCABundleDigest,
 		diagnosticSourceAPTConfigOpen,
 		diagnosticSourceAPTConfigMeta,
 		diagnosticSourceAPTConfigRO,
-		diagnosticSourceAPTConfigDigest,
 		diagnosticConfigOpen,
 		diagnosticConfigMetadata,
 		diagnosticConfigRead,

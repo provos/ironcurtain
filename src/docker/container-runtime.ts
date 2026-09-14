@@ -1,3 +1,4 @@
+import type { DockerEndpoint } from './docker-endpoint.js';
 /**
  * Container runtime selection seam.
  *
@@ -83,10 +84,13 @@ export async function resolveRuntimeKind(
   return autoResolution;
 }
 
-export function createContainerRuntime(kind: ContainerRuntimeKind = 'docker'): ContainerRuntime {
+export function createContainerRuntime(
+  kind: ContainerRuntimeKind = 'docker',
+  endpoint?: DockerEndpoint,
+): ContainerRuntime {
   switch (kind) {
     case 'docker':
-      return createDockerManager();
+      return createDockerManager(undefined, undefined, { endpoint });
     case 'apple-container':
       return createAppleContainerManager();
   }

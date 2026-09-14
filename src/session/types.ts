@@ -7,6 +7,8 @@ import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
 import type { AgentImageResolution, DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 import type { WorkflowId } from '../workflow/types.js';
+import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
+import type { ResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -144,7 +146,7 @@ export interface SessionMetadata {
 
   /**
    * Present only for secure nested Docker-workload sessions. Records the
-   * host-only lease identity and watchdog-policy binding for audit
+   * host-only lease identity and configuration/policy snapshots for audit
    * and post-hoc inspection. Because a Docker-workload bundle's daemon state
    * is ephemeral (`daemonState: ephemeral`), a persisted lease can never be
    * revived, so resume validation refuses any session carrying this field.
@@ -152,10 +154,22 @@ export interface SessionMetadata {
   readonly dockerWorkload?: {
     readonly leaseId: string;
     readonly generation: string;
-    readonly configHash: string;
-    readonly watchdogPolicySha256: string;
     readonly backend: 'docker' | 'apple-container';
-  };
+  } & (
+    | {
+        readonly configuration: ResolvedDockerWorkloadConfig;
+        readonly watchdogPolicy: ResourceWatchdogPolicy;
+        readonly configHash?: never;
+        readonly watchdogPolicySha256?: never;
+      }
+    // Historical records remain readable; new sessions store complete values.
+    | {
+        readonly configuration?: never;
+        readonly configHash: string;
+        readonly watchdogPolicy?: ResourceWatchdogPolicy;
+        readonly watchdogPolicySha256?: string;
+      }
+  );
 }
 
 /**

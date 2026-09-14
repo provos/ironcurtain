@@ -30,6 +30,8 @@
  * mechanism. A guard test enforces the non-import.
  */
 
+import { posix } from 'node:path';
+import { DOCKER_BUILD_TRUST_WRAPPER_PATH } from '../docker/docker-build-shim.js';
 import {
   PRIVATE_DOCKER_API_DIR,
   PRIVATE_DOCKER_CLIENT,
@@ -81,7 +83,7 @@ export const APPLE_VM_DAEMON_LOG_PATH = `${APPLE_VM_DAEMON_API_DIR}/dockerd.log`
 
 const APPLE_VM_DAEMON_HOME = '/home/codespace';
 const APPLE_VM_DAEMON_PATH = `/usr/bin:/bin:${APPLE_VM_DAEMON_TOOLCHAIN_DIR}`;
-const APPLE_VM_DAEMON_PACKAGE_PATH = `/usr/local/sbin:${APPLE_VM_DAEMON_PATH}`;
+const APPLE_VM_DAEMON_PACKAGE_PATH = `${posix.dirname(DOCKER_BUILD_TRUST_WRAPPER_PATH)}:/usr/local/sbin:${APPLE_VM_DAEMON_PATH}`;
 const APPLE_VM_EGRESS_RELAY_NODE = '/usr/local/bin/node';
 export const APPLE_VM_EGRESS_RELAY_PATH = '/usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs';
 
@@ -203,6 +205,8 @@ function renderEgressDaemonInnerScript(profile: AppleVmEgressRelayProfile): stri
   const includePackageRelay = profile === 'packages';
   return [
     ...APPLE_VM_DAEMON_NETWORK_PREREQUISITES,
+    // BuildKit resolves runc through the daemon's inherited PATH.
+    ...(includePackageRelay ? [`[ "$(command -v runc)" = "${DOCKER_BUILD_TRUST_WRAPPER_PATH}" ]`] : []),
     `test -S ${APPLE_VM_REGISTRY_EGRESS_SOCKET}`,
     ...(includePackageRelay ? [`test -S ${APPLE_VM_PACKAGE_EGRESS_SOCKET}`] : []),
     'unset ALL_PROXY all_proxy NO_PROXY no_proxy HTTP_PROXY HTTPS_PROXY http_proxy https_proxy SSL_CERT_FILE',

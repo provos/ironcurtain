@@ -21,7 +21,6 @@ import {
   createMockDocker,
   createMockMitmProxy,
   createMockProxy,
-  createMockRuntimeTrust,
 } from './helpers/docker-mocks.js';
 
 // --- AuditLogTailer tests ---
@@ -211,7 +210,6 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     docker: opts.docker ?? createMockDocker(),
     adapter: opts.adapter ?? createMockAdapter(),
     ca: createMockCA(opts.tempDir),
-    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     orientationDir: join(opts.sessionDir, 'orientation'),
     systemPrompt: 'You are a test agent.',

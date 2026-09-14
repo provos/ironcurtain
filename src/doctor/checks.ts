@@ -49,63 +49,28 @@ export interface CheckResult {
 }
 
 /**
- * Fully supported (tested) major lines: the even-numbered Node.js releases.
- * 24 and 26 ship prebuilt `isolated-vm` binaries; 22 source-compiles the V8
- * sandbox at install. In-range odd lines (23, 25) are non-LTS, ship no prebuilt
- * binary, and are not validated — they get a `warn`, not an `ok`.
+ * Fully supported (tested) major lines: the even-numbered Node.js releases
+ * supported by isolated-vm 7.0.1.
  */
-const SUPPORTED_MAJORS = [22, 24, 26];
-/** Outer bounds — derived from SUPPORTED_MAJORS so they can't drift from it. */
-const NODE_MIN_MAJOR = Math.min(...SUPPORTED_MAJORS);
-const NODE_MAX_MAJOR = Math.max(...SUPPORTED_MAJORS);
-/**
- * Minor floor on the oldest supported major. The LLM-metrics SQLite worker
- * boots through an ESM entry shim that requires `module.registerHooks`, added
- * in Node 22.15. Keep in sync with the `engines` field in package.json.
- */
-const NODE_MIN_MINOR_ON_MIN_MAJOR = 15;
+const SUPPORTED_MAJORS = [24, 26];
 
 export function checkNodeVersion(versionString: string = process.versions.node): CheckResult {
   const match = /^(\d+)\.(\d+)/.exec(versionString);
   const major = match ? Number(match[1]) : NaN;
-  const minor = match ? Number(match[2]) : NaN;
   if (!Number.isFinite(major)) {
     return {
       name: 'Node.js',
       status: 'fail',
       message: `unrecognized version "${versionString}"`,
-      hint: `Install Node.js 22, 24, or 26 from https://nodejs.org/`,
-    };
-  }
-  if (major < NODE_MIN_MAJOR || major > NODE_MAX_MAJOR) {
-    return {
-      name: 'Node.js',
-      status: 'fail',
-      message: `${versionString} (unsupported)`,
-      hint:
-        'IronCurtain supports Node.js 22, 24, or 26. ' +
-        'Node 22 source-compiles the V8 sandbox (isolated-vm); 24 and 26 use prebuilt binaries.',
-    };
-  }
-  if (major === NODE_MIN_MAJOR && minor < NODE_MIN_MINOR_ON_MIN_MAJOR) {
-    return {
-      name: 'Node.js',
-      status: 'fail',
-      message: `${versionString} (unsupported)`,
-      hint:
-        `IronCurtain requires Node ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR_ON_MIN_MAJOR} or newer on the ` +
-        `${NODE_MIN_MAJOR}.x line — the LLM-metrics SQLite worker needs module.registerHooks. ` +
-        'Upgrade to the latest Node 22, or use Node 24 or 26.',
+      hint: `Install Node.js 24 or 26 from https://nodejs.org/`,
     };
   }
   if (!SUPPORTED_MAJORS.includes(major)) {
     return {
       name: 'Node.js',
-      status: 'warn',
-      message: `${versionString} (untested)`,
-      hint:
-        `Node ${major} is a non-LTS line IronCurtain doesn't test; ` +
-        'isolated-vm ships no prebuilt binary for it and will source-compile. Prefer Node 22, 24, or 26.',
+      status: 'fail',
+      message: `${versionString} (unsupported)`,
+      hint: 'IronCurtain supports Node.js 24 or 26; both use prebuilt isolated-vm binaries.',
     };
   }
   return {

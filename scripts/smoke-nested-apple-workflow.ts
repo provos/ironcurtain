@@ -1,14 +1,14 @@
 #!/usr/bin/env tsx
 
-/** No-LLM, production-workflow acceptance for the admitted Apple nested-Docker runtime. */
+/** No-LLM, production-workflow acceptance for an admitted nested-Docker runtime. */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -25,6 +26,12 @@ import {
   type DockerWorkloadLease,
 } from '../src/docker-workload/bundle-lease.js';
 import { createContainerRuntime } from '../src/docker/container-runtime.js';
+import { defaultExecFile } from '../src/docker/docker-manager.js';
+import {
+  dockerEndpointEnvironment,
+  resolveDockerEndpoint,
+  type DockerEndpoint,
+} from '../src/docker/docker-endpoint.js';
 import { DOCKER_BUILD_PROXY_CONFIG_DIRECTORY } from '../src/docker/docker-build-shim.js';
 import {
   PACKAGE_EGRESS_AUDIT_FILENAME,
@@ -42,20 +49,73 @@ import {
 import type { BundleId } from '../src/session/types.js';
 import { appendBoundedOutput } from './smoke-nested-apple-tui.js';
 import { waitForSmokeChild } from './smoke-child-process.js';
+import { WorkflowSmokeHostObserver } from './workflow-smoke-host-observer.js';
+import { WORKFLOW_CHILD_TIMEOUT_MS, WORKFLOW_CLEANUP_TIMEOUT_MS } from './workflow-smoke-timeouts.js';
+
+import {
+  createSmokeRoot,
+  parseSmokeTarget,
+  withIronCurtainHome,
+  workflowSmokePlacement,
+  type SmokeTarget,
+} from './smoke-environment.js';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..');
 const CLI_PATH = resolve(PACKAGE_ROOT, 'dist', 'cli.js');
 const FAKE_API_KEY = 'sk-ant-api03-IRONCURTAIN-WORKFLOW-SMOKE-FAKE-ONLY';
 const WORKFLOW_NAME = 'nested-docker-live-smoke';
-const WORKFLOW_STATE_TIMEOUT_MS = 72 * 60_000;
-const WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS = 20 * 60_000;
-const CHILD_TIMEOUT_MS = WORKFLOW_STATE_TIMEOUT_MS + WORKFLOW_STARTUP_TEARDOWN_RESERVE_MS;
-const CLEANUP_TIMEOUT_MS = 10 * 60_000;
 const MAX_CAPTURED_OUTPUT_BYTES = 512 * 1024;
 const MAX_PERSISTED_MOUNT_PATH_BYTES = 4096;
 const PACKAGE_EGRESS_REASON_CODE_SET = new Set<string>(PACKAGE_EGRESS_AUDIT_REASON_CODES);
 const PACKAGE_EGRESS_HOST_SET = new Set<string>(PACKAGE_EGRESS_AUDIT_HOSTS);
+const WORKFLOW_FIXTURE_SOURCE = 'python:3.12-slim-bookworm';
+const WORKFLOW_FIXTURE_ARCHIVE = '.workflow-fixtures/python.tar';
+
+interface WorkflowSmokeFixture {
+  readonly archivePath: string;
+  readonly image: string;
+}
+
+/** Test task data travels through the existing workflow task interface, not production environment passthrough. */
+export function buildWorkflowSmokeTask(mode: SmokeMode, target: SmokeTarget, fixture?: WorkflowSmokeFixture): string {
+  if (target === 'apple') return mode;
+  if (fixture === undefined) throw new Error('sidecar workflow smoke requires its test-only fixture archive');
+  const uid = target === 'wsl-desktop' ? process.getuid?.() : 1000;
+  const gid = target === 'wsl-desktop' ? process.getgid?.() : 1000;
+  if (uid === undefined || gid === undefined || uid < 1)
+    throw new Error('sidecar workflow smoke needs a non-root host identity');
+  return JSON.stringify({
+    schemaVersion: 1,
+    mode,
+    placement: 'sidecar',
+    fixtureArchive: WORKFLOW_FIXTURE_ARCHIVE,
+    fixtureImage: fixture.image,
+    uid,
+    gid,
+  });
+}
+
+async function stageWorkflowSmokeFixture(
+  root: string,
+  runtime: ReturnType<typeof createContainerRuntime>,
+): Promise<WorkflowSmokeFixture> {
+  if (runtime.tagImage === undefined || runtime.saveImageArchive === undefined) {
+    throw new Error('Docker workflow fixture requires image tagging and archive export');
+  }
+  if (!(await runtime.imageExists(WORKFLOW_FIXTURE_SOURCE))) await runtime.pullImage(WORKFLOW_FIXTURE_SOURCE);
+  const source = await runtime.inspectImage(WORKFLOW_FIXTURE_SOURCE);
+  if (source === undefined) throw new Error('workflow fixture image is unavailable');
+  const image = `localhost/ironcurtain-workflow-fixture:${randomUUID()}`;
+  const archivePath = resolve(root, 'workflow-fixture.tar');
+  await runtime.tagImage(source.id, image);
+  try {
+    await runtime.saveImageArchive(image, archivePath);
+    return { image, archivePath };
+  } finally {
+    await runtime.removeImage(image);
+  }
+}
 
 type NetworkSmokeMode = 'packages' | 'images' | 'offline';
 export type SmokeMode = NetworkSmokeMode | 'admission';
@@ -170,21 +230,25 @@ export interface PersistedOuterMount {
 
 async function main(): Promise<void> {
   if (!existsSync(CLI_PATH)) throw new Error(`built CLI is missing: ${CLI_PATH}; run npm run build`);
-  const modes = parseModes(process.argv.slice(2));
-  const smokeRoot = realpathSync(mkdtempSync('/private/tmp/ic-naw-'));
+  const invocation = parseSmokeTarget(process.argv.slice(2));
+  const target = invocation.target ?? 'apple';
+  const modes = parseModes(invocation.arguments);
+  const smokeRoot = createSmokeRoot('ic-naw-');
   const smokeHome = resolve(smokeRoot, 'home');
   let succeeded = false;
 
   try {
     chmodSync(smokeRoot, 0o700);
     mkdirSync(smokeHome, { mode: 0o700 });
-    const runtime = createContainerRuntime('apple-container');
+    const endpoint = target === 'apple' ? undefined : await resolveDockerEndpoint(defaultExecFile);
+    const runtime = createContainerRuntime(workflowSmokePlacement(target).runtimeKind, endpoint);
+    const fixture = target === 'apple' ? undefined : await stageWorkflowSmokeFixture(smokeRoot, runtime);
     const captureTagsBefore = await listCaptureTags(runtime);
 
     for (const mode of modes) {
-      await runMode({ mode, smokeRoot, smokeHome, runtime });
+      await runMode({ mode, smokeRoot, smokeHome, runtime, target, fixture, endpoint });
     }
-    await runMode({ mode: 'admission', smokeRoot, smokeHome, runtime });
+    await runMode({ mode: 'admission', smokeRoot, smokeHome, runtime, target, fixture, endpoint });
 
     const captureTagsAfter = await listCaptureTags(runtime);
     const addedCaptureTags = [...captureTagsAfter].filter((tag) => !captureTagsBefore.has(tag));
@@ -193,31 +257,50 @@ async function main(): Promise<void> {
     }
     assertNoProviderRequest(smokeHome);
     succeeded = true;
-    process.stderr.write(`nested Apple workflow smoke passed (${modes.join(' + ')} + next admission, no LLM)\n`);
+    process.stderr.write(`nested ${target} workflow smoke passed (${modes.join(' + ')} + next admission, no LLM)\n`);
   } finally {
     if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
-    else process.stderr.write(`nested Apple workflow smoke retained diagnostics at ${smokeRoot}\n`);
+    else process.stderr.write(`nested ${target} workflow smoke retained diagnostics at ${smokeRoot}\n`);
   }
 }
 
 async function runMode(options: {
   readonly mode: SmokeMode;
+  readonly target: SmokeTarget;
+  readonly fixture?: WorkflowSmokeFixture;
+  readonly endpoint?: DockerEndpoint;
   readonly smokeRoot: string;
   readonly smokeHome: string;
   readonly runtime: ReturnType<typeof createContainerRuntime>;
 }): Promise<void> {
-  const { mode, smokeRoot, smokeHome, runtime } = options;
+  const { mode, smokeRoot, smokeHome, runtime, target, fixture, endpoint } = options;
   const workspace = resolve(smokeRoot, `workspace-${mode}`);
   mkdirSync(workspace, { mode: 0o700 });
-  writeConfig(smokeHome, mode);
+  if (fixture !== undefined) {
+    mkdirSync(resolve(workspace, '.workflow-fixtures'), { mode: 0o700 });
+    linkSync(fixture.archivePath, resolve(workspace, WORKFLOW_FIXTURE_ARCHIVE));
+  }
+  writeConfig(smokeHome, mode, target);
   const leasesBefore = new Set(listLeasePaths(smokeHome));
   const packageAuditsBefore = new Set(listFilesNamed(smokeHome, PACKAGE_EGRESS_AUDIT_FILENAME));
-  const argv = [CLI_PATH, 'workflow', 'start', WORKFLOW_NAME, mode, '--workspace', workspace, '--strict-lint'];
+  const argv = [
+    CLI_PATH,
+    'workflow',
+    'start',
+    WORKFLOW_NAME,
+    buildWorkflowSmokeTask(mode, target, fixture),
+    '--workspace',
+    workspace,
+    '--strict-lint',
+  ];
   process.stderr.write(`\n[${mode}] ${JSON.stringify([process.execPath, ...argv])}\n`);
 
   const child = spawn(process.execPath, argv, {
     cwd: smokeRoot,
-    env: childEnvironment(smokeHome),
+    env:
+      endpoint === undefined
+        ? childEnvironment(smokeHome, target)
+        : dockerEndpointEnvironment(endpoint, childEnvironment(smokeHome, target)),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -232,7 +315,45 @@ async function runMode(options: {
   });
   child.stdin.end();
 
-  const exit = await waitForSmokeChild(child, CHILD_TIMEOUT_MS);
+  const hostObserver =
+    target !== 'apple' && mode === 'packages'
+      ? new WorkflowSmokeHostObserver({
+          runtime,
+          workspace,
+          probeSource: resolve(
+            PACKAGE_ROOT,
+            'src/workflow/workflows/nested-docker-live-smoke/scripts/nested_docker_probe.py',
+          ),
+          daemonExecUser: target === 'wsl-desktop' ? `${process.getuid!()}:${process.getgid!()}` : '1000:1000',
+          getLeasePath: () => {
+            const paths = listLeasePaths(smokeHome).filter((path) => !leasesBefore.has(path));
+            if (paths.length !== 1) throw new Error('host observation requires exactly one new lease');
+            return paths[0]!;
+          },
+          getStagingRoot: (lease) =>
+            withIronCurtainHome(smokeHome, () =>
+              resolve(getBundleRuntimeRoot(lease.bundleId as BundleId), 'package-build-runtime', 'trust'),
+            ),
+          onFailure: () => {
+            child.kill('SIGTERM');
+          },
+        })
+      : undefined;
+  let hostObservationFailure: Error | undefined;
+  const exit = await waitForSmokeChild(child, WORKFLOW_CHILD_TIMEOUT_MS).finally(async () => {
+    try {
+      await hostObserver?.stop();
+    } catch (error) {
+      hostObservationFailure = toError(error);
+    }
+  });
+  if (hostObserver !== undefined && hostObservationFailure === undefined) {
+    try {
+      hostObserver.assertComplete();
+    } catch (error) {
+      hostObservationFailure = toError(error);
+    }
+  }
   const resultPath = resolve(workspace, '.workflow', 'nested-docker-result.json');
   let result: WorkflowProbeResult | undefined;
   let resultReadFailure: Error | undefined;
@@ -266,7 +387,7 @@ async function runMode(options: {
     }
   }
 
-  const evidenceFailures: Error[] = [];
+  const evidenceFailures: Error[] = hostObservationFailure === undefined ? [] : [hostObservationFailure];
   let newLeasePaths: readonly string[] | undefined;
   try {
     newLeasePaths = listLeasePaths(smokeHome).filter((path) => !leasesBefore.has(path));
@@ -283,13 +404,13 @@ async function runMode(options: {
   } else if (newLeasePaths !== undefined) {
     let closedLease: DockerWorkloadLease | undefined;
     try {
-      closedLease = await waitForClosedLease(newLeasePaths[0]!, CLEANUP_TIMEOUT_MS);
+      closedLease = await waitForClosedLease(newLeasePaths[0]!, WORKFLOW_CLEANUP_TIMEOUT_MS);
     } catch (error) {
       evidenceFailures.push(toError(error));
     }
     if (closedLease !== undefined) {
       try {
-        validatePersistedPackageBuildMountEvidence(mode, smokeHome, closedLease);
+        validatePersistedPackageBuildMountEvidence(mode, smokeHome, closedLease, target);
       } catch (error) {
         evidenceFailures.push(toError(error));
       }
@@ -325,14 +446,14 @@ function parseModes(args: readonly string[]): readonly NetworkSmokeMode[] {
   throw new Error('usage: smoke-nested-apple-workflow.ts [--packages|--images|--offline]');
 }
 
-function writeConfig(home: string, mode: SmokeMode): void {
+function writeConfig(home: string, mode: SmokeMode, target: SmokeTarget): void {
   const networkAccess = mode === 'admission' ? 'offline' : mode;
   const dockerWorkload = { enabled: true, networkAccess };
   const config = {
     anthropicApiKey: FAKE_API_KEY,
     preferredMode: 'container',
     preferredDockerAgent: 'claude-code',
-    containerRuntime: 'apple-container',
+    containerRuntime: workflowSmokePlacement(target).runtimeKind,
     dockerResources: { memoryMb: 4096, cpus: 2 },
     dockerWorkload,
     packageInstall: {
@@ -347,11 +468,11 @@ function writeConfig(home: string, mode: SmokeMode): void {
   chmodSync(path, 0o600);
 }
 
-function childEnvironment(home: string): NodeJS.ProcessEnv {
+function childEnvironment(home: string, target: SmokeTarget): NodeJS.ProcessEnv {
   return {
     ...process.env,
     IRONCURTAIN_HOME: home,
-    IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container',
+    IRONCURTAIN_CONTAINER_RUNTIME: workflowSmokePlacement(target).runtimeKind,
     IRONCURTAIN_DOCKER_AUTH: 'apikey',
     ANTHROPIC_API_KEY: FAKE_API_KEY,
     NO_COLOR: '1',
@@ -406,17 +527,18 @@ async function assertClosedLease(
       throw new Error(`closed lease removal identity changed for ${resource.requestedName}`);
     }
     if (resource.kind === 'container' && (await runtime.containerExists(resource.observedId))) {
-      throw new Error(`exact outer Apple VM still exists: ${resource.observedId}`);
+      throw new Error(`exact outer container still exists: ${resource.observedId}`);
     }
   }
 
-  if (runtime.listContainers === undefined) throw new Error('Apple runtime cannot inventory generation-owned VMs');
+  if (runtime.listContainers === undefined)
+    throw new Error('container runtime cannot inventory generation-owned containers');
   const representative = lease.resources[0];
   if (representative === undefined) throw new Error('closed lease recorded no outer resources');
   const owned = await runtime.listContainers({
     labelFilter: `${representative.ownershipLabelKey}=${representative.ownershipLabelValue}`,
   });
-  if (owned.length !== 0) throw new Error('generation-owned Apple VM inventory is not empty');
+  if (owned.length !== 0) throw new Error('generation-owned outer-container inventory is not empty');
 
   const bundleId = lease.bundleId as BundleId;
   const bundlePaths = withIronCurtainHome(home, () => [
@@ -429,7 +551,12 @@ async function assertClosedLease(
   }
 }
 
-function validatePersistedPackageBuildMountEvidence(mode: SmokeMode, home: string, lease: DockerWorkloadLease): void {
+function validatePersistedPackageBuildMountEvidence(
+  mode: SmokeMode,
+  home: string,
+  lease: DockerWorkloadLease,
+  target: SmokeTarget,
+): void {
   const matches: PersistedOuterMount[][] = [];
   for (const auditPath of listFilesNamed(home, 'audit.jsonl')) {
     const stats = lstatSync(auditPath);
@@ -465,7 +592,31 @@ function validatePersistedPackageBuildMountEvidence(mode: SmokeMode, home: strin
     throw new Error(`expected one persisted agent outer-create mount record, found ${matches.length}`);
   }
   const bundleRuntimeRoot = withIronCurtainHome(home, () => getBundleRuntimeRoot(lease.bundleId as BundleId));
-  validatePackageBuildMounts(mode, home, bundleRuntimeRoot, matches[0]);
+  let bindMounts = matches[0]!;
+  if (target !== 'apple') {
+    const volumes = lease.resources.filter((resource) => resource.kind === 'volume' && resource.role === 'daemon-api');
+    if (volumes.length !== 1 || volumes[0]!.observedId === null)
+      throw new Error('workflow lacks one observed daemon API volume');
+    bindMounts = validateWorkflowAgentApiMount(bindMounts, volumes[0]!.observedId);
+  }
+  validatePackageBuildMounts(mode, home, bundleRuntimeRoot, bindMounts, target);
+}
+
+/** Named volumes have a distinct authority check before ordinary host bind-path validation. */
+export function validateWorkflowAgentApiMount(
+  mounts: readonly PersistedOuterMount[],
+  volumeId: string,
+): PersistedOuterMount[] {
+  const candidates = mounts.filter((mount) => mount.source === volumeId || mount.target === '/run/ironcurtain-docker');
+  if (
+    candidates.length !== 1 ||
+    candidates[0]!.source !== volumeId ||
+    candidates[0]!.target !== '/run/ironcurtain-docker' ||
+    !candidates[0]!.readonly
+  ) {
+    throw new Error('workflow agent API mount is not exactly the leased read-only volume');
+  }
+  return mounts.filter((mount) => mount !== candidates[0]);
 }
 
 function isPersistedOuterMount(value: unknown): value is PersistedOuterMount {
@@ -484,6 +635,7 @@ export function validatePackageBuildMounts(
   home: string,
   bundleRuntimeRoot: string,
   mounts: readonly PersistedOuterMount[],
+  target: SmokeTarget = 'apple',
 ): void {
   const packageRuntimeRoot = resolve(bundleRuntimeRoot, 'package-build-runtime');
   const caRoot = resolve(home, 'ca');
@@ -528,7 +680,7 @@ export function validatePackageBuildMounts(
     if (overlaps(mount.source, caRoot)) {
       throw new Error('outer-create mount evidence exposes the host CA directory');
     }
-    if (isWithin(packageRuntimeRoot, mount.source)) {
+    if (isWithin(packageRuntimeRoot, mount.source) && mount.source !== packageRuntimeRoot) {
       throw new Error('outer-create mount evidence exposes an ancestor of the package runtime root');
     }
     if (hasPrivateArtifactName(mount.source, true) || hasPrivateArtifactName(mount.target, false)) {
@@ -538,8 +690,8 @@ export function validatePackageBuildMounts(
 
   const protectedTargets = [
     '/usr/local/sbin/docker',
-    '/usr/local/sbin/runc',
-    '/opt/ironcurtain-build-trust',
+    '/ironcurtain-real-runc',
+    '/ironcurtain-build-trust',
     DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
   ] as const;
   const reservedTarget = (target: string): boolean =>
@@ -559,37 +711,19 @@ export function validatePackageBuildMounts(
       target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
       readonly: true,
     },
-    { source: resolve(packageRuntimeRoot, 'runc'), target: '/usr/local/sbin/runc', readonly: true },
-    {
-      source: resolve(packageRuntimeRoot, 'build-trust-contract.json'),
-      target: '/opt/ironcurtain-build-trust/build-trust-contract.json',
-      readonly: true,
-    },
-    {
-      source: resolve(packageRuntimeRoot, 'ca-cert.pem'),
-      target: '/opt/ironcurtain-build-trust/ca-cert.pem',
-      readonly: true,
-    },
-    {
-      source: resolve(packageRuntimeRoot, 'ca-bundle.pem'),
-      target: '/opt/ironcurtain-build-trust/ca-bundle.pem',
-      readonly: true,
-    },
-    {
-      source: resolve(packageRuntimeRoot, 'apt.conf'),
-      target: '/opt/ironcurtain-build-trust/apt.conf',
-      readonly: true,
-    },
+    { source: resolve(packageRuntimeRoot, 'trust'), target: '/ironcurtain-build-trust', readonly: true },
+    { source: resolve(packageRuntimeRoot, 'real-runc'), target: '/ironcurtain-real-runc', readonly: true },
   ];
+  const expectedAgentMounts = target === 'apple' ? expected : expected.slice(0, 2);
   const canonical = (values: readonly PersistedOuterMount[]): string =>
     JSON.stringify([...values].sort((left, right) => left.target.localeCompare(right.target)));
-  if (canonical(observed) !== canonical(expected)) {
+  if (canonical(observed) !== canonical(expectedAgentMounts)) {
     throw new Error('[packages] persisted package-build mount allowlist is not exact');
   }
   const packageSources = normalizedMounts
     .filter((mount) => isWithin(mount.source, packageRuntimeRoot))
     .map((mount) => mount.raw);
-  if (canonical(packageSources) !== canonical(expected)) {
+  if (canonical(packageSources) !== canonical(expectedAgentMounts)) {
     throw new Error('[packages] package-build runtime root contains an extra exposed source');
   }
   const orientation = normalizedMounts.filter((mount) => mount.target === '/etc/ironcurtain');
@@ -870,17 +1004,6 @@ function listFilesNamed(root: string, filename: string): readonly string[] {
     }
   }
   return results.sort();
-}
-
-function withIronCurtainHome<T>(home: string, operation: () => T): T {
-  const previous = process.env.IRONCURTAIN_HOME;
-  process.env.IRONCURTAIN_HOME = home;
-  try {
-    return operation();
-  } finally {
-    if (previous === undefined) delete process.env.IRONCURTAIN_HOME;
-    else process.env.IRONCURTAIN_HOME = previous;
-  }
 }
 
 async function listCaptureTags(runtime: ReturnType<typeof createContainerRuntime>): Promise<ReadonlySet<string>> {
