@@ -1,7 +1,9 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { DOCKER_BUILD_TRUST_WRAPPER_PATH } from '../../src/docker/docker-build-shim.js';
 import {
   APPLE_VM_DAEMON_API_DIR,
   APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT,
@@ -236,11 +238,48 @@ describe('Apple VM nested-daemon frozen commands', () => {
     }
   });
 
-  it('keeps /usr/bin ahead of the toolchain dir so the image-capped newuidmap wins', () => {
-    const script = APPLE_VM_DAEMON_START_ARGV[2];
-    const path = /PATH=(\S+)/u.exec(script)?.[1].split(':') ?? [];
-    expect(path.indexOf('/usr/bin')).toBeGreaterThanOrEqual(0);
-    expect(path.indexOf('/usr/bin')).toBeLessThan(path.indexOf(APPLE_VM_DAEMON_TOOLCHAIN_DIR));
+  it.each([
+    ['offline', APPLE_VM_DAEMON_START_ARGV],
+    ['images', APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV],
+    ['packages', APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV],
+  ] as const)('selects the correct runc and privileged newuidmap for %s', (profile, argv) => {
+    const root = mkdtempSync(join(tmpdir(), 'apple-daemon-path-'));
+    try {
+      // Mirror the guest executable locations without requiring an Apple VM.
+      for (const executable of [
+        DOCKER_BUILD_TRUST_WRAPPER_PATH,
+        `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/runc`,
+        `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/newuidmap`,
+        '/usr/bin/newuidmap',
+      ]) {
+        const target = join(root, executable);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      }
+      const path = /PATH=(\S+)/u.exec(argv[2])?.[1].split(':') ?? [];
+      const result = spawnSync('/bin/sh', ['-c', 'command -v runc; command -v newuidmap'], {
+        env: { PATH: path.map((directory) => join(root, directory)).join(':') },
+        encoding: 'utf8',
+      });
+      const expectedRunc =
+        profile === 'packages' ? DOCKER_BUILD_TRUST_WRAPPER_PATH : `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/runc`;
+      expect(result).toMatchObject({
+        status: 0,
+        stderr: '',
+        stdout: `${join(root, expectedRunc)}\n${join(root, '/usr/bin/newuidmap')}\n`,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('checks the selected package runc before launching dockerd', () => {
+    const script = APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV[2];
+    const check = script.indexOf(`[ "$(command -v runc)" = "${DOCKER_BUILD_TRUST_WRAPPER_PATH}" ]`);
+    expect(check).toBeGreaterThanOrEqual(0);
+    expect(check).toBeLessThan(script.lastIndexOf('dockerd --host='));
+    expect(APPLE_VM_DAEMON_START_ARGV[2]).not.toContain('command -v runc');
+    expect(APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2]).not.toContain('command -v runc');
   });
 
   it('never binds or publishes the daemon API outside the VM', () => {
