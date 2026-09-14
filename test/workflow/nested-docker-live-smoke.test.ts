@@ -146,7 +146,7 @@ describe('nested-docker-live-smoke workflow', () => {
     expect(exec).toHaveBeenCalledWith(
       'container-deterministic-smoke',
       ['python3', '/workflow-scripts/nested_docker_probe.py'],
-      4_320_000,
+      5_580_000,
       'codespace',
       '/workspace',
     );
@@ -1212,7 +1212,7 @@ else:
   it('budgets aggregate package work and cleanup below finite state and child deadlines', () => {
     const workflow = readFileSync(resolve(WORKFLOW_ROOT, 'workflow.yaml'), 'utf8');
     const workflowTimeout = Number(/timeoutMs:\s*(\d+)/u.exec(workflow)?.[1]);
-    expect(workflowTimeout).toBe(72 * 60_000);
+    expect(workflowTimeout).toBe(93 * 60_000);
     runProbeAssertion(String.raw`
 import runpy, sys
 module = runpy.run_path(sys.argv[1], run_name="probe_test")
@@ -1227,7 +1227,8 @@ critical = (
     + module["PACKAGE_SNAPSHOT_SCAN_PREFLIGHT_TIMEOUT_SECONDS"]
     + module["PACKAGE_SNAPSHOT_SCAN_TIMEOUT_SECONDS"]
 )
-assert critical == module["PACKAGE_CRITICAL_OPERATION_BUDGET_SECONDS"] == 2650
+assert module["PACKAGE_IMAGE_PULL_TIMEOUT_SECONDS"] == 600
+assert critical == module["PACKAGE_CRITICAL_OPERATION_BUDGET_SECONDS"] == 3910
 assert (critical + module["PACKAGE_WORKFLOW_RESERVE_SECONDS"]) * 1000 <= ${workflowTimeout}
 `);
     expect(WORKFLOW_STATE_TIMEOUT_MS).toBe(workflowTimeout);
@@ -3703,7 +3704,7 @@ assert calls == []
         target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
         readonly: true,
       },
-      { source: packageRoot, target: '/ironcurtain-build-trust', readonly: true },
+      { source: `${packageRoot}/trust`, target: '/ironcurtain-build-trust', readonly: true },
       { source: `${packageRoot}/real-runc`, target: '/ironcurtain-real-runc', readonly: true },
     ];
     expect(() => validatePackageBuildMounts('packages', home, runtimeRoot, valid)).not.toThrow();

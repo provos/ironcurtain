@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getBundleRuntimeRoot } from '../../src/config/paths.js';
 import {
@@ -130,7 +130,7 @@ describe('package build-trust staging', () => {
       expect(staged.buildTrustCanary.caCertificate).toBe('fixture-ca-cert.pem\n');
       const mounts = buildDockerBuildShimMounts({ runtimeKind: 'apple-container', dockerBuildShim: staged });
       expect(mounts).toContainEqual({
-        source: join(getBundleRuntimeRoot(BUNDLE_ID), 'package-build-runtime'),
+        source: join(getBundleRuntimeRoot(BUNDLE_ID), 'package-build-runtime', 'trust'),
         target: '/ironcurtain-build-trust',
         readonly: true,
       });
@@ -154,12 +154,26 @@ describe('package build-trust staging', () => {
       target: DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
       readonly: true,
     });
+    const mounts = buildDockerBuildShimMounts({ runtimeKind: 'apple-container', dockerBuildShim: staged });
+    for (const mount of mounts) {
+      expect(mounts.some((other) => other !== mount && other.source.startsWith(`${mount.source}/`))).toBe(false);
+    }
   });
   it('does not publish a partial generation on invalid executable architecture', () => {
     expect(() =>
       stageDockerBuildShim(BUNDLE_ID, 'packages', { ...options(), protectedRealRunc: executable('arm64') }),
     ).toThrow(/architecture/u);
     expect(readdirSync(getBundleRuntimeRoot(BUNDLE_ID))).toEqual([]);
+  });
+  it('preserves the protected directory permissions with a restrictive coordinator umask', () => {
+    const previousUmask = process.umask(0o077);
+    try {
+      const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', options())!;
+      const contract = staged.artifacts.find(({ kind }) => kind === 'build-trust-contract')!;
+      expect(lstatSync(dirname(contract.source)).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(previousUmask);
+    }
   });
   it('rejects public input symlinks without publishing authority', () => {
     rmSync(join(orientationDir, 'ca-cert.pem'));

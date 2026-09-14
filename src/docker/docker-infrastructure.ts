@@ -219,11 +219,12 @@ export function ensureSecureBundleDir(path: string): void {
 const DOCKER_BUILD_SHIM_STAGING_SUBDIR = 'package-build-runtime';
 const DOCKER_BUILD_SHIM_SOURCE_NAME = 'docker';
 const DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR = 'package-build-client';
-const DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME = 'runc';
-const DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME = 'build-trust-contract.json';
-const DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME = 'ca-cert.pem';
-const DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME = 'ca-bundle.pem';
-const DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME = 'apt.conf';
+const DOCKER_BUILD_TRUST_SOURCE_SUBDIR = 'trust';
+const DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME = 'trust/runc';
+const DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME = 'trust/build-trust-contract.json';
+const DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME = 'trust/ca-cert.pem';
+const DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME = 'trust/ca-bundle.pem';
+const DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME = 'trust/apt.conf';
 const CA_GENERATION_PATTERN = /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function writeExactStagedFile(path: string, content: string | Buffer, mode: number): void {
@@ -293,6 +294,12 @@ export function stageDockerBuildShim(
     artifacts.push({ kind, source: resolve(stagingRoot, name), target, readonly: true });
   };
   try {
+    // Apple Container drops a directory share when its host descendants are
+    // also mounted elsewhere. Keep the protected directory disjoint from the
+    // separately mounted CLI, client config, and real-runc sources on both backends.
+    const trustDirectory = resolve(temporary, DOCKER_BUILD_TRUST_SOURCE_SUBDIR);
+    mkdirSync(trustDirectory, { mode: 0o755 });
+    chmodSync(trustDirectory, 0o755);
     stage(
       'docker-shim',
       DOCKER_BUILD_SHIM_SOURCE_NAME,

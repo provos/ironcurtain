@@ -332,7 +332,7 @@ async function runMode(options: {
           },
           getStagingRoot: (lease) =>
             withIronCurtainHome(smokeHome, () =>
-              resolve(getBundleRuntimeRoot(lease.bundleId as BundleId), 'package-build-runtime'),
+              resolve(getBundleRuntimeRoot(lease.bundleId as BundleId), 'package-build-runtime', 'trust'),
             ),
           onFailure: () => {
             child.kill('SIGTERM');
@@ -711,7 +711,7 @@ export function validatePackageBuildMounts(
       target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
       readonly: true,
     },
-    { source: packageRuntimeRoot, target: '/ironcurtain-build-trust', readonly: true },
+    { source: resolve(packageRuntimeRoot, 'trust'), target: '/ironcurtain-build-trust', readonly: true },
     { source: resolve(packageRuntimeRoot, 'real-runc'), target: '/ironcurtain-real-runc', readonly: true },
   ];
   const expectedAgentMounts = target === 'apple' ? expected : expected.slice(0, 2);

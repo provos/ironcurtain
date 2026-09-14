@@ -351,7 +351,9 @@ PACKAGE_BUILD_FORMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("builder-build", ("builder", "build")),
     ("buildx-build", ("buildx", "build", "--load")),
 )
-PACKAGE_IMAGE_PULL_TIMEOUT_SECONDS = 180
+# The ARM64 Rust fixture includes a 325 MB compressed layer. Allow a cold
+# proxied transfer plus extraction on slower hosts without making pulls unbounded.
+PACKAGE_IMAGE_PULL_TIMEOUT_SECONDS = 600
 PACKAGE_NETWORK_BUILD_TIMEOUT_SECONDS = 900
 PACKAGE_FORM_BUILD_TIMEOUT_SECONDS = 90
 PACKAGE_CACHE_BUILD_TIMEOUT_SECONDS = 180

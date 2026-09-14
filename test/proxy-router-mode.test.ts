@@ -128,8 +128,10 @@ describe('mcp-proxy-server pass-through mode', () => {
   it('treats controlling-stdio EOF as parent death and reaps its backend', async () => {
     const backendPidPath = join(workDir, 'backend.pid');
     const backendScript = `
-      const { writeFileSync } = require('node:fs');
-      writeFileSync(process.env.IRONCURTAIN_TEST_BACKEND_PID_FILE, String(process.pid));
+      const { writeFileSync, renameSync } = require('node:fs');
+      const pidFile = process.env.IRONCURTAIN_TEST_BACKEND_PID_FILE;
+      writeFileSync(pidFile + '.tmp', String(process.pid));
+      renameSync(pidFile + '.tmp', pidFile);
       let input = '';
       process.stdin.setEncoding('utf8');
       process.stdin.on('data', (chunk) => {
