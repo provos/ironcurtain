@@ -1,51 +1,15 @@
-**Linux nested-Docker assessment — updated 2026-09-15**
+# Historical Linux nested-Docker assessment — 2026-09-10
 
-**Current implementation status**
-
-PR #467, merged as `d8c1d71`, implements nested Docker for WSL2 with Docker Desktop on
-amd64. The [implementation design](linux-nested-docker-implementation-plan.md)
-records the shared architecture, evidence and remaining acceptance work. Agent
-sudo remains available. Structural profile checks, complete watchdog policy values
-and protected staging replace the superseded static hash bindings; no new security
-hash exception has been approved or added.
-
-Batch, PTY and workflow sessions reuse the existing Docker sidecar and lifecycle
-with shared agent assembly. WSL uses policy relays connected to exact host Unix
-socket mounts. Dynamic numeric ownership replaces the UID/GID 1000 assumptions,
-and one toolchain recipe serves amd64 and the existing macOS arm64 targets.
-Qualification now uses portable temporary paths and retains bounded live logs and
-an atomic run manifest through `npm run qualify:wsl-desktop`.
-
-The final r7 qualification passed 478 tests in 34 files with zero required skips
-and all nine live gates (Recovery, Disabled, PTY, direct Offline/Images/Packages,
-and the three workflow modes). The complete Docker volume inventory was identical
-before and after: 722 names and SHA-256
-`c4a7a4057c8b4fe2f5a608b53160a29b1bb052d61175d2fdebc3f7c5c2c54724`.
-The retained report is
-`/tmp/ic-wsl-qualification-final-20260910-r7/wsl-desktop.qualification.json`.
-Earlier r5 and r6 runs exposed anonymous volumes from ordinary Docker agents, raw
-UID tests and one UDS boundary-test client. Their fixes reuse the shared read-only
-`/var/lib/docker` tmpfs shadow and exact test cleanup. Qualification observers also
-have durable lease ownership. The design's acceptance record preserves these
-findings rather than treating a passing runner manifest alone as cleanup proof.
-
-Native Linux Engine and Linux arm64 remain unqualified and are outside this
-delivery. Pre-merge macOS validation on 2026-09-14 passed the Docker Desktop suite
-(352 tests and six live gates) and Apple workflow/PTY checks after the shared
-package-staging fix. The final Apple packages workflow passed 27 deterministic checks
-and 12 fresh-admission checks with exact teardown; see the
-[updated handoff](secure-nested-runtime-handoff.md#pr-467-macos-regression-validation).
-These runs do not replace WSL validation or qualify later dependency-only changes.
-Live adapter image/UID tests do not establish an all-mode-by-adapter matrix;
-the CLI, PTY and workflow smoke gates use Claude. A coordinator running under a
-real non-1000 WSL host identity remains pending because that harness requires host
-sudo. Container-side UID remapping evidence does not substitute for it.
+This document preserves the pre-implementation investigation, not current support status.
+See [CONFIG.md](../../CONFIG.md#nested-docker-workloads) for admitted profiles and
+the [implementation design](linux-nested-docker-implementation-plan.md) for architecture
+and the authoritative [acceptance record](linux-nested-docker-implementation-plan.md#acceptance-record).
 
 **Historical baseline assessment (before implementation)**
 
 The remainder records the original findings. Its statements about current code,
 native-runner requirements and recommended per-architecture hashes describe that
-baseline, not the implemented design above. In particular, Linux admission was
+baseline, not the linked implementation design. In particular, Linux admission was
 then deliberately rejected; fixing the temporary directory alone could not enable
 the feature. The later design supersedes those requirements and recommendations.
 

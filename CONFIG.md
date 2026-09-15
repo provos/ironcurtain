@@ -138,8 +138,8 @@ already-built images with the managed external network below; Compose builds tha
 direct/default-Buildx package path, custom/remote BuildKit workers, and alternate Docker contexts are not
 supported. Native Linux Engine and IronCurtain-in-IronCurtain are separate implementation and qualification
 slices. Ended nested sessions are not resumable. See [backend qualification](TESTING.md#nested-docker-release-qualification)
-for repeatable tests and [the WSL acceptance record](docs/designs/linux-nested-docker-implementation-plan.md)
-for coverage limits, including the pending real non-1000 WSL coordinator test.
+for repeatable tests and [the acceptance record](docs/designs/linux-nested-docker-implementation-plan.md#acceptance-record)
+for dated evidence and outstanding validation.
 
 ### Connecting nested containers
 

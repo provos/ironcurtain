@@ -1,19 +1,14 @@
 # Secure Nested Runtime Package Network
 
-**Status:** implemented developer capability on macOS Apple Container, macOS Docker Desktop, and WSL2/Desktop amd64; evidence and coverage limits are recorded in the handoff
-**Updated:** 2026-09-15
-**Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes, including the admitted WSL2/Desktop profile
-**Related:**
-[`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
-[`secure-nested-runtime-handoff.md`](./secure-nested-runtime-handoff.md)
+**Purpose:** governing package-authority contract, not a platform-status or validation ledger.
+**Related:** [implementation design](linux-nested-docker-implementation-plan.md),
+[broader runtime design](secure-nested-runtime-implementation-plan.md).
 
-The shared package policy applies to all three profiles. macOS Docker Desktop uses fixed TCP
-relays to guarded host listeners; WSL2/Desktop uses fixed relays to exact host Unix sockets.
-Apple retains its same-VM daemon and UDS transport. The
-[WSL implementation design](linux-nested-docker-implementation-plan.md) supersedes earlier
-macOS-only scope and static executable-hash admission descriptions, not the package authority
-defined here. Native Linux Engine and WSL arm64 are not admitted. Real non-1000 WSL coordinator
-validation remains pending; this is not a claim of general Linux or stable/preview qualification.
+For supported profiles and admission requirements, use
+[CONFIG.md](../../CONFIG.md#nested-docker-workloads). For shared architecture and dated
+validation evidence, use the implementation design's
+[acceptance record](linux-nested-docker-implementation-plan.md#acceptance-record).
+Package authority is defined below independently of the selected transport.
 
 ## 1. Decision
 

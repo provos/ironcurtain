@@ -1,13 +1,19 @@
-**Implementation design: Linux-client nested Docker, qualified on WSL/Desktop**
+# Nested Docker implementation and acceptance
 
 Revised 2026-09-10 following the independent review and the user's decisions:
-WSL is the only available live test environment; container users are expected to
+WSL was the available live test environment for that implementation effort; container users are expected to
 use sudo; native Linux arm64 is out of scope; avoid hash binding wherever a simpler
 mechanism suffices. This document replaces the preceding implementation plan.
 The implementation described below was merged in PR #467 (`d8c1d71`). Status was
 reconciled on 2026-09-15 to include the subsequent macOS validation. The acceptance
 record distinguishes completed runs from remaining evidence; the ordered exit
 criteria remain requirements and are not a claim that every matrix cell passed.
+
+This document owns the shared implemented architecture and dated acceptance evidence.
+[CONFIG.md](../../CONFIG.md#nested-docker-workloads) owns supported profiles and admission
+requirements; [TESTING.md](../../TESTING.md#nested-docker-release-qualification) owns test
+commands and qualification procedure. Other design documents describe their contracts or
+historical investigations and link here rather than maintaining parallel status records.
 
 **Implemented architecture**
 
@@ -76,7 +82,13 @@ criteria remain requirements and are not a claim that every matrix cell passed.
   Shared process-group cleanup and portable short temporary roots replace the
   hardcoded `/private/tmp` assumption. Existing macOS command aliases remain.
 
-**Acceptance record**
+## Acceptance record
+
+Results below are dated observations. Add a new run and explicitly identify which earlier
+run it supersedes; do not rewrite historical counts as though they came from the new run.
+Temporary report paths identify the original artifacts and do not guarantee continued availability.
+
+### WSL validation
 
 The r5 and r6 runs are preliminary and superseded for final acceptance. Their
 selected suites and every live gate passed, but separate exact Docker volume
@@ -86,26 +98,20 @@ paths, and the boundary test also removes anonymous volumes during failure clean
 A passing runner manifest alone does not erase an independently observed cleanup
 finding.
 
-| Evidence                              | Recorded result                                                                                                                                                                                                                                                                                                                   |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| r5 selected tests                     | 475 passed, 34 files, zero required skips.                                                                                                                                                                                                                                                                                        |
-| r5 live gates                         | All nine passed: Recovery, Disabled, PTY, direct Offline/Images/Packages, workflow Offline/Images/Packages.                                                                                                                                                                                                                       |
-| r5 retained evidence                  | `/tmp/ic-wsl-qualification-final-20260910-r5/wsl-desktop.qualification.json`, the adjacent Vitest JSON and per-step logs; 2026-09-10 22:51:33–23:22:27 UTC.                                                                                                                                                                       |
-| r5 cleanup inventory                  | 722 volume names before, 724 after. Two anonymous volumes prevent final cleanup acceptance.                                                                                                                                                                                                                                       |
-| Observed environment                  | Node 26.8.2; WSL kernel `6.18.33.2-microsoft-standard-WSL2`; Docker Desktop Engine 29.4.1, Linux/amd64, cgroup v2; `name=seccomp,profile=builtin` and `name=cgroupns`. These are observations, not version pins.                                                                                                                  |
-| r6 intermediate run                   | 478 tests and all nine live gates passed, but the inventory changed from 724 to 725. The remaining volume was traced to the raw UDS boundary-test client and fixed before final acceptance.                                                                                                                                       |
-| Final r7 run                          | 478 tests passed in 34 files, all nine live gates passed, and zero reporter-visible skips; retained report: `/tmp/ic-wsl-qualification-final-20260910-r7/wsl-desktop.qualification.json`.                                                                                                                                         |
-| Final r7 cleanup inventory            | 722 volume names before and after; both sorted inventories have SHA-256 `c4a7a4057c8b4fe2f5a608b53160a29b1bb052d61175d2fdebc3f7c5c2c54724`, and byte comparison passed.                                                                                                                                                           |
-| Real non-1000 WSL coordinator         | Pending host sudo. Isolated live container UID/GID 1101:1102 and Claude/Goose/Codex image/UID checks passed, but do not exercise the coordinator as that actual WSL host identity.                                                                                                                                                |
-| macOS pre-merge regression validation | On 2026-09-14, Docker Desktop passed 352 tests and six live gates. Apple workflow/PTY checks passed, with the final packages run passing 27 deterministic and 12 fresh-admission checks plus exact teardown after the shared staging fix. See the [handoff](secure-nested-runtime-handoff.md#pr-467-macos-regression-validation). |
-| Coverage limits                       | CLI, PTY and workflow smoke runs use Claude. No all-mode-by-adapter or complete IPv4/IPv6/DNS/LAN/metadata matrix is claimed. Native Linux Engine and Linux arm64 remain unqualified. WSL r7 and macOS pre-merge runs are dated evidence, not fresh qualification of later dependency changes.                                    |
+| Evidence                      | Recorded result                                                                                                                                                                                                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| r5 selected tests             | 475 passed, 34 files, zero required skips.                                                                                                                                                                                                                                                     |
+| r5 live gates                 | All nine passed: Recovery, Disabled, PTY, direct Offline/Images/Packages, workflow Offline/Images/Packages.                                                                                                                                                                                    |
+| r5 retained evidence          | `/tmp/ic-wsl-qualification-final-20260910-r5/wsl-desktop.qualification.json`, the adjacent Vitest JSON and per-step logs; 2026-09-10 22:51:33–23:22:27 UTC.                                                                                                                                    |
+| r5 cleanup inventory          | 722 volume names before, 724 after. Two anonymous volumes prevent final cleanup acceptance.                                                                                                                                                                                                    |
+| Observed environment          | Node 26.8.2; WSL kernel `6.18.33.2-microsoft-standard-WSL2`; Docker Desktop Engine 29.4.1, Linux/amd64, cgroup v2; `name=seccomp,profile=builtin` and `name=cgroupns`. These are observations, not version pins.                                                                               |
+| r6 intermediate run           | 478 tests and all nine live gates passed, but the inventory changed from 724 to 725. The remaining volume was traced to the raw UDS boundary-test client and fixed before final acceptance.                                                                                                    |
+| Final r7 run                  | 478 tests passed in 34 files, all nine live gates passed, and zero reporter-visible skips; retained report: `/tmp/ic-wsl-qualification-final-20260910-r7/wsl-desktop.qualification.json`.                                                                                                      |
+| Final r7 cleanup inventory    | 722 volume names before and after; both sorted inventories have SHA-256 `c4a7a4057c8b4fe2f5a608b53160a29b1bb052d61175d2fdebc3f7c5c2c54724`, and byte comparison passed.                                                                                                                        |
+| Real non-1000 WSL coordinator | Pending host sudo. Isolated live container UID/GID 1101:1102 and Claude/Goose/Codex image/UID checks passed, but do not exercise the coordinator as that actual WSL host identity.                                                                                                             |
+| Coverage limits               | CLI, PTY and workflow smoke runs use Claude. No all-mode-by-adapter or complete IPv4/IPv6/DNS/LAN/metadata matrix is claimed. Native Linux Engine and Linux arm64 remain unqualified. WSL r7 and macOS pre-merge runs are dated evidence, not fresh qualification of later dependency changes. |
 
-Repeat the main qualification with an automatically generated fresh evidence
-directory:
-
-```sh
-npm run qualify:wsl-desktop
-```
+Repeat qualification using [TESTING.md](../../TESTING.md#nested-docker-release-qualification).
 
 Use the Node executable matching the checkout's native dependencies. The runs
 above used `/tmp/ic-linux-node-runtime/node_modules/node/bin/node` (26.8.2);
@@ -113,20 +119,48 @@ the original Node 23.7.0 executable did not match the installed `isolated-vm` AB
 Compare exact Docker resource inventories around final acceptance as well as the
 per-bundle cleanup assertions.
 
-The remaining host-identity evidence can be collected without creating an account
-or modifying workspace ownership:
-
-```sh
-sudo python3 scripts/qualify-wsl-non1000.py \
-  --uid 1101 --gid 1102 \
-  --node /tmp/ic-linux-node-runtime/node_modules/node/bin/node \
-  offline images packages pty workflow recovery disabled
-```
-
-This harness runs a real UID/GID transition with private temporary roots and the
-existing Docker socket group. It requires host sudo; container-local sudo being
-supported does not supply that host permission. Its retained identity report is
+The separate host-identity procedure is documented in
+[TESTING.md](../../TESTING.md#wsl-host-identity-qualification). Its retained report is
 separate from the default-identity qualification report.
+
+### macOS validation
+
+- **2026-09-03, before PR #467:** Apple passed 172 selected tests and four live gates;
+  Docker Desktop passed 238 selected tests and six live gates, each with zero required skips.
+  These earlier developer-suite results are superseded for the shared refactor by the
+  following pre-merge regression evidence. Earlier selected-image/managed-network and
+  public/offline feasibility runs remain in Git history; they are not current qualification.
+- **2026-09-14, PR #467 pre-merge:** Docker Desktop passed 352 selected tests and all six
+  live gates with zero required skips. Environment: Apple Container 1.2.2, Docker Desktop
+  4.65.0 / Engine 29.2.1, Node 26.7.0. Retained Desktop report directory:
+  `/private/var/folders/_q/k3k25rx94lz_qpft0cynpyym0000gn/T/ironcurtain-qualification-28la6y`.
+  Apple images/offline workflows and PTY checks passed. Packages exposed an Apple
+  overlapping-host-mount failure; shared disjoint `trust/` staging and a live regression
+  test fixed it. On the final tree, Apple packages passed 27 deterministic checks and
+  12 fresh-admission checks, each with exact teardown; Desktop packages passed again.
+  A cold ARM64 Rust fixture required a bounded pull allowance increase, with enclosing
+  workflow/gate budgets adjusted together, not production session timeouts.
+- **Merged runtime baseline:** PR #467 became `d8c1d71`; post-merge CI, CodeQL and Semgrep
+  passed. These results do not qualify later dependency changes or replace a fresh
+  installed-package test.
+
+### Remaining qualification boundaries
+
+Developer-suite success is not completed preview/stable qualification. The broader
+[G1–G10/0C outcome gates](secure-nested-runtime-implementation-plan.md) still require
+failure-injection and resource evidence. Apple disk enforcement remains watchdog-observed,
+not a hard quota. Durable host-owned registry pull-provenance evidence is still separate work.
+
+Functional workflow probes run fixed commands without an LLM; PTY gates qualify transport,
+activation and cleanup rather than a real provider turn. Full self-hosting still requires
+the [hermetic IronCurtain-in-IronCurtain slice](ironcurtain-in-ironcurtain-hermetic-slice.md):
+the parent-proxy/fake-key cascade, child-session creation, and shared proxy paths across the
+agent/daemon mount namespaces. Existing Docker functionality does not prove that slice.
+
+Keep crash recovery distinct from graceful readmission. Extend prepare/create/load/probe
+failure coverage through production entrypoints while preserving exact resource ownership,
+foreign-object safety, and trusted outer mount/network inspection evidence. Host port
+publication, if ever required, needs a separate constrained design, not broader networking.
 
 **Delivery scope and evidence**
 

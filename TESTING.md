@@ -9,6 +9,10 @@ npm run lint      # Lint
 npm run format:check  # Check formatting
 ```
 
+Run the memory suite separately from the full root suite on resource-constrained hosts: real model
+loading competes with parallel tests for CPU and can exceed test deadlines. It needs model files in
+cache or network access to download them, even though mocked LLM tests need no API key.
+
 ## Test Categories
 
 | Category                        | Example files                                                                                                 | Requirements                                                                    | Runs by default             |
@@ -81,16 +85,29 @@ location. Default suite/direct-gate limits are 30 minutes; workflow gates use a 
 from the workflow deadline plus child-process and cleanup allowances. To override a gate's bound, append
 `-- --timeout-ms <milliseconds>`; an explicit override also replaces the longer workflow budget.
 
-WSL admission requires a regular non-root coordinator, Docker Desktop Linux/amd64, cgroup v2, and the
-covered security options. Native Linux Engine and WSL arm64 are not admitted. The separate real
-non-1000 WSL host-identity test requires host sudo and is still pending in the
-[acceptance record](docs/designs/linux-nested-docker-implementation-plan.md); ordinary container UID
-tests do not replace it. The same record and [handoff](docs/designs/secure-nested-runtime-handoff.md)
-distinguish historical evidence from current-tree validation.
+Use [CONFIG.md](CONFIG.md#nested-docker-workloads) for the authoritative supported-profile and
+admission requirements. The [acceptance record](docs/designs/linux-nested-docker-implementation-plan.md#acceptance-record)
+holds dated results and outstanding validation; do not infer current qualification from historical runs.
 
-Run the memory suite separately from the full root suite on resource-constrained hosts: real model
-loading competes with parallel tests for CPU and can exceed test deadlines. It needs model files in
-cache or network access to download them, even though mocked LLM tests need no API key.
+#### WSL host-identity qualification
+
+The host-identity harness runs as a real different numeric user with private temporary roots
+and the existing Docker socket group. It does not create a permanent account or change
+workspace ownership. Run it with host sudo and a Node executable matching the checkout's
+native dependencies; container-local sudo does not grant this host permission:
+
+```sh
+sudo python3 scripts/qualify-wsl-non1000.py \
+  --uid 1101 --gid 1102 \
+  --node /absolute/path/to/compatible/node \
+  offline images packages pty workflow recovery disabled
+```
+
+Retain its identity report separately from the default-identity run. Consult the
+[acceptance record](docs/designs/linux-nested-docker-implementation-plan.md#acceptance-record)
+for whether this evidence has been collected.
+
+### Combining general-suite flags
 
 You can set both general-suite flags simultaneously:
 
@@ -141,14 +158,8 @@ Tests for self-contained subsystems live in subdirectories under `test/`:
 
 ## Pre-commit Hook
 
-A pre-commit hook runs `lint-staged` on matching staged files, checking formatting and lint (plus web UI
-checks where configured). It is not a full-repository validation gate. Install it once after cloning:
-
-```bash
-npm run setup-hooks
-```
-
-This copies the hook from `.hooks/pre-commit` into `.git/hooks/`. See [CONTRIBUTING.md](CONTRIBUTING.md#pre-commit-hook) for details on fixing blocked commits.
+See [CONTRIBUTING.md](CONTRIBUTING.md#pre-commit-hook) for hook installation, staged-file scope,
+and the full validation commands required before submitting changes.
 
 ## CI
 
@@ -160,7 +171,5 @@ memory workspace tests require their own command above; the ordinary CI job does
 LLM integration tests and opt-in Docker/registry/backend qualification gates are not enabled by these
 jobs. Green CI therefore does not replace live backend qualification or a fresh installed-package test.
 
-For dependency maintenance, keep Aikido Safe Chain enabled and verify it with
-`npm safe-chain-verify` (or use `aikido-npm` explicitly when shell aliases are not loaded).
-See [dependency security maintenance](docs/dependency-security.md) for the distinction between a clean
-checkout audit and downstream npm installation.
+See [dependency security guidance](CONTRIBUTING.md#dependency-security) for Safe Chain usage and the
+distinction between a clean checkout audit and downstream npm installation.

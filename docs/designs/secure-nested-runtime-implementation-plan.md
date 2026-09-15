@@ -104,23 +104,16 @@ host-gateway relay merely because both backends implement Docker.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
-## Current implementation and evidence (2026-09-15)
+## Current implementation and evidence
 
-PR #467 (`d8c1d71`) extends the shared Docker sidecar path to WSL2 with Docker Desktop
-on amd64. The [Linux-client implementation design](linux-nested-docker-implementation-plan.md)
-governs that profile and supersedes earlier Linux-wide rejection, mandatory static
-executable/hash-binding admission, and macOS-only package-support descriptions below.
-Native Linux Engine and WSL arm64 remain unqualified and are not admitted.
-
-macOS Docker Desktop uses the fixed TCP host hop; WSL/Desktop uses fixed relays to exact
-host UDS files. The shared lifecycle, numeric identity, protected trust staging and
-operational profiles are implemented. The [handoff](secure-nested-runtime-handoff.md)
-records WSL's nine-gate run and the later macOS regression validation after the Apple
-overlapping-mount fix. The real non-1000 WSL coordinator test remains pending.
+The [implementation design](linux-nested-docker-implementation-plan.md) supersedes earlier
+Linux-wide rejection and static executable/hash-binding admission requirements below.
+It owns the current shared architecture and [acceptance record](linux-nested-docker-implementation-plan.md#acceptance-record).
+Use [CONFIG.md](../../CONFIG.md#nested-docker-workloads) for supported profiles and admission
+requirements, and [TESTING.md](../../TESTING.md#nested-docker-release-qualification) for qualification commands.
 
 The broader outcome gates below remain the design target, not a declaration of completed
-preview/stable or IronCurtain-in-IronCurtain qualification. Dated evidence does not qualify
-future code, dependency, or runtime changes.
+preview/stable or IronCurtain-in-IronCurtain qualification.
 
 ## /goal
 
