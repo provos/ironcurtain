@@ -6,25 +6,43 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **Developer-only nested Docker on macOS** — opt-in Docker Agent sessions can now use a private,
-  ephemeral Docker daemon on Apple Container or Docker Desktop without exposing the host Docker socket
-  or publishing nested ports to the Mac. The `offline`, `images`, and `packages` modes respectively
-  support explicit workspace image imports, mediated anonymous Docker Hub/GHCR pulls, and bounded
-  apt/npm/PyPI/Cargo downloads through the host policy engines. Both backends share admission, package
-  policy, activation, watchdog, and exact cleanup while retaining their runtime-specific UDS or fixed-relay
-  transports. This remains macOS developer functionality; Linux, persistent caches, private registries,
-  host port publication, Compose builds, and IronCurtain-in-IronCurtain are separate work (#406, #436,
-  #443, #454, #456).
-- **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
+- **Opt-in nested Docker for developer sessions** — Docker Agent sessions and workflow bundles can use a private, ephemeral Docker daemon without exposing the host Docker socket. Implemented profiles cover Apple Container and Docker Desktop on macOS, plus WSL2 with Docker Desktop on amd64. Shared admission, policy, activation, watchdog, and cleanup code uses each backend's UDS or fixed-target relay transport. This is developer-scoped functionality, not a claim of general Linux or all-agent qualification; native Linux Engine and Linux arm64 are not admitted, and testing with a real non-1000 WSL coordinator remains pending (#406, #454, #456, #467).
+- **Nested image pulls and package builds** — `offline` permits explicit workspace image imports without registry access; `images` adds mediated anonymous Docker Hub/GHCR pulls; `packages` additionally permits bounded public apt/npm/PyPI/Cargo downloads through the host MITM policy engine for supported Docker/default-Buildx builds. A managed internal network connects sibling containers, including Compose services using already-built images. Persistent caches, authenticated registries/package sources, host-published ports, unsupported Compose/custom-BuildKit builds, and IronCurtain-in-IronCurtain remain out of scope. Downloads and built images remain untrusted (#443, #454, #456).
+- **Persistent local LLM statistics** — content-free MITM observations record tokens, timing, routing, outcomes, and provider-reported cost metadata in a local SQLite database. Collection is enabled by default with 90-day retention, excludes prompts/completions/tool payloads, and pseudonymizes user-derived labels and private routes. Configuration and web Settings can disable collection; `ironcurtain statistics delete --before <date>` or `--all` deletes stored rows (#409).
+- **Web statistics dashboard** — adds provider/model trends, calendar-day drilldowns, distributions, and a sidebar usage receipt, backed by bounded statistics queries including workflow context (#411, #412).
+- **Web container-session resume** — a resume dialog discovers previous sessions and restores their terminal-backed conversations, sharing resumable-session discovery with mux and validating snapshots, ownership, and concurrent resume attempts (#445).
+- **Anthropic CLI OAuth credential support** — detects the Anthropic CLI store alongside existing Claude Code credentials, honors `ANTHROPIC_CONFIG_DIR` and `XDG_CONFIG_HOME`, refreshes tokens with their issuing OAuth client, and writes rotated tokens back in the originating store's native format. Failed refresh of an older credential file no longer shadows a usable later source (#383, #387).
+- **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#440).
 
 ### Fixes
 
-- **LLM-metrics SQLite workers boot without `tsx` on Node 22** — the persistence workers were spawned with `execArgv: ['--import', 'tsx']` for source runs, but tsx's loader hooks do not take effect inside worker threads on Node 22, so the worker failed to load its TypeScript sources. Source runs now boot through a self-contained ESM entry shim that registers a `.js` → `.ts` specifier remap hook in-thread and relies on Node's native type stripping; compiled runs load the emitted `.js` worker directly and spawn no shim.
+- **Interactive Claude behavior and PTY lifecycle** — batch-only Claude settings no longer disable interactive agent/dispatch behavior; Apple Container PTYs use its native terminal transport. Web sessions remain tracked until observed exit, failed termination can be retried, shutdown waits for in-flight spawning, and stale PTY sockets are removed before resume (#422, #423, #445, #451).
+- **Conservative resource recovery** — ambiguous PTY resources are retained until ownership and cleanup can be confirmed, and Docker reconciliation is scoped to the IronCurtain home so separate installations and test homes do not reclaim one another's sessions (#445, #453).
+- **Slow upstream gateway recovery** — batch/workflow Claude sessions disable the byte-stream watchdog that could kill long self-hosted responses; terminal API errors become resumable transient failures instead of misleading missing-status errors. PTY watchdog behavior remains separate, and IronCurtain's per-turn wall-clock budget remains the backstop (#431).
+- **Workflow status and resume recovery** — incomplete turns can recover through a bounded replacement conversation with workspace handoff; opt-in producer states can hand existing artifacts to their sole validator when status recovery is exhausted. Only a final valid status fence routes a turn, failed shared-container stops can retain snapshots, and resume restores checkpoints without stale lifecycle state. `maxSessionSeconds` no longer acts as a cumulative state-time limit (#438, #442).
+- **Trajectory capture survives an aborted exchange** — an upstream truncation now drops only that exchange rather than disabling capture for the rest of the session. Manifests count aborted exchanges and expose genuine session-wide poisoning when it occurs (#437).
+- **Statistics worker startup and retention recovery** — source-run SQLite workers bootstrap without relying on external `tsx` worker hooks, compiled runs load JavaScript directly, and timed-out retention workers recover without permanently disabling later maintenance (#426, #450).
+- **Nested Docker startup and storage** — fixes Apple Container 1.2.x `/proc` visibility and overlapping host mounts, uses the staged runtime wrapper for package builds, and avoids anonymous Docker volumes inherited from agent images. WSL agent/daemon identity wiring preserves workspace ownership rather than recursively changing it (#436, #467).
+- **Container-visible workspace prompts** — agents receive their actual container workspace path rather than an inaccessible host path (#444).
 
 ### Behavior changes
 
-- **Node.js support is now limited to 24 and 26** — `isolated-vm` is pinned to 7.0.1, whose corrected engine range and prebuilt binaries cover both supported Node lines. This also picks up the upstream security fix for GHSA-864f-rcv7-6rh4. Node 22 and odd-numbered Node releases are no longer advertised as supported.
-- **Unusable MITM CA storage is replaced automatically** — instead of failing bundle startup, IronCurtain generates and atomically publishes a fresh CA for malformed, exposed, or legacy storage; valid legacy keys are rotated rather than migrated. Existing bundles retain their in-memory CA, while newly created bundles receive the replacement. First-run paths updated here now request mode `0700` when creating the IronCurtain home directory.
+- **Node.js support is now limited to 24 and 26** — upgrade from Node 22 before installing this release. `isolated-vm` is pinned to 7.0.1, whose corrected engine range and prebuilt binaries cover both supported Node lines and include the upstream security fix for GHSA-864f-rcv7-6rh4. Node 22 and odd-numbered Node releases are no longer supported (#467).
+- **Workflow resume goes through the daemon** — `ironcurtain workflow resume <workflowId|existingBaseDir>` preserves daemon model routing and supports `--ensure-daemon`. Scripts using the former local `--state`, `--model`, `--no-lint`, or `--strict-lint` resume options must use the explicit `workflow resume-standalone` command instead (#442).
+- **Unusable MITM CA storage is replaced automatically** — instead of failing bundle startup, IronCurtain generates and atomically publishes a fresh CA for malformed, exposed, or legacy storage; valid legacy keys are rotated rather than migrated. Existing bundles retain their in-memory CA, while newly created bundles receive the replacement. First-run paths updated here request mode `0700` when creating the IronCurtain home directory (#449).
+- **Nested Docker admission requirements** — Apple nested Docker requires Container CLI 1.2.1 or newer. WSL nested Docker requires the admitted Desktop/amd64 profile with cgroup v2 and a non-root coordinator UID/GID; agent users retain passwordless sudo. Ordinary sessions remain available with nesting disabled (#436, #467).
+
+### Dependencies
+
+- Refreshed security-sensitive dependencies and updated Vitest/coverage to 4.1.11 through Aikido Safe Chain with its protections enabled. Scoped checkout overrides select patched sharp 0.35.4 and adm-zip 0.6.1; downstream npm installation still requires a separate packaging/upstream resolution, as documented in `docs/dependency-security.md`.
+- Bumped the memory workspace's `better-sqlite3` dependency to `^13.0.3` (#421).
+- Updated DOMPurify, PostCSS, brace-expansion, fast-uri, Undici, ip-address, js-yaml, Hono, and other lockfile dependencies (#395, #396, #398, #403, #404, #407, #408, #410, #415).
+- Bumped `actions/setup-node` from 6 to 7 (#384).
+
+### Internal
+
+- Added retained-evidence backend qualification for Apple Container, macOS Docker Desktop, and WSL/Desktop, plus deterministic nested-Docker workflow and registry integration tests. Retired exploratory nested-Docker spike harnesses in favor of maintained tests; packaged both runtime-wrapper architectures and cleaned build output before asset copying (#443, #456, #457, #460, #467).
+- Serialized the isolated-vm test group to reduce macOS worker-teardown flakes while leaving the rest of the suite parallel, and improved MITM large-stream test performance and failure diagnostics (#429, #430, #433, #435).
 
 ## [0.13.0] - 2026-07-11
 
