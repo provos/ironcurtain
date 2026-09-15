@@ -19,7 +19,7 @@ IronCurtain's Docker Agent Mode runs an external agent (Claude Code, Goose, etc.
 
 ### Prerequisites
 
-- Node.js 22+ and Docker (same as Docker Agent Mode)
+- Node.js 24 or 26 and Docker (same as Docker Agent Mode)
 - `node-pty` (installed automatically as an optional dependency)
 - An API key for your LLM provider (or OAuth — see [OAuth Authentication](#oauth-authentication))
 
@@ -137,13 +137,13 @@ The picker supports single-key actions for fast resolution:
 
 You can also resolve escalations via slash commands in command mode:
 
-| Command          | Description                                            |
-| ---------------- | ------------------------------------------------------ |
-| `/approve N`     | Approve escalation #N                                  |
-| `/deny N`        | Deny escalation #N                                     |
-| `/approve+ N`    | Approve #N and whitelist similar future calls           |
-| `/approve all`   | Approve all pending escalations                        |
-| `/deny all`      | Deny all pending escalations                           |
+| Command        | Description                                   |
+| -------------- | --------------------------------------------- |
+| `/approve N`   | Approve escalation #N                         |
+| `/deny N`      | Deny escalation #N                            |
+| `/approve+ N`  | Approve #N and whitelist similar future calls |
+| `/approve all` | Approve all pending escalations               |
+| `/deny all`    | Deny all pending escalations                  |
 
 After resolving, press **Ctrl-A** or **Escape** to return to PTY mode. The agent continues automatically.
 
@@ -261,12 +261,12 @@ These tools go through normal policy evaluation and audit logging. Adding a doma
 
 Dynamically added domains are fundamentally different from built-in LLM provider domains:
 
-| | Provider domains | Passthrough domains |
-|---|---|---|
-| **Credential handling** | Fake-to-real key swap (MITM) | No credential injection |
-| **Content inspection** | Endpoint filtering, request rewriting | None — raw TCP tunnel |
-| **Supported protocols** | HTTPS only (specific API paths) | HTTP, HTTPS, WebSocket |
-| **Persistence** | Permanent (configured at startup) | Session-scoped (cleared on exit) |
+|                         | Provider domains                      | Passthrough domains              |
+| ----------------------- | ------------------------------------- | -------------------------------- |
+| **Credential handling** | Fake-to-real key swap (MITM)          | No credential injection          |
+| **Content inspection**  | Endpoint filtering, request rewriting | None — raw TCP tunnel            |
+| **Supported protocols** | HTTPS only (specific API paths)       | HTTP, HTTPS, WebSocket           |
+| **Persistence**         | Permanent (configured at startup)     | Session-scoped (cleared on exit) |
 
 When the agent connects to a passthrough domain, the proxy creates a direct TCP tunnel — bytes flow bidirectionally without inspection. This supports:
 
@@ -318,16 +318,16 @@ Configure in `~/.ironcurtain/config.json`:
 
 The mux supports multiple concurrent agent sessions:
 
-| Command              | Description                              |
-| -------------------- | ---------------------------------------- |
-| `/new`               | Open persona picker / spawn session      |
-| `/new <persona>`     | Spawn session with a specific persona    |
-| `/resume`            | Open resume picker for past sessions     |
-| `/resume <id>`       | Resume a session by ID prefix            |
-| `/tab N`             | Switch to tab N                          |
-| `/close`             | Close the current tab                    |
-| `/close N`           | Close tab N                              |
-| Alt-1..9             | Quick-switch to tab 1-9 (any mode)       |
+| Command          | Description                           |
+| ---------------- | ------------------------------------- |
+| `/new`           | Open persona picker / spawn session   |
+| `/new <persona>` | Spawn session with a specific persona |
+| `/resume`        | Open resume picker for past sessions  |
+| `/resume <id>`   | Resume a session by ID prefix         |
+| `/tab N`         | Switch to tab N                       |
+| `/close`         | Close the current tab                 |
+| `/close N`       | Close tab N                           |
+| Alt-1..9         | Quick-switch to tab 1-9 (any mode)    |
 
 The tab bar at the top shows all sessions. The active tab is highlighted. Tabs with pending escalations show an `[!]` badge.
 
@@ -375,24 +375,24 @@ This workflow does not support trusted input or auto-approval for PTY sessions. 
 
 ## Keyboard Reference
 
-| Key             | PTY Mode                              | Command Mode                           |
-| --------------- | ------------------------------------- | -------------------------------------- |
-| Ctrl-A          | Enter command mode                    | Return to PTY mode                     |
-| Ctrl-E          | Open escalation picker                | —                                      |
-| Escape          | —                                     | Discard input, return to PTY mode      |
-| Enter           | (forwarded to PTY)                    | Execute command or send trusted input  |
-| Ctrl-C          | (forwarded to PTY)                    | Clear input buffer                     |
-| Alt-1..9        | Switch to tab 1-9                     | Switch to tab 1-9                      |
-| Ctrl-\          | Graceful shutdown                     | Graceful shutdown                      |
+| Key      | PTY Mode               | Command Mode                          |
+| -------- | ---------------------- | ------------------------------------- |
+| Ctrl-A   | Enter command mode     | Return to PTY mode                    |
+| Ctrl-E   | Open escalation picker | —                                     |
+| Escape   | —                      | Discard input, return to PTY mode     |
+| Enter    | (forwarded to PTY)     | Execute command or send trusted input |
+| Ctrl-C   | (forwarded to PTY)     | Clear input buffer                    |
+| Alt-1..9 | Switch to tab 1-9      | Switch to tab 1-9                     |
+| Ctrl-\   | Graceful shutdown      | Graceful shutdown                     |
 
 ## Troubleshooting
 
-| Issue | Guidance |
-| ----- | -------- |
-| **"node-pty not available"** | Install with `npm install node-pty`. It's an optional dependency that requires a C++ toolchain. |
-| **"Listener already running"** | Only one mux or escalation-listener can run at a time. Check for existing processes or stale lock at `~/.ironcurtain/escalation-listener.lock`. |
-| **Auto-approve not working** | Ensure `autoApprove.enabled` is `true` in config. Use command mode (Ctrl-A) to type input — PTY-mode keystrokes are untrusted. Check that the API key for the auto-approve model is set. |
-| **Terminal garbled after exit** | Run `reset` to restore normal terminal mode. |
-| **Session discovery timeout** | Docker startup can take 10+ seconds. The mux retries discovery via registry polling. If sessions don't appear, check `docker ps` and the PTY registry at `~/.ironcurtain/pty-registry/`. |
-| **Persona not compiled** | Run `ironcurtain persona compile <name>` before launching a session with that persona. The mux warns if a selected persona has no compiled policy. |
-| **Memory not saving** | Memory requires a persona or cron job session context. Ad-hoc sessions (no persona) do not get a memory server. Check that `memory.enabled` is `true` in config. |
+| Issue                           | Guidance                                                                                                                                                                                 |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **"node-pty not available"**    | Install with `npm install node-pty`. It's an optional dependency that requires a C++ toolchain.                                                                                          |
+| **"Listener already running"**  | Only one mux or escalation-listener can run at a time. Check for existing processes or stale lock at `~/.ironcurtain/escalation-listener.lock`.                                          |
+| **Auto-approve not working**    | Ensure `autoApprove.enabled` is `true` in config. Use command mode (Ctrl-A) to type input — PTY-mode keystrokes are untrusted. Check that the API key for the auto-approve model is set. |
+| **Terminal garbled after exit** | Run `reset` to restore normal terminal mode.                                                                                                                                             |
+| **Session discovery timeout**   | Docker startup can take 10+ seconds. The mux retries discovery via registry polling. If sessions don't appear, check `docker ps` and the PTY registry at `~/.ironcurtain/pty-registry/`. |
+| **Persona not compiled**        | Run `ironcurtain persona compile <name>` before launching a session with that persona. The mux warns if a selected persona has no compiled policy.                                       |
+| **Memory not saving**           | Memory requires a persona or cron job session context. Ad-hoc sessions (no persona) do not get a memory server. Check that `memory.enabled` is `true` in config.                         |

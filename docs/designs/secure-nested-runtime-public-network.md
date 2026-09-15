@@ -1,11 +1,19 @@
 # Secure Nested Runtime Package Network
 
-**Status:** implemented macOS developer capability; both macOS backends developer release-qualified
-**Updated:** 2026-09-03
-**Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes
+**Status:** implemented developer capability on macOS Apple Container, macOS Docker Desktop, and WSL2/Desktop amd64; evidence and coverage limits are recorded in the handoff
+**Updated:** 2026-09-15
+**Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes, including the admitted WSL2/Desktop profile
 **Related:**
 [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
 [`secure-nested-runtime-handoff.md`](./secure-nested-runtime-handoff.md)
+
+The shared package policy applies to all three profiles. macOS Docker Desktop uses fixed TCP
+relays to guarded host listeners; WSL2/Desktop uses fixed relays to exact host Unix sockets.
+Apple retains its same-VM daemon and UDS transport. The
+[WSL implementation design](linux-nested-docker-implementation-plan.md) supersedes earlier
+macOS-only scope and static executable-hash admission descriptions, not the package authority
+defined here. Native Linux Engine and WSL arm64 are not admitted. Real non-1000 WSL coordinator
+validation remains pending; this is not a claim of general Linux or stable/preview qualification.
 
 ## 1. Decision
 

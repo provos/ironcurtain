@@ -1,7 +1,7 @@
 # Secure Nested Runtime Handoff
 
-**Updated:** 2026-09-03
-**Baseline:** `master` after PR #457 at `01d4687`
+**Updated:** 2026-09-15
+**Runtime baseline:** `master` after PR #467 at `d8c1d71`; later checkout dependency remediation is recorded separately in [`dependency-security.md`](../dependency-security.md)
 **Primary design:** [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md)
 **Package-network design:**
 [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md)
@@ -10,7 +10,7 @@
 
 ## Objective
 
-Give a Docker Agent session on either macOS backend a real, private Docker daemon that can:
+Give a Docker Agent session on an admitted macOS or WSL2/Desktop backend a real, private Docker daemon that can:
 
 1. pull an allowed public workload image through host-mediated registry egress;
 2. create an inner-only Docker bridge;
@@ -18,8 +18,8 @@ Give a Docker Agent session on either macOS backend a real, private Docker daemo
 4. let a sibling container reach the server by Docker DNS alias; and
 5. tear down the complete outer bundle without exposing a host Docker socket, direct public route, credential, or host port.
 
-The current production code implements this Docker-workload objective for both Apple Container and Docker
-Desktop. It supports `offline`, `images`, and `packages` network modes. Docker Hub/GHCR image traffic and
+The current production code implements this Docker-workload objective for Apple Container and Docker
+Desktop on macOS, and Docker Desktop on WSL2/amd64. It supports `offline`, `images`, and `packages` network modes. Docker Hub/GHCR image traffic and
 fixed apt/npm/PyPI/Cargo package traffic are mediated by host policy engines; there is no direct public
 route from the untrusted agent or private daemon.
 
@@ -31,8 +31,11 @@ IronCurtain-inside-IronCurtain provider/child-session gate and preview qualifica
 
 ## Current Working State
 
-The macOS developer capability is opt-in and available through `containerRuntime: "apple-container"`,
-`containerRuntime: "docker"`, or `auto` after runtime availability checks. Fresh enablement selects
+The developer capability is opt-in and available through `containerRuntime: "apple-container"` on
+macOS/Apple silicon, `containerRuntime: "docker"` on macOS or WSL2/Desktop amd64, or `auto` after
+runtime availability and environment checks. WSL requires cgroup v2, the covered security options,
+and a non-root coordinator UID and GID; native Linux Engine and WSL arm64 are not admitted.
+Fresh enablement selects
 `packages`; existing configurations migrate conservatively to `images` or `offline` as documented in
 `CONFIG.md`.
 
@@ -45,26 +48,32 @@ build-shim contracts, activation ordering, and exact cleanup. Their unavoidable 
   volume and the exact session workspace with the agent, and uses independently pinned fixed relays for
   networked modes. The workspace is compatibility state inside the already-colluding bundle, not a host
   authority boundary.
-- Docker Desktop relay containers join the default bridge only for their host-gateway hop. The agent and
+- macOS Docker Desktop relay containers join the default bridge only for their host-gateway hop. The agent and
   daemon do not. The pinned relay plus exact target configuration is the enforcement point; default-bridge
   NAT/L2 adjacency is an accepted residual risk recorded in the primary design.
+- WSL/Desktop fixed relays instead mount exact mode-0600 host policy sockets read-only, using the
+  admitted numeric identity. They have no default-bridge uplink, host alias, or published port.
+  Agent and daemon online modes start on isolated relay networks; Offline starts on `none`.
+- Shared protected build files are staged in a disjoint `trust/` directory. CLI, client-config, and
+  real-runc sources are siblings outside it, preventing Apple Container from dropping a parent share
+  when host descendants are separately mounted. Guest paths and the package policy stay unchanged.
 
 The supported product envelope is still developer-only:
 
 - daemon and image-cache state is ephemeral between sessions;
-- host publication is disabled, so nested `-p` does not publish to the Mac;
+- host publication is disabled, so nested `-p` does not publish to the host;
 - package authority is limited to fixed public repositories;
 - private/authenticated registries and package sources are unavailable;
 - Compose may run already-built images on the managed network, but Compose builds that would bypass the
   supported direct/default-Buildx package shim are rejected;
 - disk enforcement is watchdog-observed rather than a hard quota; and
-- native Linux, IronCurtain-in-IronCurtain, and preview/stable qualification are separate work.
+- native Linux Engine, IronCurtain-in-IronCurtain, and preview/stable qualification are separate work.
 
 ## What Is Implemented
 
 ### Private Docker lifecycle
 
-- Each admitted bundle receives one disposable rootless Docker 29.2.1 daemon and one fixed internal
+- Each admitted bundle receives one disposable rootless Docker daemon from the shared versioned toolchain recipe and one fixed internal
   `ironcurtain` network.
 - Apple keeps the daemon inside the agent VM over a private UDS. RootlessKit remains
   `--net=none --disable-host-loopback`; the outer VM remains `network=none`.
@@ -91,8 +100,9 @@ The supported product envelope is still developer-only:
 - Apple mounts the exact listener UDS files and runs the checked-in fixed-profile relay inside
   RootlessKit's namespace on `127.0.0.1:18081`/`:18082`.
 - Docker Desktop uses independently pinned, fixed-target relays with one isolated bundle address each.
-  Relay-to-host TCP listeners require both exact source admission and a per-bundle proxy authorization;
-  construction fails closed if either guard is absent.
+  On macOS, relay-to-host TCP listeners require both exact source admission and per-bundle proxy
+  authorization; construction fails closed if either guard is absent. On WSL, the upstream is an exact
+  host policy socket mounted read-only, not a TCP host-gateway fallback.
 - Registry relay connections retain an idle/byte envelope but no relay-level absolute timer because one
   Docker connection may carry multiple independently bounded requests; package connections retain their
   own finite absolute envelope. Both remain accounted until the downstream TCP socket actually closes.
@@ -116,8 +126,9 @@ The supported product envelope is still developer-only:
 - Listener shutdown participates in batch, PTY, prepare-failure, and exact bundle teardown paths.
 - Leases, watchdog supervision, serialized cleanup ownership, incident recovery, exact immutable outer
   IDs, generation labels, and two empty cleanup inventories remain the host authority. On Docker Desktop,
-  the agent, daemon, fixed relays, ordinary TCP transport proxy, and both transport/egress networks share
-  this one authority instead of overlapping generic owner records.
+  the agent, daemon, fixed relays, and applicable transport/egress resources share this one authority
+  instead of overlapping generic owner records. The ordinary TCP transport proxy is macOS-specific;
+  WSL ordinary MCP/MITM transport uses UDS.
 - The detached watchdog removes the exact ordinary bundle runtime tree as well as the nested-Docker state.
   Stdio MCP relays treat controlling-pipe EOF as owner loss and reap their backend subprocesses, so a killed
   coordinator does not retain host helpers or hold the qualification runner open.
@@ -149,7 +160,7 @@ The smallest accepted compatibility configuration is:
 ```
 
 An existing enabled block with no network choice resolves conservatively to `images`. `containerRuntime`
-may remain `auto` or select either macOS backend explicitly. Enabling nested Docker through the current
+may remain `auto` or select an admitted backend explicitly (`docker` for WSL/Desktop). Enabling nested Docker through the current
 CLI/web settings writes `networkAccess: "packages"`; it does not grant generic
 network access. Select `"images"` for Docker Hub/GHCR only or `"offline"` for no public image/package
 access. The observed-disk
@@ -164,14 +175,14 @@ Normal operator entrypoint:
 tsx src/cli.ts mux
 ```
 
-Create a session with `/new`. Inside the Claude session, `docker info` should report the private rootless daemon. Workload servers are reachable from sibling containers on an inner Docker network, not from the Mac host.
+Create a session with `/new`. Inside the Claude session, `docker info` should report the private rootless daemon. Workload servers are reachable from sibling containers on an inner Docker network, not from the host.
 
 ### Offline image import
 
 Docker Desktop deliberately starts every private daemon with an empty image store. `offline` means no
 registry or package route; it does not automatically copy the multi-gigabyte outer agent image into the
 private daemon. Put any required image archive in the session or persona host workspace before or while
-the offline session runs. For example, on the Mac:
+the offline session runs. For example, on the macOS or WSL host (the source image must already be present):
 
 ```bash
 workspace_path=/absolute/path/to/ironcurtain-workspace
@@ -216,7 +227,7 @@ networks:
 ```
 
 There is no default nested bridge. `-p`/`--publish` and `--network host` do not expose a service to
-the Mac, and neither the Mac nor the agent shell can reach it through `localhost`. Use a sibling
+the host, and neither the host nor the agent shell can reach it through `localhost`. Use a sibling
 container on the managed network and address the target by container name or network alias. The
 fixed name is safe because every admitted daemon and its managed network are bundle-local. This is
 the supported service topology rather than an isolation boundary: the untrusted agent has Docker
@@ -364,6 +375,37 @@ build, lint, formatting, cycle checks, the generated build-trust runtime check, 
 macOS/Ubuntu Node matrices passed. The exact Apple and Docker Desktop results above remain runtime
 evidence; this green merge does not substitute for the broader preview/0C gates.
 
+### PR #467 macOS regression validation
+
+On 2026-09-14, pre-merge validation exercised the shared WSL refactor on macOS
+(Apple Container 1.2.2, Docker Desktop 4.65.0 / Engine 29.2.1, Node 26.7.0).
+
+- Docker Desktop passed 352 selected tests and all six live gates with no required skips.
+  Its retained report directory was
+  `/private/var/folders/_q/k3k25rx94lz_qpft0cynpyym0000gn/T/ironcurtain-qualification-28la6y`.
+- Apple images/offline workflows and PTY checks passed. Packages initially exposed an
+  Apple mount-composition failure: separately mounting a host descendant caused the parent
+  directory share to disappear. Shared disjoint trust staging and a live mount regression
+  test fixed this without adding a backend-specific staging implementation.
+- On the final tree, Apple packages passed 27 deterministic checks and 12 fresh-admission
+  checks, each with exact teardown. Docker Desktop's packages gate passed again. A cold
+  ARM64 Rust fixture also required a bounded pull allowance increase; the workflow and
+  enclosing gate budgets were adjusted together, not production session timeouts.
+- Post-merge CI, CodeQL, and Semgrep passed on `d8c1d71`. No fresh live qualification of
+  subsequent dependency updates is claimed by these results.
+
+### WSL/Desktop evidence and remaining acceptance
+
+The [WSL acceptance record](linux-nested-docker-implementation-plan.md) retains the
+2026-09-10 r7 result: 478 tests in 34 files, all nine live gates, zero required skips,
+and identical before/after Docker volume inventories. Its CLI, PTY, and workflow gates
+use Claude. The real non-1000 WSL coordinator test still requires host sudo and remains
+pending; isolated container UID/GID checks do not substitute for that host identity.
+
+Use the commands in [TESTING.md](../../TESTING.md#nested-docker-release-qualification)
+to qualify a new candidate and retain its evidence. Current checkout test/audit results
+and the public-install dependency limitation are separate from these runtime runs.
+
 ## Important Boundaries: Do Not Overclaim
 
 1. **No real Claude provider turn is required for functional acceptance.** The current workflow gate runs fixed Python commands inside the real admitted workflow bundle. It exercises production workflow/infrastructure lifecycle without asking an LLM to choose or issue Docker commands.
@@ -377,8 +419,8 @@ evidence; this green merge does not substitute for the broader preview/0C gates.
    server to the Mac is a separate design and implementation slice.
 4. **No durable pull-provenance sink yet.** Policy enforcement exists, but successful registry provenance is not yet persisted as complete host session evidence.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
-6. **macOS developer support, not cross-platform support.** Apple Container and Docker Desktop are
-   implemented independently; native Linux remains fail closed until its own proof and product slice land.
+6. **Explicit developer profiles, not general Linux support.** macOS Apple Container, macOS Docker
+   Desktop, and WSL2/Desktop amd64 are implemented. Native Linux Engine and WSL arm64 remain fail closed.
 7. **Not preview-qualified.** The no-skip Apple Container and Docker Desktop developer release suites
    pass, but the broader G1-G10/0C evidence and failure-injection matrix remain incomplete.
 8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session

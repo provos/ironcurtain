@@ -98,13 +98,13 @@ Inside the session, load it with `docker image load --input /workspace/images/ex
 does not contact a registry; IronCurtain does not automatically export the outer agent image into the
 private daemon.
 
-| Field                          | Type            | Default when enabled     | Description                                                                        |
-| ------------------------------ | --------------- | ------------------------ | ---------------------------------------------------------------------------------- |
-| `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                            |
-| `dockerWorkload.networkAccess` | string          | Fresh enable: `packages` | `packages`, `images`, or `offline`; changes apply only to new sessions.            |
-| `containerRuntime`             | string          | `auto`                   | `auto`, `docker`, or `apple-container`; nested Docker with `docker` is macOS-only. |
-| `dockerResources.memoryMb`     | integer \| null | `8192`                   | Ordinary container memory ceiling; numeric values are inherited by nested Docker.  |
-| `dockerResources.cpus`         | number \| null  | `4`                      | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.     |
+| Field                          | Type            | Default when enabled     | Description                                                                                           |
+| ------------------------------ | --------------- | ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                                               |
+| `dockerWorkload.networkAccess` | string          | Fresh enable: `packages` | `packages`, `images`, or `offline`; changes apply only to new sessions.                               |
+| `containerRuntime`             | string          | `auto`                   | `auto`, `docker`, or `apple-container`; Docker nesting supports macOS Desktop and WSL2/Desktop amd64. |
+| `dockerResources.memoryMb`     | integer \| null | `8192`                   | Ordinary container memory ceiling; numeric values are inherited by nested Docker.                     |
+| `dockerResources.cpus`         | number \| null  | `4`                      | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.                        |
 
 For backward compatibility, an existing enabled block with no old or new network choice migrates to
 `images`; old `imageIngress: "public-registry"` also becomes `images`, while `preloaded-only` becomes
@@ -112,20 +112,34 @@ For backward compatibility, an existing enabled block with no old or new network
 with no prior choice remains unchanged until the first CLI or web enable, which explicitly writes
 `packages`.
 
-On macOS, nested Docker admits a resolved Docker Desktop or Apple Container runtime and checks that the
-selected runtime is available before provisioning. Docker Desktop supports `offline`, `images`, and
-`packages`; its networked modes reuse the same registry/package policy engines as Apple Container through
-fixed-target, bundle-scoped relays. A Docker resolution on another host fails closed. If an ordinary Docker resource is `null`,
+Nested Docker checks the resolved runtime and host/daemon facts before provisioning. All three network
+modes are implemented on these developer-scoped profiles:
+
+| Host and runtime                      | Nested-Docker requirements                                                                                         | Workload policy transport                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| macOS, Apple silicon, Apple Container | macOS 26+ and Container CLI 1.2.1+                                                                                 | Exact host Unix-domain sockets (UDS)              |
+| macOS, Docker Desktop                 | Available Linux-container Docker daemon and admitted runtime profile                                               | Fixed-target TCP relays to guarded host listeners |
+| WSL2, Docker Desktop                  | Linux/amd64 daemon, cgroup v2, covered seccomp/cgroup namespace security options, non-root coordinator UID and GID | Fixed-target relays to exact host UDS files       |
+
+Run IronCurtain as your regular WSL user, not with host `sudo`; passwordless sudo remains available
+inside the agent container. Native Linux Engine, non-Desktop WSL engines, and WSL arm64 are not admitted.
+This restriction concerns nested Docker, not ordinary Docker Agent sessions with nesting disabled.
+The selected Docker endpoint is captured for the bundle; ambient context changes cannot redirect part
+of an active bundle to another daemon. Registry/package policy is shared across all admitted profiles.
+
+If an ordinary Docker resource is `null`,
 nested Docker keeps its safe fallback instead of inheriting an unlimited value. The setting is global for
 Docker Agent execution: standalone sessions and each workflow infrastructure bundle receive their own
 private nested daemon when enabled.
 
-The macOS developer capability intentionally does not include persistent daemon/image cache state,
+This opt-in developer capability intentionally does not include persistent daemon/image cache state,
 private or authenticated registries and package sources, or host-published ports. Compose can run
 already-built images with the managed external network below; Compose builds that bypass the supported
 direct/default-Buildx package path, custom/remote BuildKit workers, and alternate Docker contexts are not
-supported. Native Linux and IronCurtain-in-IronCurtain are separate implementation and qualification
-slices.
+supported. Native Linux Engine and IronCurtain-in-IronCurtain are separate implementation and qualification
+slices. Ended nested sessions are not resumable. See [backend qualification](TESTING.md#nested-docker-release-qualification)
+for repeatable tests and [the WSL acceptance record](docs/designs/linux-nested-docker-implementation-plan.md)
+for coverage limits, including the pending real non-1000 WSL coordinator test.
 
 ### Connecting nested containers
 

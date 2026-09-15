@@ -1,8 +1,8 @@
-**Linux nested-Docker assessment — 2026-09-10**
+**Linux nested-Docker assessment — updated 2026-09-15**
 
 **Current implementation status**
 
-The working tree now implements nested Docker for WSL2 with Docker Desktop on
+PR #467, merged as `d8c1d71`, implements nested Docker for WSL2 with Docker Desktop on
 amd64. The [implementation design](linux-nested-docker-implementation-plan.md)
 records the shared architecture, evidence and remaining acceptance work. Agent
 sudo remains available. Structural profile checks, complete watchdog policy values
@@ -30,8 +30,13 @@ have durable lease ownership. The design's acceptance record preserves these
 findings rather than treating a passing runner manifest alone as cleanup proof.
 
 Native Linux Engine and Linux arm64 remain unqualified and are outside this
-delivery. macOS paths share the refactored code but have not received a fresh live
-pass. Live adapter image/UID tests do not establish an all-mode-by-adapter matrix;
+delivery. Pre-merge macOS validation on 2026-09-14 passed the Docker Desktop suite
+(352 tests and six live gates) and Apple workflow/PTY checks after the shared
+package-staging fix. The final Apple packages workflow passed 27 deterministic checks
+and 12 fresh-admission checks with exact teardown; see the
+[updated handoff](secure-nested-runtime-handoff.md#pr-467-macos-regression-validation).
+These runs do not replace WSL validation or qualify later dependency-only changes.
+Live adapter image/UID tests do not establish an all-mode-by-adapter matrix;
 the CLI, PTY and workflow smoke gates use Claude. A coordinator running under a
 real non-1000 WSL host identity remains pending because that harness requires host
 sudo. Container-side UID remapping evidence does not substitute for it.
