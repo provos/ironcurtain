@@ -45,7 +45,13 @@ IronCurtain supports two session modes with different trust models:
 
 - **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine. Every tool call exits the sandbox as a structured MCP request, passes through the policy engine (allow / deny / escalate), and only then reaches the real MCP server.
 
-- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), MCP tool calls pass through the same policy engine, and package installations (npm/PyPI) go through a validating registry proxy.
+- **Docker Agent Mode** — An external agent (Claude Code, Goose, Codex) runs inside a container without direct public-network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), MCP tool calls pass through the same policy engine, and supported package installations go through validating package proxies.
+
+Opt-in [nested Docker](CONFIG.md#nested-docker-workloads) gives developer sessions a private, ephemeral
+daemon without exposing the host Docker socket. Implemented profiles cover Apple Container and Docker
+Desktop on macOS, and WSL2 with Docker Desktop on amd64. Its `offline`, `images`, and `packages` modes
+separate local image use, mediated public image pulls, and supported package builds. Native Linux Engine
+is not admitted for nesting; see the configuration reference for prerequisites and limitations.
 
 In both modes, the agent is **untrusted**. Security does not depend on the model following instructions — it is enforced at the boundary.
 

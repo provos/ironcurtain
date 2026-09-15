@@ -6,7 +6,7 @@
 future native Linux Docker
 **Related:**
 [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
-[`secure-nested-runtime-handoff.md`](./secure-nested-runtime-handoff.md),
+[`implementation and acceptance`](./linux-nested-docker-implementation-plan.md),
 [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md)
 
 ## Decision summary

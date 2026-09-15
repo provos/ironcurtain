@@ -1,11 +1,14 @@
 # Secure Nested Runtime Package Network
 
-**Status:** implemented macOS developer capability; both macOS backends developer release-qualified
-**Updated:** 2026-09-03
-**Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes
-**Related:**
-[`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md),
-[`secure-nested-runtime-handoff.md`](./secure-nested-runtime-handoff.md)
+**Purpose:** governing package-authority contract, not a platform-status or validation ledger.
+**Related:** [implementation design](linux-nested-docker-implementation-plan.md),
+[broader runtime design](secure-nested-runtime-implementation-plan.md).
+
+For supported profiles and admission requirements, use
+[CONFIG.md](../../CONFIG.md#nested-docker-workloads). For shared architecture and dated
+validation evidence, use the implementation design's
+[acceptance record](linux-nested-docker-implementation-plan.md#acceptance-record).
+Package authority is defined below independently of the selected transport.
 
 ## 1. Decision
 
