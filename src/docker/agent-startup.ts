@@ -19,7 +19,11 @@ export function prepareDockerAgentStartup(
   needsUidRemap: boolean,
 ): {
   readonly command: readonly string[];
-  waitUntilReady(runtime: ContainerRuntime, containerId: string, options?: StartupWaitOptions): Promise<void>;
+  waitUntilReady(
+    runtime: Pick<ContainerRuntime, 'exec' | 'isRunning' | 'readContainerLogTail'>,
+    containerId: string,
+    options?: StartupWaitOptions,
+  ): Promise<void>;
 } {
   const readyPath = `/tmp/ironcurtain-agent-ready-${randomUUID()}`;
   return {

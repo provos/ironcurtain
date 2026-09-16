@@ -6,9 +6,11 @@ import type { ContainerRuntime } from '../../src/docker/types.js';
 
 function runtime() {
   return {
-    exec: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' }),
-    isRunning: vi.fn().mockResolvedValue(true),
-    readContainerLogTail: vi.fn().mockResolvedValue('entrypoint failed'),
+    exec: vi.fn<ContainerRuntime['exec']>().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' }),
+    isRunning: vi.fn<ContainerRuntime['isRunning']>().mockResolvedValue(true),
+    readContainerLogTail: vi
+      .fn<NonNullable<ContainerRuntime['readContainerLogTail']>>()
+      .mockResolvedValue('entrypoint failed'),
   };
 }
 
@@ -18,7 +20,7 @@ describe('Docker agent startup handoff', () => {
     const startup = prepareDockerAgentStartup(command, false);
     const docker = runtime();
     expect(startup.command).toBe(command);
-    await startup.waitUntilReady(docker as unknown as ContainerRuntime, 'agent');
+    await startup.waitUntilReady(docker, 'agent');
     expect(docker.exec).not.toHaveBeenCalled();
   });
 
@@ -43,7 +45,7 @@ describe('Docker agent startup handoff', () => {
     const startup = prepareDockerAgentStartup(['sleep', 'infinity'], true);
     const docker = runtime();
     docker.exec.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: '' });
-    await startup.waitUntilReady(docker as unknown as ContainerRuntime, 'agent', { pollIntervalMs: 1 });
+    await startup.waitUntilReady(docker, 'agent', { pollIntervalMs: 1 });
     expect(docker.exec).toHaveBeenCalledTimes(2);
     for (const call of docker.exec.mock.calls) {
       expect(call).toEqual([
@@ -60,9 +62,7 @@ describe('Docker agent startup handoff', () => {
     docker.exec.mockResolvedValue({ exitCode: 1, stdout: '', stderr: '' });
     docker.isRunning.mockResolvedValue(running);
     const startup = prepareDockerAgentStartup(['sleep', 'infinity'], true);
-    await expect(
-      startup.waitUntilReady(docker as unknown as ContainerRuntime, 'agent', { timeoutMs: 0 }),
-    ).rejects.toThrow(
+    await expect(startup.waitUntilReady(docker, 'agent', { timeoutMs: 0 })).rejects.toThrow(
       running
         ? /did not become ready within 0ms[\s\S]*entrypoint failed/
         : /exited before becoming ready[\s\S]*entrypoint failed/,
