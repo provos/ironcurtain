@@ -492,6 +492,14 @@ export function createDockerManager(
       await exec('docker', ['start', nameOrId], { timeout: 30_000 });
     },
 
+    async readContainerLogTail(nameOrId: string): Promise<string> {
+      const { stdout, stderr } = await exec('docker', ['logs', '--tail', '100', nameOrId], {
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+      });
+      return [stdout, stderr].filter(Boolean).join('\n');
+    },
+
     async probeImageVersion(image: string, command: readonly string[]): Promise<string | undefined> {
       const [entrypoint, ...rest] = command;
       if (!entrypoint) return undefined;

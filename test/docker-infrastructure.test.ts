@@ -961,6 +961,25 @@ describe('createSessionContainers', () => {
   });
 
   // --- UID remap (issue #232) ---
+  it('waits for the Linux entrypoint handoff before the writable-storage check', async () => {
+    const events: string[] = [];
+    const { docker, createCalls } = makeMockDocker();
+    docker.exec = async (_container, command, _timeout, user) => {
+      if (command.includes('ironcurtain-agent-startup')) {
+        expect(user).toBe('0:0');
+        events.push('entrypoint-ready');
+      } else if (command.some((arg) => arg.includes('.ironcurtain-write-probe'))) {
+        expect(events).toEqual(['entrypoint-ready']);
+        events.push('storage-check');
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    await createSessionContainers(makeMockCore({ tempDir, useTcp: false, docker }), makeMockConfig());
+    expect(createCalls[0].command).toContain('ironcurtain-agent-startup');
+    expect(createCalls[0].command.slice(-2)).toEqual(['sleep', 'infinity']);
+    expect(events).toEqual(['entrypoint-ready', 'storage-check']);
+  });
+
   it('does NOT pass --user 0:0 or UID env in TCP (macOS) mode', async () => {
     // On macOS, VirtioFS handles UID translation and `--user 0:0` would
     // break it; the agent container must run as the baked codespace user.

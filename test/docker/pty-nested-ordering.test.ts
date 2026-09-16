@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DockerContainerConfig } from '../../src/docker/types.js';
+import type { ContainerRuntime, DockerContainerConfig } from '../../src/docker/types.js';
 import {
   DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
   DOCKER_BUILD_SHIM_PATH,
@@ -539,6 +539,51 @@ describe('Apple nested Docker PTY startup ordering', () => {
     expect(agent.trustedCreateOptions).toEqual({
       tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
     });
+  });
+
+  it('waits for Linux UID-remap handoff before the storage check and PTY attach', async () => {
+    installInfrastructure(undefined, { runtimeKind: 'docker' });
+    const infra = state.infrastructure as {
+      useTcp: boolean;
+      topology: string;
+      docker: {
+        exec: ReturnType<typeof vi.fn<ContainerRuntime['exec']>>;
+        start: ReturnType<typeof vi.fn<ContainerRuntime['start']>>;
+      };
+    };
+    infra.useTcp = false;
+    infra.topology = 'uds';
+    // Linux clears any stale PTY socket before starting the container. Model
+    // socat binding the new socket at start rather than before session setup.
+    await new Promise<void>((resolve) => ptyServer.close(() => resolve()));
+    infra.docker.start.mockImplementation(async () => {
+      await new Promise<void>((resolve, reject) => {
+        ptyServer.once('error', reject);
+        ptyServer.listen(join(socketsDir, 'pty.sock'), () => resolve());
+      });
+    });
+    let ready = false;
+    infra.docker.exec.mockImplementation(async (_id, command: readonly string[], _timeout, user) => {
+      if (command.includes('ironcurtain-agent-startup')) {
+        expect(user).toBe('0:0');
+        ready = true;
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+    const { checkDockerContainerWritableStorage } = await import('../../src/docker/docker-infrastructure.js');
+    vi.mocked(checkDockerContainerWritableStorage).mockImplementationOnce(async () => {
+      expect(ready).toBe(true);
+    });
+    await runPtySession({
+      config: config(resolveDockerWorkloadConfig({ enabled: false })),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      workspacePath: homeDir,
+      attach: async () => {
+        expect(ready).toBe(true);
+        return 0;
+      },
+    });
+    expect(state.createdConfigs[0].command).toContain('ironcurtain-agent-startup');
   });
 
   it('uses runtime-native exec and attaches only after workload activation completes', async () => {

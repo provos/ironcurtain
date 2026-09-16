@@ -49,6 +49,27 @@ describe('loadOrCreateCA', () => {
     expect(ca.keyPath).toBe(join(join(ca.certPath, '..'), 'ca-key.pem'));
   });
 
+  it('publishes and reloads exact CA permissions under umask 077', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const previousUmask = process.umask(0o077);
+    try {
+      const authority = loadOrCreateCA(caDir);
+      const generationDirectory = join(caDir, 'generations', authority.generation);
+
+      expect(statSync(authority.certPath).mode & 0o777).toBe(0o644);
+      expect(statSync(authority.keyPath).mode & 0o777).toBe(0o600);
+      expect(statSync(join(generationDirectory, 'manifest.json')).mode & 0o777).toBe(0o600);
+      expect(statSync(join(caDir, 'current.json')).mode & 0o777).toBe(0o600);
+      expect(statSync(caDir).mode & 0o777).toBe(0o700);
+      expect(statSync(generationDirectory).mode & 0o777).toBe(0o700);
+      expect(loadOrCreateCA(caDir).generation).toBe(authority.generation);
+      expect(process.umask()).toBe(0o077);
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
   it('serializes CA lifecycle operations through the parent lock', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
     const caDir = join(tempDir, 'ca');

@@ -45,6 +45,24 @@ describe('nested daemon identity staging', () => {
     expect(readFileSync(join(path, 'subgid'), 'utf8')).toBe('rootless:200000:65536\n');
   });
 
+  it('stages and reuses world-readable identity leaves under umask 077 without exposing the parent', () => {
+    const path = directory();
+    const previousUmask = process.umask(0o077);
+    try {
+      const mounts = stageNestedDaemonIdentity(path, { uid: 1101, gid: 1102 });
+      for (const mount of mounts) {
+        expect(lstatSync(mount.source).mode & 0o777).toBe(0o444);
+        expect(lstatSync(mount.source).uid).toBe(process.getuid!());
+        expect(mount.readonly).toBe(true);
+      }
+      expect(lstatSync(path).mode & 0o777).toBe(0o700);
+      expect(stageNestedDaemonIdentity(path, { uid: 1101, gid: 1102 })).toEqual(mounts);
+      expect(process.umask()).toBe(0o077);
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
   it.each([0, -1, 1.5, 2_147_483_648, Number.NaN])('rejects unsupported rootless identity %s', (uid) => {
     expect(() => stageNestedDaemonIdentity(directory(), { uid, gid: 1102 })).toThrow(/non-root positive/);
   });

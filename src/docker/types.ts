@@ -325,6 +325,9 @@ export interface ContainerRuntime {
   /** Start a created container. */
   start(nameOrId: string): Promise<void>;
 
+  /** Read a bounded stdout/stderr log tail, including for exited containers. Optional across runtimes. */
+  readContainerLogTail?(nameOrId: string): Promise<string>;
+
   /**
    * Execute a command inside a running container via `docker exec`.
    * Returns when the command exits. Both stdout and stderr are captured.

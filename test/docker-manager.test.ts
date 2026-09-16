@@ -646,6 +646,34 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('readContainerLogTail', () => {
+    it('reads bounded logs from the captured endpoint and includes container stderr', async () => {
+      const mock = createMockExec();
+      mock.setResponse('daemon starting\n', 'id: unknown user rootless\n');
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        endpoint: { host: 'unix:///tmp/qualified-docker.sock' },
+      });
+
+      expect(await manager.readContainerLogTail!('stopped-container')).toContain('id: unknown user rootless');
+      expect(mock.calls[0].args).toEqual([
+        '--host',
+        'unix:///tmp/qualified-docker.sock',
+        'logs',
+        '--tail',
+        '100',
+        'stopped-container',
+      ]);
+      expect(mock.calls[0].opts).toMatchObject({ timeout: 10_000, maxBuffer: 256 * 1024 });
+    });
+
+    it('reports log retrieval failures to the caller', async () => {
+      const mock = createMockExec();
+      mock.setError(1, '', 'No such container');
+      const manager = createDockerManager(mock.mockExec);
+      await expect(manager.readContainerLogTail!('missing')).rejects.toThrow();
+    });
+  });
+
   describe('isRunning', () => {
     it('returns true when container is running', async () => {
       mock.setResponse('true\n');

@@ -99,7 +99,7 @@ export interface DockerDesktopP2SeccompProfile {
 /** The minimal runtime surface the focused sidecar lifecycle consumes. */
 export type DockerDesktopSidecarRuntime = Pick<
   ContainerRuntime,
-  'inspectImage' | 'create' | 'start' | 'exec' | 'stop' | 'remove'
+  'inspectImage' | 'create' | 'start' | 'exec' | 'stop' | 'remove' | 'readContainerLogTail'
 > & {
   readonly inspectContainerRaw: NonNullable<ContainerRuntime['inspectContainerRaw']>;
   readonly createVolume: NonNullable<ContainerRuntime['createVolume']>;
@@ -324,6 +324,12 @@ export async function startDockerDesktopSidecar(
       pollIntervalMs: options.pollIntervalMs,
       now: options.now,
       sleep: options.sleep,
+      // Read through the outer runtime: docker exec cannot inspect an exited
+      // daemon. Readiness collects this before the failure path rolls it back.
+      readLogTail: async () => {
+        const stdout = await options.runtime.readContainerLogTail?.(sidecar.id);
+        return { stdout: stdout ?? '', exitCode: stdout === undefined ? 1 : 0 };
+      },
       label: 'Docker Desktop private daemon',
     });
     options.activation.recordDaemonReady(readiness);

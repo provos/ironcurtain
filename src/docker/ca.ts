@@ -744,6 +744,9 @@ function writeDurableExclusiveFile(
   );
   try {
     writeFileSync(descriptor, contents);
+    // Creation modes are filtered by umask; enforce the exact publication mode
+    // on this exclusively created file without changing the process-wide umask.
+    fchmodSync(descriptor, mode);
     fsyncSync(descriptor);
     const stats = fstatSync(descriptor);
     validateAuthorityFile(stats, path, mode, label, maximumBytes);
