@@ -1222,6 +1222,13 @@ describe('nested daemon — Docker Desktop agent capability', () => {
       [
         '/bin/sh',
         '-c',
+        'test -f "$1"',
+        'ironcurtain-agent-startup',
+        expect.stringMatching(/^\/tmp\/ironcurtain-agent-ready-[0-9a-f-]+$/u),
+      ],
+      [
+        '/bin/sh',
+        '-c',
         expect.stringMatching(/\[ ! -L "\$path" \].*mkdir.*\[ -d "\$path" \].*chown.*chmod/su),
         'ironcurtain-build-state-init',
         DOCKER_BUILDX_STATE_DIRECTORY,
@@ -1246,8 +1253,14 @@ describe('nested daemon — Docker Desktop agent capability', () => {
       ['/bin/sh', '-c', 'command -v docker'],
       ['docker', 'version', '--format', '{{json .Client}}'],
     ]);
-    expect(runtime.execUsers.slice(0, activationExecCount)).toEqual(['0:0', 'codespace', 'codespace', 'codespace']);
-    expect(activationExecCount).toBe(4);
+    expect(runtime.execUsers.slice(0, activationExecCount)).toEqual([
+      '0:0',
+      '0:0',
+      'codespace',
+      'codespace',
+      'codespace',
+    ]);
+    expect(activationExecCount).toBe(5);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
   });
 
@@ -1256,13 +1269,13 @@ describe('nested daemon — Docker Desktop agent capability', () => {
       condition: 'a pre-existing build-state symlink',
       phase: 'ironcurtain-build-state-init',
       detail: `nested-Docker build state path is a symlink: ${DOCKER_BUILDX_STATE_DIRECTORY}`,
-      expectedUsers: ['0:0'],
+      expectedUsers: ['0:0', '0:0'],
     },
     {
       condition: 'a failed codespace write canary',
       phase: 'ironcurtain-build-state-verify',
       detail: `cannot create ${DOCKER_BUILDX_STATE_DIRECTORY}/.ironcurtain-write-preflight: ` + 'Read-only file system',
-      expectedUsers: ['0:0', 'codespace'],
+      expectedUsers: ['0:0', '0:0', 'codespace'],
     },
   ])('does not activate Desktop after $condition', async ({ phase, detail, expectedUsers }) => {
     const { runtime, handle } = await admitBundle({
