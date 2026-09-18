@@ -1,5 +1,5 @@
 /** Host-owned identity inputs for the existing rootless daemon sidecar. */
-import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, lstatSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertCanonicalHostPath, readHardenedFile } from '../hardened-fs.js';
 import type { DockerMount } from '../docker/types.js';
@@ -46,7 +46,19 @@ export function stageNestedDaemonIdentity(directory: string, identity: NestedDae
   return Object.entries(files).map(([name, content]) => {
     const source = join(directory, name);
     try {
-      writeFileSync(source, content, { flag: 'wx', mode: 0o444 });
+      const descriptor = openSync(
+        source,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o444,
+      );
+      try {
+        writeFileSync(descriptor, content);
+        // The capability-restricted root bootstrap must read these host-owned
+        // files too. Enforce the exact mode even when the host umask is 077.
+        fchmodSync(descriptor, 0o444);
+      } finally {
+        closeSync(descriptor);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const existing = readHardenedFile(source, { label: `nested daemon ${name}`, minBytes: 1, maxBytes: 4096 });

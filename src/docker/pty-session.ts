@@ -28,6 +28,7 @@ import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-typ
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import { validateResumeSession } from '../pty/session-scanner.js';
 import type { ContainerRuntime } from './types.js';
+import { prepareDockerAgentStartup } from './agent-startup.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { getSessionDir, getSessionCapturesDir, getPtyRegistryDir, SESSION_STATE_FILENAME } from '../config/paths.js';
@@ -844,6 +845,7 @@ async function runPtySessionAttempt(
     // labels. `labels` is the base resource labels in the ordinary case and the
     // base merged with the generation ownership label when the create is
     // ledgered — the merge lives in createLedgeredAgentContainer.
+    const agentStartup = prepareDockerAgentStartup(ptyCommand, infra.runtimeKind === 'docker' && !useTcp);
     const createPtyContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
       infra.docker.create(
         buildAgentContainerConfig(infra, sessionConfig.userConfig, {
@@ -852,7 +854,7 @@ async function runPtySessionAttempt(
           network: network ?? 'none',
           mounts,
           env,
-          command: ptyCommand,
+          command: [...agentStartup.command],
           // PTY sessions are standalone (no workflow/scope), so only the
           // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
           bundleLabel: bundleId,
@@ -888,6 +890,7 @@ async function runPtySessionAttempt(
     await attachDockerDesktopAgentEgressNetwork(infra, containerId);
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
+    await agentStartup.waitUntilReady(docker, containerId);
 
     // Docker Desktop's daemon sidecar is already adjudicated. Initialize and
     // verify package-build state in the blocked agent, then activate the bundle.

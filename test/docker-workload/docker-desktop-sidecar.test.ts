@@ -788,6 +788,43 @@ describe('Docker Desktop sidecar lifecycle', () => {
     expect(commands.every((command) => command[0] === '/usr/local/bin/docker')).toBe(true);
   });
 
+  it.each(['available', 'throws', 'unsupported'] as const)(
+    'preserves readiness diagnostics and rollback when container logs are %s',
+    async (logs) => {
+      const fixture = runtimeFixture();
+      fixture.runtime.exec = async () => ({ exitCode: 1, stdout: '', stderr: 'container is not running' });
+      if (logs !== 'unsupported') {
+        fixture.runtime.readContainerLogTail = async (id) => {
+          fixture.events.push(`container:logs:${id}`);
+          if (logs === 'throws') throw new Error('log driver unavailable');
+          return 'id: unknown user rootless\n';
+        };
+      }
+
+      await expect(
+        startDockerDesktopSidecar({
+          ...startOptions(fixture),
+          readinessTimeoutMs: 0,
+        }),
+      ).rejects.toThrow(
+        logs === 'available'
+          ? /container is not running[\s\S]*dockerd log tail:\nid: unknown user rootless/u
+          : /container is not running[\s\S]*dockerd log tail:\n\(dockerd log unavailable\)/u,
+      );
+      if (logs !== 'unsupported') {
+        const logIndex = fixture.events.indexOf(`container:logs:${SIDECAR_CONTAINER_ID}`);
+        expect(logIndex).toBeGreaterThan(-1);
+        expect(logIndex).toBeLessThan(fixture.events.indexOf(`container:stop:${SIDECAR_CONTAINER_ID}`));
+      }
+      expect(fixture.events).not.toContain('record:daemon-ready');
+      expect(fixture.events.slice(-3)).toEqual([
+        `container:stop:${SIDECAR_CONTAINER_ID}`,
+        `container:remove:${SIDECAR_CONTAINER_ID}`,
+        `volume:remove:${API_VOLUME_NAME}`,
+      ]);
+    },
+  );
+
   it('fails closed and rolls back when PATH does not select the baked no-new-keyring shim', async () => {
     const fixture = runtimeFixture({ failShim: true });
 

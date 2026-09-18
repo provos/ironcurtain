@@ -1,5 +1,6 @@
 import { bindDockerEndpointExec } from './docker-endpoint.js';
 import { DOCKER_AGENT_VOLUME_SHADOW } from './docker-agent-volume-shadow.js';
+import { prepareDockerAgentStartup } from './agent-startup.js';
 /**
  * Shared Docker session infrastructure setup.
  *
@@ -309,6 +310,7 @@ export function stageDockerBuildShim(
     );
     const clientDirectory = resolve(temporary, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR);
     mkdirSync(clientDirectory, { mode: 0o755 });
+    chmodSync(clientDirectory, 0o755);
     writeExactStagedFile(
       resolve(clientDirectory, 'config.json'),
       contract.proxyConfigArtifact.content,
@@ -3184,6 +3186,10 @@ async function createSessionContainersAttempt(
     // `labels` is the base bundle labels in the ordinary case and the base merged
     // with the generation ownership label when the create is ledgered — the merge
     // itself lives in createLedgeredAgentContainer, so this closure just forwards.
+    const agentStartup = prepareDockerAgentStartup(
+      ['sleep', 'infinity'],
+      core.runtimeKind === 'docker' && !core.useTcp,
+    );
     const createMainContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
       core.docker.create(
         buildAgentContainerConfig(core, config.userConfig, {
@@ -3202,7 +3208,7 @@ async function createSessionContainersAttempt(
             // base-image-agnostic and preserves the image's own PATH.
             ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
           },
-          command: ['sleep', 'infinity'],
+          command: [...agentStartup.command],
           ...bundleLabels,
           labels,
           extraHosts,
@@ -3233,6 +3239,7 @@ async function createSessionContainersAttempt(
     await attachDockerDesktopAgentEgressNetwork(core, mainContainerId);
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
+    await agentStartup.waitUntilReady(core.docker, mainContainerId);
 
     // The Desktop sidecar is already adjudicated. Initialize and verify
     // package-build state in the blocked agent, then finalize the lease. Apple

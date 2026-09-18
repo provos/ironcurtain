@@ -646,11 +646,15 @@ export function createAppleContainerManager(
       }
     },
 
-    async isRunning(nameOrId: string): Promise<boolean> {
+    async isRunning(nameOrId: string, options = {}): Promise<boolean> {
       try {
         const entry = await inspectContainer(nameOrId, 5_000);
+        if (options.throwOnError && entry?.status?.state === undefined) {
+          throw new Error('Container inspect returned no running state');
+        }
         return entry?.status?.state === 'running';
-      } catch {
+      } catch (error) {
+        if (options.throwOnError) throw error;
         return false;
       }
     },
