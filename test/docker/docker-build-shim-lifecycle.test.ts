@@ -171,6 +171,9 @@ describe('package build-trust staging', () => {
       const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', options())!;
       const contract = staged.artifacts.find(({ kind }) => kind === 'build-trust-contract')!;
       expect(lstatSync(dirname(contract.source)).mode & 0o777).toBe(0o755);
+      const client = staged.artifacts.find(({ kind }) => kind === 'proxy-config')!;
+      expect(lstatSync(client.source).mode & 0o777).toBe(0o755);
+      expect(lstatSync(join(client.source, 'config.json')).mode & 0o777).toBe(staged.contract.proxyConfigArtifact.mode);
     } finally {
       process.umask(previousUmask);
     }

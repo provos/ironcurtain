@@ -1222,7 +1222,7 @@ describe('nested daemon — Docker Desktop agent capability', () => {
       [
         '/bin/sh',
         '-c',
-        'test -f "$1"',
+        expect.stringContaining('[ "$observed" = "$expected" ]'),
         'ironcurtain-agent-startup',
         expect.stringMatching(/^\/tmp\/ironcurtain-agent-ready-[0-9a-f-]+$/u),
       ],

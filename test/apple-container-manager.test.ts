@@ -563,6 +563,16 @@ describe('AppleContainerManager', () => {
       expect(await manager().containerExists('c1')).toBe(false);
     });
 
+    it('preserves inspect failures for strict callers without changing the default', async () => {
+      mock.setError(1, '', 'inspect unavailable');
+      await expect(manager().isRunning('c1', { throwOnError: true })).rejects.toThrow();
+      await expect(manager().isRunning('c1')).resolves.toBe(false);
+      mock.setResponse('[]');
+      await expect(manager().isRunning('c1', { throwOnError: true })).rejects.toThrow('no running state');
+      mock.setResponse(JSON.stringify([{ status: { state: 'stopped' } }]));
+      await expect(manager().isRunning('c1', { throwOnError: true })).resolves.toBe(false);
+    });
+
     it('getContainerLabel reads configuration.labels', async () => {
       mock.setResponse(inspectRunning);
       expect(await manager().getContainerLabel('c1', 'ironcurtain.bundle')).toBe('abc-bundle-id');

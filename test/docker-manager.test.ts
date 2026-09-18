@@ -672,6 +672,28 @@ describe('DockerManager', () => {
       const manager = createDockerManager(mock.mockExec);
       await expect(manager.readContainerLogTail!('missing')).rejects.toThrow();
     });
+
+    it.each(['stdout', 'stderr'] as const)('retains bounded partial %s when logs exceed maxBuffer', async (stream) => {
+      const error = Object.assign(new Error('maxBuffer exceeded'), {
+        code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+        stdout: '',
+        stderr: '',
+        [stream]: '😀'.repeat(100_000) + '\nuseful crash detail',
+      });
+      const manager = createDockerManager(async () => {
+        throw error;
+      });
+      const tail = await manager.readContainerLogTail!('stopped');
+      expect(tail).toContain('useful crash detail');
+      expect(tail).toContain('(docker logs output truncated)');
+      expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(16 * 1024);
+      expect(tail).not.toContain('\uFFFD');
+    });
+
+    it('preserves an empty successful log read', async () => {
+      mock.setResponse('');
+      await expect(createDockerManager(mock.mockExec).readContainerLogTail!('empty')).resolves.toBe('');
+    });
   });
 
   describe('isRunning', () => {
@@ -691,6 +713,28 @@ describe('DockerManager', () => {
       mock.setError(1);
       const manager = createDockerManager(mock.mockExec);
       expect(await manager.isRunning('nonexistent')).toBe(false);
+    });
+
+    it('preserves inspect timeouts for strict readiness callers', async () => {
+      const timeout = Object.assign(new Error('inspect timed out'), {
+        killed: true,
+        signal: 'SIGTERM',
+        stdout: '',
+        stderr: '',
+      });
+      const manager = createDockerManager(async () => {
+        throw timeout;
+      });
+      await expect(manager.isRunning('agent', { throwOnError: true })).rejects.toBe(timeout);
+      await expect(manager.isRunning('agent')).resolves.toBe(false);
+    });
+
+    it('accepts confirmed stopped state but rejects malformed strict observations', async () => {
+      const manager = createDockerManager(mock.mockExec);
+      mock.setResponse('false\n');
+      await expect(manager.isRunning('agent', { throwOnError: true })).resolves.toBe(false);
+      mock.setResponse('');
+      await expect(manager.isRunning('agent', { throwOnError: true })).rejects.toThrow('invalid running state');
     });
   });
 

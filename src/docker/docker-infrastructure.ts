@@ -310,6 +310,7 @@ export function stageDockerBuildShim(
     );
     const clientDirectory = resolve(temporary, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR);
     mkdirSync(clientDirectory, { mode: 0o755 });
+    chmodSync(clientDirectory, 0o755);
     writeExactStagedFile(
       resolve(clientDirectory, 'config.json'),
       contract.proxyConfigArtifact.content,

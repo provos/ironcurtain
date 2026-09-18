@@ -379,8 +379,8 @@ export interface ContainerRuntime {
   /** Remove a container (must be stopped). */
   remove(nameOrId: string): Promise<void>;
 
-  /** Check if a container is running. */
-  isRunning(nameOrId: string): Promise<boolean>;
+  /** Check if a container is running. Strict callers can distinguish inspect errors from a stopped container. */
+  isRunning(nameOrId: string, options?: { readonly throwOnError?: boolean }): Promise<boolean>;
 
   /** Check if a Docker image exists locally. */
   imageExists(image: string): Promise<boolean>;

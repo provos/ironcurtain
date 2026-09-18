@@ -42,6 +42,7 @@ import {
   type DockerProgressOperation,
 } from './docker-progress-sink.js';
 import { buildContainerExecEnvironmentArgs } from './container-exec-environment.js';
+import { boundedLogTail } from './bounded-log-tail.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
@@ -493,11 +494,19 @@ export function createDockerManager(
     },
 
     async readContainerLogTail(nameOrId: string): Promise<string> {
-      const { stdout, stderr } = await exec('docker', ['logs', '--tail', '100', nameOrId], {
-        timeout: 10_000,
-        maxBuffer: 256 * 1024,
-      });
-      return [stdout, stderr].filter(Boolean).join('\n');
+      try {
+        const { stdout, stderr } = await exec('docker', ['logs', '--tail', '100', nameOrId], {
+          timeout: 10_000,
+          maxBuffer: 256 * 1024,
+        });
+        return boundedLogTail([stdout, stderr].filter(Boolean).join('\n'), 16 * 1024);
+      } catch (error) {
+        if (!isExecError(error) || error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
+        return boundedLogTail(
+          [error.stdout, error.stderr, '(docker logs output truncated)'].filter(Boolean).join('\n'),
+          16 * 1024,
+        );
+      }
     },
 
     async probeImageVersion(image: string, command: readonly string[]): Promise<string | undefined> {
@@ -603,13 +612,18 @@ export function createDockerManager(
       }
     },
 
-    async isRunning(nameOrId: string): Promise<boolean> {
+    async isRunning(nameOrId: string, options = {}): Promise<boolean> {
       try {
         const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', nameOrId], {
           timeout: 5_000,
         });
-        return stdout.trim() === 'true';
-      } catch {
+        const value = stdout.trim();
+        if (options.throwOnError && value !== 'true' && value !== 'false') {
+          throw new Error('Docker inspect returned an invalid running state');
+        }
+        return value === 'true';
+      } catch (error) {
+        if (options.throwOnError) throw error;
         return false;
       }
     },

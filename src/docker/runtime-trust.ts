@@ -23,6 +23,11 @@ export function stageRuntimeTrust(
   const normalizedRoots = [...new Set(publicRoots.map((pem) => normalizeCertificate(pem, 'public root')))].sort();
   const bundlePem = `${normalizedRoots.join('\n')}\n${normalizedCa}\n`;
 
+  // The public bundle is also consumed by auxiliary users (for example apt's
+  // downloader). A 077 host umask must not hide its 0444 files behind a 0700
+  // mount root. Do not widen the permissions of adjacent private config files.
+  if (!lstatSync(orientationDir).isDirectory()) throw new Error('runtime trust mount root must be a real directory');
+  chmodSync(orientationDir, 0o755);
   writePublicFileAtomic(orientationDir, basename(CONTAINER_RUNTIME_CA_CERT), `${normalizedCa}\n`);
   writePublicFileAtomic(orientationDir, basename(CONTAINER_RUNTIME_CA_BUNDLE), bundlePem);
 }

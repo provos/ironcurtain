@@ -3,12 +3,14 @@ import {
   closeSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -64,6 +66,32 @@ describe('runtime trust staging', () => {
       closeSync(oldCertificate);
       closeSync(oldBundle);
     }
+  });
+
+  it('keeps public trust accessible to other UIDs under umask 077 without widening private files', () => {
+    const previousUmask = process.umask(0o077);
+    try {
+      const privatePath = join(directory, 'private-config');
+      writeFileSync(privatePath, 'private fixture', { mode: 0o600 });
+      stageRuntimeTrust(directory, CA_ONE, [ROOT_ONE]);
+      expect(statSync(directory).mode & 0o777).toBe(0o755);
+      expect(statSync(join(directory, 'ca-cert.pem')).mode & 0o777).toBe(0o444);
+      expect(statSync(join(directory, 'ca-bundle.pem')).mode & 0o777).toBe(0o444);
+      expect(statSync(privatePath).mode & 0o777).toBe(0o600);
+      expect(process.umask()).toBe(0o077);
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
+  it('refuses to change the mode of a symlinked mount root', () => {
+    const target = join(directory, 'target');
+    const link = join(directory, 'link');
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, link);
+    expect(() => stageRuntimeTrust(link, CA_ONE, [ROOT_ONE])).toThrow('must be a real directory');
+    expect(statSync(target).mode & 0o777).toBe(0o700);
+    expect(readdirSync(target)).toEqual([]);
   });
 
   it.each(['ca-cert.pem', 'ca-bundle.pem'])('refuses to replace a planted %s symlink', (filename) => {
