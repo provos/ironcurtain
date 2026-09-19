@@ -104,6 +104,17 @@ host-gateway relay merely because both backends implement Docker.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
+## Current implementation and evidence
+
+The [implementation design](linux-nested-docker-implementation-plan.md) supersedes earlier
+Linux-wide rejection and static executable/hash-binding admission requirements below.
+It owns the current shared architecture and [acceptance record](linux-nested-docker-implementation-plan.md#acceptance-record).
+Use [CONFIG.md](../../CONFIG.md#nested-docker-workloads) for supported profiles and admission
+requirements, and [TESTING.md](../../TESTING.md#nested-docker-release-qualification) for qualification commands.
+
+The broader outcome gates below remain the design target, not a declaration of completed
+preview/stable or IronCurtain-in-IronCurtain qualification.
+
 ## /goal
 
 Deliver an opt-in real Docker API for untrusted IronCurtain workloads. The agent, its private daemon, and all nested containers are one colluding bundle. The trusted host constrains the bundle as a whole; it does not authorize individual inner Docker operations.

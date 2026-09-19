@@ -133,7 +133,13 @@
   },
   "overrides": {
     "minimatch": "^10.2.1",
-    "isolated-vm": "7.0.1"
+    "isolated-vm": "7.0.1",
+    "@huggingface/transformers": {
+      "sharp": "0.35.4"
+    },
+    "onnxruntime-node": {
+      "adm-zip": "0.6.1"
+    }
   },
   "lint-staged": {
     "!(packages/**)/*.ts": [
@@ -159,7 +165,7 @@
     "@types/shell-quote": "^1.7.5",
     "@types/turndown": "^5.0.6",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "lint-staged": "^17.0.8",
@@ -169,6 +175,6 @@
     "tsx": "^4.22.4",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.62.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.11"
   }
 }

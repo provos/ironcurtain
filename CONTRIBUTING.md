@@ -25,7 +25,7 @@ Thank you for your interest in contributing to IronCurtain! This is an early-sta
    echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
    ```
 
-4. Install the pre-commit hook (runs `format:check` and `lint` before each commit):
+4. Install the [Git hooks](#pre-commit-hook) for staged-file checks and pre-push cycle detection:
 
    ```bash
    npm run setup-hooks
@@ -52,7 +52,7 @@ Run a single test file or test by name:
 
 ```bash
 npm test -- test/policy-engine.test.ts
-npx test -- -t "denies delete_file"
+npm test -- -t "denies delete_file"
 ```
 
 See [TESTING.md](TESTING.md) for the full testing guide, including environment flags for LLM and Docker integration tests.
@@ -102,13 +102,17 @@ To rebuild the image (e.g. after changing the Dockerfile in the script):
 
 ## Pre-commit Hook
 
-The project includes a pre-commit hook that automatically runs `format:check` and `lint` before each commit. Install it with:
+The pre-commit hook runs `lint-staged` on matching staged files. The root `package.json`
+defines the checks: formatting and lint for selected source/test files, plus the configured
+web UI checks. It is not a full-repository validation gate. Install the hooks with:
 
 ```bash
 npm run setup-hooks
 ```
 
-This copies `.hooks/pre-commit` into `.git/hooks/`. The hook prevents commits that have formatting or lint errors. To bypass it in exceptional cases, use `git commit --no-verify` (not recommended).
+This installs `.hooks/pre-commit` and `.hooks/pre-push` into `.git/hooks/`. The pre-push
+hook checks import cycles; it does not run the full test suite. Run the full tests,
+`npm run lint`, and `npm run format:check` before submitting a PR, even when both hooks pass.
 
 If the hook blocks your commit, fix the issues first:
 
@@ -125,9 +129,28 @@ The `workspace:*` protocol is pnpm-specific and causes `npm install -g` and `npx
 
 When publishing a new version of a workspace package, update the version range in the root `package.json` to match.
 
+## Dependency Security
+
+Keep Aikido Safe Chain enabled during dependency updates. Verify the shell integration with
+`npm safe-chain-verify`, or invoke `aikido-npm` explicitly when aliases are not loaded. Do not
+disable malware or minimum-package-age checks to obtain an update.
+
+The root manifest currently overrides `sharp` under `@huggingface/transformers` and
+`adm-zip` under `onnxruntime-node` because the parents' declared ranges exclude the patched
+releases. These select patched code without changing the ONNX inference engine. When updating
+them, run the memory suite and verify native image processing and the installer's ZIP extraction
+API; remove each override once its parent accepts a patched version.
+
+**Release caveat:** a clean checkout audit does not establish a clean downstream npm install.
+The repository lockfile is not published, and npm ignores overrides declared by installed
+dependencies. Before claiming downstream remediation, adopt fixed parent dependencies or a
+separately tested publishable pinning strategy, and validate the packed artifact in a fresh
+consumer project, including the separately published memory server. Do not simply rename a
+workspace-linked lockfile to a shrinkwrap. See [npm's override rules](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides).
+
 ## Submitting Changes
 
-1. Create a feature branch from `main`.
+1. Create a feature branch from `master`.
 2. Make your changes. Add tests for new functionality.
 3. Ensure the pre-commit hook is installed (`npm run setup-hooks`).
 4. Ensure all tests pass (`npm test`), lint is clean (`npm run lint`), and code is formatted (`npm run format:check`).
