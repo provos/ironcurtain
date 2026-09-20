@@ -181,7 +181,7 @@ async function judgeBatch(config: MemoryConfig, batch: CandidatePair[], indexOff
   if (!result) {
     return batch.map((_, i) => ({
       pairIndex: indexOffset + i,
-      relation: 'distinct' as PairRelation,
+      relation: 'distinct',
     }));
   }
 
@@ -219,7 +219,7 @@ export function parseBatchJudgments(raw: string, expectedCount: number, indexOff
   } catch {
     return Array.from({ length: expectedCount }, (_, i) => ({
       pairIndex: indexOffset + i,
-      relation: 'distinct' as PairRelation,
+      relation: 'distinct',
     }));
   }
 }

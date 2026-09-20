@@ -1,6 +1,6 @@
 {
   "name": "@provos/memory-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Persistent memory MCP server with semantic search, LLM summarization, and automatic compaction",
   "license": "Apache-2.0",
@@ -42,7 +42,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^13.0.3",
     "sqlite-vec": "^0.1.9",
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "^4.3.0",
     "openai": "^6.44.0"
   },
   "devDependencies": {

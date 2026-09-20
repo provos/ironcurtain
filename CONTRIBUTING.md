@@ -135,11 +135,16 @@ Keep Aikido Safe Chain enabled during dependency updates. Verify the shell integ
 `npm safe-chain-verify`, or invoke `aikido-npm` explicitly when aliases are not loaded. Do not
 disable malware or minimum-package-age checks to obtain an update.
 
-The root manifest currently overrides `sharp` under `@huggingface/transformers` and
-`adm-zip` under `onnxruntime-node` because the parents' declared ranges exclude the patched
-releases. These select patched code without changing the ONNX inference engine. When updating
-them, run the memory suite and verify native image processing and the installer's ZIP extraction
-API; remove each override once its parent accepts a patched version.
+The memory server requires `@huggingface/transformers ^4.3.0`, whose dependency ranges
+accept patched `sharp` and `adm-zip` through ONNX Runtime 1.30.0. The checkout no longer
+needs overrides for these packages. When updating this chain, run the memory suite and
+verify native image processing and the installer's ZIP extraction API.
+
+Publish memory server 0.2.1 before the next IronCurtain release: IronCurtain now requires
+`@provos/memory-mcp-server ^0.2.1` so consumers cannot resolve the older 0.2.0 dependency
+graph. Before publishing, test the packed memory server outside the workspace without
+root overrides; after publishing, repeat the complete IronCurtain packed-install check
+against the registry version on Node 24 and 26.
 
 Code Mode uses the temporary `@provos/utcp-code-mode` fork through an npm alias
 under `@utcp/code-mode`. The fork changes upstream 1.2.13's native-addon peer range
