@@ -1118,27 +1118,39 @@ describe('strict package egress proxy', () => {
 
   it('uses one remaining absolute deadline across repeated DNS and identity phases', async () => {
     const fixture = await startFixture((_request, response) => response.end('not reached'));
-    const delayedIdentities = async (): Promise<string[]> => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 30));
-      return [];
-    };
+    let now = Date.now();
+    const phases: string[] = [];
     const started = await startProxy(fixture.transport, () => ({ status: 'allow', reason: 'fixture allow' }), {
-      limits: { absoluteTimeoutMs: 50, idleTimeoutMs: 1_000, dnsTimeoutMs: 40 },
+      // Advance the deadline clock in completed phases, not during TLS setup.
+      // Each phase fits its own budget, but together they exceed the original
+      // client deadline. Real timers remain generous guards for the socket I/O.
+      clock: { now: () => now },
+      limits: { absoluteTimeoutMs: 10_000, idleTimeoutMs: 10_000, dnsTimeoutMs: 8_000 },
       resolver: async () => {
-        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        phases.push('DNS');
+        now += 6_000;
         return [{ address: '93.184.216.34', family: 4 }];
       },
-      hostIdentityProvider: delayedIdentities,
+      hostIdentityProvider: async () => {
+        phases.push('identity');
+        now += 6_000;
+        return [];
+      },
       nat64PrefixProvider: async () => {
-        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        // NAT64 discovery shares the DNS phase's elapsed time.
+        phases.push('NAT64');
         return [];
       },
     });
     const connected = await sendConnect(started.socketPath, 'registry.npmjs.org');
     if (connected.socket === null) throw new Error('expected CONNECT socket');
-    await makeHttpsRequest(connected.socket, 'registry.npmjs.org', { path: '/express' }).catch(() => undefined);
-    await waitFor(() => started.proxy.snapshot.activeUpstreams === 0);
-    expect(started.proxy.snapshot.activeClients).toBe(0);
+    const response = await makeHttpsRequest(connected.socket, 'registry.npmjs.org', { path: '/express' });
+    expect(response.statusCode).toBe(504);
+    expect(response.body).toContain('timeout');
+    expect(phases).toEqual(['DNS', 'NAT64', 'identity']);
+    // Receiving the response and releasing its upstream lease does not imply
+    // that the server-side client socket has emitted close yet.
+    await waitFor(() => started.proxy.snapshot.activeClients === 0 && started.proxy.snapshot.activeUpstreams === 0);
     expect(fixture.transport.dials).toHaveLength(0);
   });
 

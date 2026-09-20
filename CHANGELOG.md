@@ -34,7 +34,8 @@ All notable changes to this project will be documented in this file.
 
 ### Dependencies
 
-- Refreshed security-sensitive dependencies and updated Vitest/coverage to 4.1.11 through Aikido Safe Chain with its protections enabled. Scoped checkout overrides select patched sharp 0.35.4 and adm-zip 0.6.1; downstream npm installation still requires a separate packaging/upstream resolution (see [dependency security](CONTRIBUTING.md#dependency-security)).
+- Code Mode uses the temporary `@provos/utcp-code-mode` compatibility fork (upstream 1.2.13) and a direct `isolated-vm 7.0.1` dependency, preserving the Node 24/26 native-addon requirement in published installs without relying on checkout-only overrides. Existing `@utcp/code-mode` imports are unchanged through an npm alias.
+- Refreshed security-sensitive dependencies and updated Vitest/coverage to 4.1.11 through Aikido Safe Chain with its protections enabled. Scoped checkout overrides select patched sharp 0.35.4 and adm-zip 0.6.1; those downstream npm dependencies still require a separate packaging/upstream resolution (see [dependency security](CONTRIBUTING.md#dependency-security)).
 - Bumped the memory workspace's `better-sqlite3` dependency to `^13.0.3` (#421).
 - Updated DOMPurify, PostCSS, brace-expansion, fast-uri, Undici, ip-address, js-yaml, Hono, and other lockfile dependencies (#395, #396, #398, #403, #404, #407, #408, #410, #415).
 - Bumped `actions/setup-node` from 6 to 7 (#384).

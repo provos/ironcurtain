@@ -141,6 +141,16 @@ releases. These select patched code without changing the ONNX inference engine. 
 them, run the memory suite and verify native image processing and the installer's ZIP extraction
 API; remove each override once its parent accepts a patched version.
 
+Code Mode uses the temporary `@provos/utcp-code-mode` fork through an npm alias
+under `@utcp/code-mode`. The fork changes upstream 1.2.13's native-addon peer range
+to `isolated-vm ^7.0.1`; IronCurtain also declares `isolated-vm 7.0.1` directly so
+the requirement survives publishing. Unlike a root override, these dependency
+declarations apply to downstream installs. The fork's source, MPL-2.0 license,
+Node 24/26 verification, and publishing instructions are at
+[provos/code-mode](https://github.com/provos/code-mode/tree/ironcurtain/typescript-library).
+Remove the alias once upstream supports the required native-addon version, then
+repeat the clean packed-install and sandbox integration tests on both Node lines.
+
 **Release caveat:** a clean checkout audit does not establish a clean downstream npm install.
 The repository lockfile is not published, and npm ignores overrides declared by installed
 dependencies. Before claiming downstream remediation, adopt fixed parent dependencies or a
