@@ -140,11 +140,12 @@ accept patched `sharp` and `adm-zip` through ONNX Runtime 1.30.0. The checkout n
 needs overrides for these packages. When updating this chain, run the memory suite and
 verify native image processing and the installer's ZIP extraction API.
 
-Publish memory server 0.2.1 before the next IronCurtain release: IronCurtain now requires
+Memory server 0.2.1 was published on 2026-09-20. IronCurtain now requires
 `@provos/memory-mcp-server ^0.2.1` so consumers cannot resolve the older 0.2.0 dependency
-graph. Before publishing, test the packed memory server outside the workspace without
-root overrides; after publishing, repeat the complete IronCurtain packed-install check
-against the registry version on Node 24 and 26.
+graph. For future memory-server updates, test the packed memory server outside the
+workspace without root overrides and publish it before the dependent IronCurtain
+release. Repeat the complete IronCurtain packed-install check against the registry
+version on Node 24 and 26.
 
 Code Mode uses the temporary `@provos/utcp-code-mode` fork through an npm alias
 under `@utcp/code-mode`. The fork changes upstream 1.2.13's native-addon peer range

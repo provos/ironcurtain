@@ -6,7 +6,8 @@ use sudo; native Linux arm64 is out of scope; avoid hash binding wherever a simp
 mechanism suffices. This document replaces the preceding implementation plan.
 The implementation described below was merged in PR #467 (`d8c1d71`). Status was
 reconciled on 2026-09-15 to include the subsequent macOS validation. The acceptance
-record distinguishes completed runs from remaining evidence; the ordered exit
+record includes the maintainer's 2026-09-21 confirmation of completed non-1000 WSL
+host testing and distinguishes completed runs from remaining evidence; the ordered exit
 criteria remain requirements and are not a claim that every matrix cell passed.
 
 This document owns the shared implemented architecture and dated acceptance evidence.
@@ -110,6 +111,12 @@ finding.
 | Final r7 cleanup inventory    | 722 volume names before and after; both sorted inventories have SHA-256 `c4a7a4057c8b4fe2f5a608b53160a29b1bb052d61175d2fdebc3f7c5c2c54724`, and byte comparison passed.                                                                                                                        |
 | Real non-1000 WSL coordinator | Pending host sudo. Isolated live container UID/GID 1101:1102 and Claude/Goose/Codex image/UID checks passed, but do not exercise the coordinator as that actual WSL host identity.                                                                                                             |
 | Coverage limits               | CLI, PTY and workflow smoke runs use Claude. No all-mode-by-adapter or complete IPv4/IPv6/DNS/LAN/metadata matrix is claimed. Native Linux Engine and Linux arm64 remain unqualified. WSL r7 and macOS pre-merge runs are dated evidence, not fresh qualification of later dependency changes. |
+
+**2026-09-21 host-identity follow-up:** The maintainer confirmed that full testing
+with a real non-1000 WSL coordinator was completed on the Linux host. This supersedes
+the pending host-sudo status recorded for r7 above. The confirmation did not include
+a report path, run date, or test counts; none are inferred here. It does not expand
+the admitted profiles to native Linux Engine or Linux arm64.
 
 Repeat qualification using [TESTING.md](../../TESTING.md#nested-docker-release-qualification).
 
@@ -358,8 +365,8 @@ capabilities. No new AppArmor hash decision is needed for a profile not implemen
 
 The following preserves the agreed implementation order and intended acceptance
 coverage. The implementation above delivers the shared mechanisms. Only the
-acceptance record establishes which live cases were executed; pending host-identity
-and broader matrix evidence must not be read as completed merely because an exit
+acceptance record establishes which live cases were executed; broader matrix
+evidence must not be read as completed merely because an exit
 criterion is listed here.
 
 1. **WSL feasibility and portable harness.**
