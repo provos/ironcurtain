@@ -6,7 +6,7 @@
  * short-name resolver for the `--scopes` CLI flag.
  */
 
-import { groupMultiselect, isCancel } from '@clack/prompts';
+import { groupMultiselect, isCancel, type CANCEL_SYMBOL } from '@clack/prompts';
 
 // ---------------------------------------------------------------------------
 // Types & registry
@@ -157,7 +157,9 @@ const fullScopeToEntry = new Map<string, GoogleScopeEntry>(GOOGLE_SCOPES.map((s)
  * Pre-selects `existingScopes` if non-empty, otherwise falls back to defaults.
  * Returns the selected full scope URLs, or the cancel symbol if the user aborts.
  */
-export async function promptGoogleScopes(existingScopes: readonly string[]): Promise<readonly string[] | symbol> {
+export async function promptGoogleScopes(
+  existingScopes: readonly string[],
+): Promise<readonly string[] | typeof CANCEL_SYMBOL> {
   const initialValues =
     existingScopes.length > 0
       ? existingScopes.filter((s) => fullScopeToEntry.has(s))

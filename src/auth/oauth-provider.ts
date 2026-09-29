@@ -7,6 +7,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { CANCEL_SYMBOL } from '@clack/prompts';
 import { getOAuthDir } from '../config/paths.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 
@@ -37,7 +38,7 @@ export interface OAuthProviderConfig {
   /** Extra query parameters for the authorization URL (e.g. access_type, prompt). */
   readonly extraAuthParams?: Readonly<Record<string, string>>;
   /** Interactive scope picker shown when no --scopes flag and stdin is a TTY. */
-  readonly scopePicker?: (existingScopes: readonly string[]) => Promise<readonly string[] | symbol>;
+  readonly scopePicker?: (existingScopes: readonly string[]) => Promise<readonly string[] | typeof CANCEL_SYMBOL>;
   /** Resolves short scope names (e.g. "gmail.send") to full scope URLs for --scopes flag. */
   readonly resolveShortScopes?: (shortNames: readonly string[]) => readonly string[];
   /** Provider-specific guidance shown when non-default scopes are requested. */
