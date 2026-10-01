@@ -20,6 +20,15 @@ describe('resource budget values', () => {
     } as WorkflowBudgetDto;
     expect(budgetUsage(budget, 'maxTotalTokens')).toBeUndefined();
     expect(budgetUsage(budget, 'maxEstimatedCostUsd')).toBe(2);
+    expect(
+      budgetUsage({ usage: { ...budget.usage!, estimatedCostUsd: 0 } } as WorkflowBudgetDto, 'maxEstimatedCostUsd'),
+    ).toBeUndefined();
+    expect(
+      budgetUsage(
+        { usage: { ...budget.usage!, estimatedCostUsd: 0, tokenTrackingAvailable: true } } as WorkflowBudgetDto,
+        'maxEstimatedCostUsd',
+      ),
+    ).toBe(0);
     expect(budgetUsage(budget, 'maxSteps')).toBe(0);
     expect(budgetUsage(budget, 'maxSessionSeconds')).toBeUndefined();
     expect(budgetUsage({} as WorkflowBudgetDto, 'maxEstimatedCostUsd')).toBeUndefined();

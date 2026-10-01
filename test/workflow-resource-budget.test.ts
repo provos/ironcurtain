@@ -278,6 +278,46 @@ describe('workflow budget reads', () => {
 });
 
 describe('fixed workflow run budget snapshots', () => {
+  it('preserves unknown historical limits across legacy resumes until current limits are explicitly chosen', async () => {
+    const baseDir = resolve(env.testHome, 'runs');
+    const store = new FileCheckpointStore(baseDir);
+    const makeOrchestrator = () =>
+      new WorkflowOrchestrator(
+        createDeps(baseDir, {
+          checkpointStore: store,
+          createSession: async () => new MockSession({ responses: [approvedResponse()] }),
+        }),
+      );
+    const first = makeOrchestrator();
+    const id = await first.start(writeDefinitionFile(env.testHome, definition), 'Task');
+    await vi.waitFor(() => expect(first.getStatus(id)?.phase).toBe('waiting_human'));
+    await first.abort(id);
+    const legacyCheckpoint = { ...store.load(id)! };
+    delete legacyCheckpoint.resourceBudget;
+    store.save(id, legacyCheckpoint);
+
+    seedConfig(env.testHome, { resourceBudget: { maxEstimatedCostUsd: 12 } });
+    const resumed = makeOrchestrator();
+    await resumed.resume(id);
+    expect(resumed.getBudget(id)).toMatchObject({ recorded: false, limits: { maxEstimatedCostUsd: 12 } });
+    expect(store.load(id)?.resourceBudget).toMatchObject({
+      recorded: false,
+      limits: { maxEstimatedCostUsd: 12 },
+    });
+    await resumed.abort(id);
+
+    seedConfig(env.testHome, { resourceBudget: { maxEstimatedCostUsd: 25 } });
+    const resumedAgain = makeOrchestrator();
+    await resumedAgain.resume(id);
+    expect(resumedAgain.getBudget(id)).toMatchObject({ recorded: false, limits: { maxEstimatedCostUsd: 12 } });
+    await resumedAgain.abort(id);
+
+    const refreshed = makeOrchestrator();
+    await refreshed.resume(id, { useCurrentBudget: true });
+    expect(store.load(id)?.resourceBudget).toMatchObject({ recorded: true, limits: { maxEstimatedCostUsd: 25 } });
+    await refreshed.abort(id);
+  });
+
   it('keeps saved settings after global changes and explicitly refreshes on resume', async () => {
     seedConfig(env.testHome, { resourceBudget: { maxEstimatedCostUsd: 12, maxSteps: 90 } });
     const options: SessionOptions[] = [];

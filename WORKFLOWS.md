@@ -87,6 +87,9 @@ the saved limits by default; the web UI's **Use current resource limits** option
 explicitly resolves the run's workflow overrides against current global settings
 instead. Older runs without this information are labelled as having an unknown historical budget;
 current fallback settings must not be mistaken for the original limits.
+Resuming an older run pins those fallback settings for subsequent sessions while
+preserving the unknown historical-budget label. Only explicitly choosing current
+limits records a new budget snapshot.
 
 ## How workflows work
 

@@ -69,6 +69,16 @@ describe('ResourceBudgetPanel', () => {
     expect(screen.queryByText('$7.12 used · Limit reached')).toBeNull();
     expect(screen.queryAllByRole('progressbar')).toHaveLength(0);
   });
+  it('does not display zero spend when neither tokens nor cost have been observed', async () => {
+    render(ResourceBudgetPanel, {
+      budget: { ...budget, usage: { ...budget.usage!, estimatedCostUsd: 0, tokenTrackingAvailable: false } },
+    });
+    await fireEvent.click(screen.getByTestId('budget-toggle'));
+    const cost = within(screen.getByTestId('budget-maxEstimatedCostUsd'));
+    expect(cost.getByText('Usage unavailable')).toBeTruthy();
+    expect(cost.queryByText('$0.00 used')).toBeNull();
+    expect(cost.queryByRole('progressbar')).toBeNull();
+  });
   it('preview shows effective settings without usage or historical caveats', () => {
     render(ResourceBudgetPanel, { budget: { ...budget, recorded: false }, preview: true });
     expect(screen.getByText('Effective settings for this run')).toBeTruthy();

@@ -128,6 +128,8 @@ beforeEach(() => {
   testConnectionGeneration.value = 0;
   mockGetBudgetPreview.mockReset();
   mockGetBudgetPreview.mockRejectedValue(new Error('Preview unavailable'));
+  mockResumeWorkflow.mockReset();
+  mockImportWorkflow.mockReset();
   mockAbortWorkflow.mockResolvedValue();
   mockRefreshWorkflows.mockResolvedValue();
   mockListDefinitions.mockResolvedValue([]);
@@ -555,5 +557,33 @@ describe('workflow resource limits', () => {
     await fireEvent.click(screen.getByTestId('resume-use-current-budget'));
     await fireEvent.click(screen.getByTestId('resume-budget-resume'));
     await vi.waitFor(() => expect(mockResumeWorkflow).toHaveBeenCalledWith('budget-resume', true));
+  });
+  it.each(['resume', 'import'])('uses the current-limits selection only for the next %s action', async (action) => {
+    mockListResumable.mockResolvedValue([
+      makePastRun({ workflowId: 'first', phase: 'failed' }),
+      makePastRun({ workflowId: 'second', phase: 'failed' }),
+    ]);
+    mockResumeWorkflow.mockImplementation(async (workflowId) => ({ workflowId }));
+    mockImportWorkflow.mockResolvedValue({ workflowId: 'first' });
+    render(Workflows);
+    await screen.findByTestId('resume-first');
+    const checkbox = screen.getByTestId('resume-use-current-budget') as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    if (action === 'import') {
+      await fireEvent.click(screen.getByRole('button', { name: /Import & Resume from directory$/ }));
+      await fireEvent.input(screen.getByPlaceholderText('/path/to/workflow-runs/'), {
+        target: { value: '/tmp/workflow-run' },
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Import & Resume' }));
+    } else {
+      await fireEvent.click(screen.getByTestId('resume-first'));
+    }
+    await vi.waitFor(() => {
+      expect(mockResumeWorkflow).toHaveBeenCalledWith('first', true);
+      expect(checkbox.checked).toBe(false);
+      expect((screen.getByTestId('resume-second') as HTMLButtonElement).disabled).toBe(false);
+    });
+    await fireEvent.click(screen.getByTestId('resume-second'));
+    await vi.waitFor(() => expect(mockResumeWorkflow).toHaveBeenCalledWith('second', false));
   });
 });

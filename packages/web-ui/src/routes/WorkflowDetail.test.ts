@@ -245,6 +245,8 @@ describe('WorkflowDetail', () => {
     await vi.waitFor(() => {
       expect(screen.getByText('Workflow not found')).toBeTruthy();
     });
+    expect(screen.queryByTestId('workflow-budget-detail')).toBeNull();
+    expect(screen.queryByText('Loading resource limits…')).toBeNull();
   });
 
   // ── Context metrics cards ─────────────────────────────────────────
@@ -947,6 +949,8 @@ describe('WorkflowDetail', () => {
     expect(screen.getByTestId('corruption-message').textContent).toBe(
       'Failed to parse checkpoint.json: unexpected token at line 12',
     );
+    expect(screen.queryByTestId('workflow-budget-detail')).toBeNull();
+    expect(screen.queryByText('Loading resource limits…')).toBeNull();
     // The generic destructive banner must NOT also appear.
     expect(screen.queryByRole('alert')).toBeNull();
   });

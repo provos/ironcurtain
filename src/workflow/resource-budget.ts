@@ -4,7 +4,7 @@ import {
   type ResolvedResourceBudgetConfig,
 } from '../config/user-config.js';
 import type { BudgetStatus } from '../session/types.js';
-import type { WorkflowSettings } from './types.js';
+import type { WorkflowCheckpoint, WorkflowSettings } from './types.js';
 
 export type ResourceBudgetSource = 'workflow' | 'global' | 'default';
 
@@ -55,4 +55,12 @@ export function workflowBudgetUsage(status: BudgetStatus): NonNullable<WorkflowB
 /** Historical limits must never be invented for a checkpoint without a snapshot. */
 export function legacyWorkflowBudget(settings?: WorkflowSettings): WorkflowBudget {
   return { ...resolveWorkflowResourceBudget(settings), recorded: false };
+}
+
+/** Past runs retain saved limits and usage, but cannot have active sessions. */
+export function pastRunWorkflowBudget(
+  checkpoint: Pick<WorkflowCheckpoint, 'resourceBudget'> | undefined,
+  settings?: WorkflowSettings,
+): WorkflowBudget {
+  return { ...(checkpoint?.resourceBudget ?? legacyWorkflowBudget(settings)), activeSessionCount: 0 };
 }

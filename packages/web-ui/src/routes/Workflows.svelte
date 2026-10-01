@@ -229,6 +229,8 @@
   }
 
   async function handleResume(workflowId: string): Promise<void> {
+    const applyCurrentBudget = useCurrentBudget;
+    useCurrentBudget = false;
     resumingId = workflowId;
     actionError = '';
     resumeMessage = '';
@@ -240,7 +242,7 @@
       );
     }
     try {
-      await (useCurrentBudget ? rpcResumeWorkflow(workflowId, true) : rpcResumeWorkflow(workflowId));
+      await rpcResumeWorkflow(workflowId, applyCurrentBudget);
       resumeMessage = `Workflow ${workflowId.slice(0, 8)}... resumed`;
       await Promise.all([refreshWorkflows(), loadResumable()]);
     } catch (err) {
@@ -256,6 +258,8 @@
 
   async function handleImportAndResume(): Promise<void> {
     if (!importDir.trim()) return;
+    const applyCurrentBudget = useCurrentBudget;
+    useCurrentBudget = false;
     importing = true;
     actionError = '';
     resumeMessage = '';
@@ -269,7 +273,7 @@
           buildSummaryPlaceholder({ workflowId: workflowId, currentState: 'resuming...' }),
         );
       }
-      await (useCurrentBudget ? rpcResumeWorkflow(workflowId, true) : rpcResumeWorkflow(workflowId));
+      await rpcResumeWorkflow(workflowId, applyCurrentBudget);
       resumeMessage = `Imported and resumed workflow ${workflowId.slice(0, 8)}...`;
       importDir = '';
       importDirExpanded = false;
@@ -652,7 +656,7 @@
               class="accent-primary mt-0.5"
             />
             <span
-              ><span class="font-medium text-foreground">Apply current resource limits when resuming</span><br
+              ><span class="font-medium text-foreground">Apply current resource limits on the next resume</span><br
               />Otherwise, resumed runs keep their recorded limits. Any change is saved with the run.</span
             >
           </label>

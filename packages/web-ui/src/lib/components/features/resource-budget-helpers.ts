@@ -19,7 +19,11 @@ export function budgetUsage(budget: WorkflowBudgetDto, key: LimitKey): number | 
   const usage = budget.usage;
   if (!usage) return undefined;
   if (key === 'maxTotalTokens' && !usage.tokenTrackingAvailable) return undefined;
-  if (key === 'maxEstimatedCostUsd') return usage.estimatedCostUsd;
+  if (key === 'maxEstimatedCostUsd') {
+    // Container adapters can report cost independently of token tracking.
+    // Without either signal, zero is an unknown lower bound, not zero spend.
+    return !usage.tokenTrackingAvailable && usage.estimatedCostUsd === 0 ? undefined : usage.estimatedCostUsd;
+  }
   if (key === 'maxTotalTokens') return usage.totalTokens;
   if (key === 'maxSteps') return usage.stepCount;
   // Session age cannot be compared with a timeout that restarts each turn.

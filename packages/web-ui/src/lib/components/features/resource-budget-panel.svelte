@@ -68,8 +68,8 @@
         class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-600 dark:text-amber-400"
         data-testid="budget-legacy-note"
       >
-        This run did not record its limits. The values below reflect current settings; historical limits and usage are
-        unavailable.
+        This run did not record its original limits. The values below are fallback settings; historical limits and usage
+        are unavailable.
       </p>
     {/if}
     <div class="grid grid-cols-1 min-[460px]:grid-cols-2 xl:grid-cols-4 gap-3">

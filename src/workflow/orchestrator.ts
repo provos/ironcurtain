@@ -15,7 +15,12 @@ import { isWithinDirectory } from '../types/argument-roles.js';
 import { errorMessage } from '../utils/error-message.js';
 import { sha256Hex } from '../hash.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
-import { resolveWorkflowResourceBudget, workflowBudgetUsage, type WorkflowBudget } from './resource-budget.js';
+import {
+  resolveWorkflowResourceBudget,
+  legacyWorkflowBudget,
+  workflowBudgetUsage,
+  type WorkflowBudget,
+} from './resource-budget.js';
 import { isTerminalWorkflowPhase, terminalPhaseFromStateName } from './terminal-phase.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -1764,7 +1769,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       id: workflowId,
       resourceBudget: options?.useCurrentBudget
         ? resolveWorkflowResourceBudget(definition.settings)
-        : (checkpoint.resourceBudget ?? resolveWorkflowResourceBudget(definition.settings)),
+        : (checkpoint.resourceBudget ?? legacyWorkflowBudget(definition.settings)),
       definition,
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,
@@ -1834,7 +1839,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     messageLog.appendRunResumed({
       ...this.logBase(instance),
       resourceBudget: instance.resourceBudget,
-      ...(checkpoint.resourceBudget === undefined ? { originalBudgetUnknown: true } : {}),
+      ...(!checkpoint.resourceBudget?.recorded ? { originalBudgetUnknown: true } : {}),
       ...(options?.useCurrentBudget ? { useCurrentBudget: true } : {}),
       ...(checkpointMtimeMs !== undefined ? { checkpointMtimeMs } : {}),
       ...(checkpointFingerprint !== undefined ? { checkpointFingerprint } : {}),

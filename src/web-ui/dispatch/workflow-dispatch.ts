@@ -53,7 +53,11 @@ import { runPreflight } from '../../workflow/lint-integration.js';
 import * as logger from '../../logger.js';
 import { terminalPhaseFromStateName } from '../../workflow/terminal-phase.js';
 import { loadDefinition } from '../../workflow/definition-loader.js';
-import { resolveWorkflowResourceBudget, legacyWorkflowBudget } from '../../workflow/resource-budget.js';
+import {
+  resolveWorkflowResourceBudget,
+  legacyWorkflowBudget,
+  pastRunWorkflowBudget,
+} from '../../workflow/resource-budget.js';
 
 // ---------------------------------------------------------------------------
 // State graph cache (definition never changes during execution)
@@ -352,10 +356,7 @@ export async function workflowDispatch(
           result.message ?? `Workflow ${workflowId} not found`,
         );
       }
-      return {
-        ...(result.checkpoint?.resourceBudget ?? legacyWorkflowBudget(result.definition.settings)),
-        activeSessionCount: 0,
-      };
+      return pastRunWorkflowBudget(result.checkpoint, result.definition.settings);
     }
 
     case 'workflows.list': {
@@ -797,10 +798,7 @@ export function buildDetailFromPastRun(
       gate: undefined,
       workspacePath: checkpoint.workspacePath ?? '',
       hasReadme: workflowHasReadme(definition.name),
-      budget: {
-        ...(checkpoint.resourceBudget ?? legacyWorkflowBudget(definition.settings)),
-        activeSessionCount: 0,
-      },
+      budget: pastRunWorkflowBudget(checkpoint, definition.settings),
     };
   }
 
@@ -834,7 +832,7 @@ export function buildDetailFromPastRun(
     gate: undefined,
     workspacePath: recoveredWorkspace,
     hasReadme: workflowHasReadme(definition.name),
-    budget: { ...legacyWorkflowBudget(definition.settings), activeSessionCount: 0 },
+    budget: pastRunWorkflowBudget(undefined, definition.settings),
   };
 }
 
