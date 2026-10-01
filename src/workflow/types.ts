@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
+import type { WorkflowBudget } from './resource-budget.js';
 import type { AgentConversationId } from '../session/types.js';
 
 // ---------------------------------------------------------------------------
@@ -123,9 +125,11 @@ export interface WorkflowSettings {
   /**
    * Per-turn wall-clock timeout in seconds for agent sessions.
    * Overrides the global resourceBudget.maxSessionSeconds for this workflow.
-   * Default: uses the global setting (1800s / 30 minutes).
+   * Legacy alias for resourceBudget.maxSessionSeconds. Null disables the timeout.
    */
-  readonly maxSessionSeconds?: number;
+  readonly maxSessionSeconds?: number | null;
+  /** Partial resource limits: missing fields inherit global settings; null disables a limit. */
+  readonly resourceBudget?: Partial<ResolvedResourceBudgetConfig>;
   /** Output artifact names excluded from versioning (e.g., append-only journals). */
   readonly unversionedArtifacts?: readonly string[];
   /**
@@ -160,10 +164,7 @@ export interface WorkflowSettings {
  * State definition. Discriminated on `type`.
  */
 export type WorkflowStateDefinition =
-  | AgentStateDefinition
-  | HumanGateStateDefinition
-  | DeterministicStateDefinition
-  | TerminalStateDefinition;
+  AgentStateDefinition | HumanGateStateDefinition | DeterministicStateDefinition | TerminalStateDefinition;
 
 export interface FanOutDefinition {
   /**
@@ -635,6 +636,8 @@ export interface HumanGateEvent {
 // ---------------------------------------------------------------------------
 
 export interface WorkflowCheckpoint {
+  /** Effective settings fixed at run start (absent on legacy checkpoints). */
+  readonly resourceBudget?: WorkflowBudget;
   /** Serialized XState snapshot.value (string or nested object). */
   readonly machineState: unknown;
   readonly context: WorkflowContext;

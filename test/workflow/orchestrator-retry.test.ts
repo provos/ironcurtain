@@ -473,6 +473,39 @@ describe('WorkflowOrchestrator retry loop', () => {
     );
   });
 
+  it.each([5, null])('honors a %s cost limit when recovering a malformed final status', async (costLimit) => {
+    const defPath = writeDefinitionFile(tmpDir, {
+      ...statusRoutedNoGateDef,
+      settings: { mode: 'builtin', resourceBudget: { maxEstimatedCostUsd: costLimit } },
+    });
+    const session = new MockSession({
+      responses: ['```yaml\nagent_status:\n  verdict: approved\n  notes: summary: detail\n```', approvedResponse()],
+    });
+    const status = session.getBudgetStatus();
+    vi.spyOn(session, 'getBudgetStatus').mockReturnValue({
+      ...status,
+      estimatedCostUsd: 7.12,
+      limits: { ...status.limits, maxEstimatedCostUsd: costLimit },
+      cumulative: { ...status.cumulative, estimatedCostUsd: 7.12 },
+    });
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { createSession: vi.fn(async () => session) }));
+    activeOrchestrator = orchestrator;
+    orchestrator.onEvent((event) => lifecycleEvents.push(event));
+    const workflowId = await orchestrator.start(defPath, 'Review the result');
+    await waitForCompletion(orchestrator, workflowId);
+
+    if (costLimit === null) {
+      expect(session.sentMessages).toHaveLength(2);
+      expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    } else {
+      expect(session.sentMessages).toHaveLength(1);
+      expect(lifecycleEvents.find((event) => event.kind === 'failed')).toMatchObject({
+        error: expect.stringContaining('cost budget exhausted ($7.12/$5.00)'),
+      });
+    }
+  });
+
   // Regression: `maxSessionSeconds` is a PER-TURN limit. Summing every turn's
   // active time against it turned it into a ceiling on the state's total
   // duration, tearing down long agent states mid-build. The between-turn

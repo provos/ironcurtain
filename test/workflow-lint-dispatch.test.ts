@@ -142,6 +142,7 @@ function createContext(overrides?: {
     listResumable: vi.fn().mockReturnValue([]),
     getStatus: vi.fn().mockReturnValue(undefined),
     getDetail: vi.fn().mockReturnValue(undefined),
+    getBudget: vi.fn().mockReturnValue(undefined),
     listActive: vi.fn().mockReturnValue([]),
     resolveGate: vi.fn(),
     abort: vi.fn().mockResolvedValue(undefined),

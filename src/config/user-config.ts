@@ -66,15 +66,15 @@ export const USER_CONFIG_DEFAULTS = {
 export const ESCALATION_TIMEOUT_MIN = 30;
 export const ESCALATION_TIMEOUT_MAX = 600;
 
-const resourceBudgetSchema = z
-  .object({
-    maxTotalTokens: z.number().int().positive().nullable().optional(),
-    maxSteps: z.number().int().positive().nullable().optional(),
-    maxSessionSeconds: z.number().positive().nullable().optional(),
-    maxEstimatedCostUsd: z.number().positive().nullable().optional(),
-    warnThresholdPercent: z.number().min(1).max(99).optional(),
-  })
-  .optional();
+export const resourceBudgetFieldsSchema = z.object({
+  maxTotalTokens: z.number().int().positive().nullable().optional(),
+  maxSteps: z.number().int().positive().nullable().optional(),
+  maxSessionSeconds: z.number().positive().nullable().optional(),
+  maxEstimatedCostUsd: z.number().positive().nullable().optional(),
+  warnThresholdPercent: z.number().min(1).max(99).optional(),
+});
+
+const resourceBudgetSchema = resourceBudgetFieldsSchema.optional();
 
 /**
  * Docker container resource ceilings. Both fields are independently nullable:
@@ -430,6 +430,14 @@ export interface ResolvedResourceBudgetConfig {
   readonly maxSessionSeconds: number | null;
   readonly maxEstimatedCostUsd: number | null;
   readonly warnThresholdPercent: number;
+}
+
+/** Resource budget input exactly as saved, for provenance-aware workflow resolution. */
+export function loadRequestedResourceBudgetConfig(): Partial<ResolvedResourceBudgetConfig> {
+  const configPath = getUserConfigPath();
+  if (!existsSync(configPath)) return {};
+  const parsed = parseConfigJson(readFileSync(configPath, 'utf-8'), configPath);
+  return validateConfig(parsed, configPath).resourceBudget ?? {};
 }
 
 /** Resolved auto-compaction config with all fields present. */

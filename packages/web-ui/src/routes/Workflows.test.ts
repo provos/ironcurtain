@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import type { PastRunDto, WorkflowDefinitionDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
-import { testWorkflowHistoryGeneration } from './__test_state__.svelte.js';
+import type {
+  PastRunDto,
+  WorkflowDefinitionDto,
+  WorkflowSummaryDto,
+  HumanGateRequestDto,
+  WorkflowBudgetDto,
+} from '$lib/types.js';
+import { testWorkflowHistoryGeneration, testConnectionGeneration } from './__test_state__.svelte.js';
 
 // jsdom does not provide ResizeObserver -- stub it globally
 vi.stubGlobal(
@@ -19,6 +25,7 @@ vi.stubGlobal(
 // ---------------------------------------------------------------------------
 
 const {
+  mockGetBudgetPreview,
   mockStartWorkflow,
   mockAbortWorkflow,
   mockRefreshWorkflows,
@@ -34,28 +41,32 @@ const {
     selectedWorkflowId: null as string | null,
   };
   return {
+    mockGetBudgetPreview: vi.fn<(path: string) => Promise<WorkflowBudgetDto>>(),
     mockStartWorkflow: vi.fn<(p: string, t: string, w?: string) => Promise<{ workflowId: string }>>(),
     mockAbortWorkflow: vi.fn<(id: string) => Promise<void>>(),
     mockRefreshWorkflows: vi.fn<() => Promise<void>>(),
     mockListDefinitions: vi.fn<() => Promise<WorkflowDefinitionDto[]>>(),
     mockListResumable: vi.fn<() => Promise<PastRunDto[]>>(),
-    mockResumeWorkflow: vi.fn<(id: string) => Promise<{ workflowId: string }>>(),
+    mockResumeWorkflow: vi.fn<(id: string, useCurrentBudget?: boolean) => Promise<{ workflowId: string }>>(),
     mockImportWorkflow: vi.fn<(d: string) => Promise<{ workflowId: string }>>(),
     mockAppState,
   };
 });
 
 vi.mock('$lib/stores.svelte.js', async () => {
-  const { testWorkflowHistoryGeneration } = await import('./__test_state__.svelte.js');
+  const { testWorkflowHistoryGeneration, testConnectionGeneration } = await import('./__test_state__.svelte.js');
   return {
     appState: mockAppState,
+    configChangedGeneration: { value: 0 },
+    connectionGeneration: testConnectionGeneration,
+    getWorkflowBudgetPreview: (path: string) => mockGetBudgetPreview(path),
     workflowHistoryGeneration: testWorkflowHistoryGeneration,
     startWorkflow: (...a: unknown[]) => mockStartWorkflow(...(a as [string, string, string | undefined])),
     abortWorkflow: (...a: unknown[]) => mockAbortWorkflow(...(a as [string])),
     refreshWorkflows: () => mockRefreshWorkflows(),
     listWorkflowDefinitions: () => mockListDefinitions(),
     listResumableWorkflows: () => mockListResumable(),
-    resumeWorkflow: (...a: unknown[]) => mockResumeWorkflow(...(a as [string])),
+    resumeWorkflow: (...a: unknown[]) => mockResumeWorkflow(...(a as [string, boolean | undefined])),
     importWorkflow: (...a: unknown[]) => mockImportWorkflow(...(a as [string])),
     getWorkflowReadme: () => Promise.resolve({ content: '# Readme' }),
   };
@@ -114,6 +125,9 @@ beforeEach(() => {
   vi.restoreAllMocks();
   resetState();
   testWorkflowHistoryGeneration.value = 0;
+  testConnectionGeneration.value = 0;
+  mockGetBudgetPreview.mockReset();
+  mockGetBudgetPreview.mockRejectedValue(new Error('Preview unavailable'));
   mockAbortWorkflow.mockResolvedValue();
   mockRefreshWorkflows.mockResolvedValue();
   mockListDefinitions.mockResolvedValue([]);
@@ -467,5 +481,79 @@ describe('Workflows route', () => {
       await fireEvent.click(copyBtn);
       expect(copyBtn.textContent).not.toContain('Copied');
     });
+  });
+});
+
+describe('workflow resource limits', () => {
+  const limits: WorkflowBudgetDto = {
+    limits: {
+      maxTotalTokens: 1000000,
+      maxSteps: 200,
+      maxSessionSeconds: 1800,
+      maxEstimatedCostUsd: 5,
+      warnThresholdPercent: 80,
+    },
+    sources: {
+      maxTotalTokens: 'default',
+      maxSteps: 'default',
+      maxSessionSeconds: 'default',
+      maxEstimatedCostUsd: 'default',
+      warnThresholdPercent: 'default',
+    },
+    recorded: true,
+  };
+  it('refreshes effective limits after reconnect without changing the selected definition', async () => {
+    mockListDefinitions.mockResolvedValue([
+      { name: 'one', path: 'one', description: 'one', source: 'bundled', hasReadme: false },
+    ]);
+    mockGetBudgetPreview.mockResolvedValue(limits);
+    render(Workflows);
+    await screen.findByRole('option', { name: 'one' });
+    await fireEvent.change(screen.getByLabelText('Workflow definition'), { target: { value: 'one' } });
+    await vi.waitFor(() => expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('$5.00'));
+    mockGetBudgetPreview.mockResolvedValue({ ...limits, limits: { ...limits.limits, maxEstimatedCostUsd: 12 } });
+    testConnectionGeneration.value++;
+    await vi.waitFor(() => expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('$12.00'));
+    expect(mockGetBudgetPreview).toHaveBeenCalledTimes(2);
+  });
+  it('discards stale preview responses when the selected workflow changes', async () => {
+    mockListDefinitions.mockResolvedValue(
+      ['one', 'two'].map((name) => ({ name, path: name, description: name, source: 'bundled', hasReadme: false })),
+    );
+    let first!: (value: WorkflowBudgetDto) => void;
+    mockGetBudgetPreview.mockImplementation((path) =>
+      path === 'one'
+        ? new Promise((resolve) => {
+            first = resolve;
+          })
+        : Promise.resolve({ ...limits, limits: { ...limits.limits, maxEstimatedCostUsd: null } }),
+    );
+    render(Workflows);
+    await screen.findByRole('option', { name: 'one' });
+    await fireEvent.change(screen.getByLabelText('Workflow definition'), { target: { value: 'one' } });
+    await vi.waitFor(() => expect(mockGetBudgetPreview).toHaveBeenCalledWith('one'));
+    await fireEvent.change(screen.getByLabelText('Workflow definition'), { target: { value: 'two' } });
+    await vi.waitFor(() => expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('Disabled'));
+    first(limits);
+    await tick();
+    expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('Disabled');
+    expect(screen.queryByText('$5.00')).toBeNull();
+  });
+  it('keeps custom-path start available when the limits preview fails', async () => {
+    render(Workflows);
+    await fireEvent.change(screen.getByLabelText('Workflow definition'), { target: { value: '__custom__' } });
+    await fireEvent.input(screen.getByLabelText('Definition file path'), { target: { value: '/tmp/custom.yaml' } });
+    await fireEvent.input(screen.getByLabelText('Task description'), { target: { value: 'Run this task' } });
+    await vi.waitFor(() => expect(screen.getByText('Limits preview unavailable: Preview unavailable')).toBeTruthy());
+    expect((screen.getByRole('button', { name: 'Start Workflow' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+  it('applies current settings on resume only after an explicit checkbox selection', async () => {
+    mockListResumable.mockResolvedValue([makePastRun({ workflowId: 'budget-resume', phase: 'failed' })]);
+    mockResumeWorkflow.mockResolvedValue({ workflowId: 'budget-resume' });
+    render(Workflows);
+    await screen.findByTestId('resume-budget-resume');
+    await fireEvent.click(screen.getByTestId('resume-use-current-budget'));
+    await fireEvent.click(screen.getByTestId('resume-budget-resume'));
+    await vi.waitFor(() => expect(mockResumeWorkflow).toHaveBeenCalledWith('budget-resume', true));
   });
 });

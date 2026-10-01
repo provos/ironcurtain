@@ -25,11 +25,13 @@ import {
   type OpenrouterModelsDto,
   type ProfileDto,
   type StatisticsConfigDto,
+  type ResourceBudgetConfigDto,
   RpcError,
   MethodNotFoundError,
 } from '../web-ui-types.js';
 import {
   loadUserConfig,
+  resourceBudgetFieldsSchema,
   loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   maskApiKey,
@@ -118,6 +120,25 @@ export async function configDispatch(
   params: Record<string, unknown>,
 ): Promise<unknown> {
   switch (method) {
+    case 'config.getResourceBudget': {
+      validateParams(z.object({}).strict(), params);
+      return loadUserConfig({ readOnly: true }).resourceBudget;
+    }
+
+    case 'config.setResourceBudget': {
+      requirePolicyMutation(ctx);
+      const input: ResourceBudgetConfigDto = validateParams(resourceBudgetFieldsSchema.required().strict(), params);
+      try {
+        // Refuse to overwrite an unreadable config; saveUserConfig otherwise starts fresh on corrupt JSON.
+        loadUserConfig({ readOnly: true });
+        saveUserConfig({ resourceBudget: input });
+      } catch (err) {
+        throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+      }
+      ctx.eventBus.emit('config.changed', {});
+      return loadUserConfig({ readOnly: true }).resourceBudget;
+    }
+
     case 'config.getModelProviders': {
       validateParams(getModelProvidersSchema, params);
       return getModelProviders();

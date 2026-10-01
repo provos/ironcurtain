@@ -52,6 +52,8 @@ import { isWithinDirectory } from '../../types/argument-roles.js';
 import { runPreflight } from '../../workflow/lint-integration.js';
 import * as logger from '../../logger.js';
 import { terminalPhaseFromStateName } from '../../workflow/terminal-phase.js';
+import { loadDefinition } from '../../workflow/definition-loader.js';
+import { resolveWorkflowResourceBudget, legacyWorkflowBudget } from '../../workflow/resource-budget.js';
 
 // ---------------------------------------------------------------------------
 // State graph cache (definition never changes during execution)
@@ -176,16 +178,21 @@ function readmeDtoOrThrow(manifestPath: string, name: string): WorkflowReadmeDto
 }
 
 /**
- * Serves a README addressed by definition manifest path (Start picker).
+ * Resolves a definition manifest for README and budget preview reads.
  * Only *discovered* workflows are served — never an arbitrary client path —
  * which both validates the input and confines reads to the workflow trees.
  */
-function readReadmeForDefinitionPath(definitionPath: string): WorkflowReadmeDto {
+function findDiscoveredDefinitionOrThrow(definitionPath: string) {
   const target = resolve(definitionPath);
   const entry = discoverWorkflows().find((e) => resolve(e.path) === target);
   if (!entry) {
     throw new RpcError('WORKFLOW_NOT_FOUND', `Unknown workflow definition: ${definitionPath}`);
   }
+  return entry;
+}
+
+function readReadmeForDefinitionPath(definitionPath: string): WorkflowReadmeDto {
+  const entry = findDiscoveredDefinitionOrThrow(definitionPath);
   return readmeDtoOrThrow(entry.path, entry.name);
 }
 
@@ -282,6 +289,13 @@ export async function workflowDispatch(
   method: string,
   params: Record<string, unknown>,
 ): Promise<unknown> {
+  if (method === 'workflows.getBudgetPreview') {
+    const { definitionPath } = validateParams(z.object({ definitionPath: z.string().min(1) }).strict(), params);
+    const entry = findDiscoveredDefinitionOrThrow(definitionPath);
+    const result = loadDefinition(entry.path);
+    if (!result.ok) throw new RpcError('INVALID_PARAMS', result.message);
+    return resolveWorkflowResourceBudget(result.definition.settings);
+  }
   // workflows.listDefinitions does not need a running workflow manager.
   // `hidden` workflows (smoke tests / fixtures) are filtered out — they
   // remain runnable from the CLI but never appear in the web UI picker.
@@ -320,6 +334,30 @@ export async function workflowDispatch(
   const controller = manager.getOrchestrator();
 
   switch (method) {
+    case 'workflows.getBudget': {
+      const { workflowId } = validateParams(workflowIdSchema.strict(), params);
+      const id = workflowId as WorkflowId;
+      if (typeof controller.getBudget === 'function') {
+        const budget = controller.getBudget(id);
+        if (budget) return budget;
+      } else {
+        // Compatibility for injected controllers predating the narrow accessor.
+        const detail = controller.getDetail(id);
+        if (detail) return detail.budget ?? legacyWorkflowBudget(detail.definition.settings);
+      }
+      const result = manager.loadPastRun(id);
+      if ('error' in result) {
+        throw new RpcError(
+          result.error === 'not_found' ? 'WORKFLOW_NOT_FOUND' : 'WORKFLOW_CORRUPTED',
+          result.message ?? `Workflow ${workflowId} not found`,
+        );
+      }
+      return {
+        ...(result.checkpoint?.resourceBudget ?? legacyWorkflowBudget(result.definition.settings)),
+        activeSessionCount: 0,
+      };
+    }
+
     case 'workflows.list': {
       const activeIds = controller.listActive();
       // Suppress hidden workflows' runs (smoke tests / fixtures) from the UI.
@@ -409,8 +447,9 @@ export async function workflowDispatch(
       const schema = z.object({
         workflowId: z.string().min(1).optional(),
         baseDir: z.string().min(1).optional(),
+        useCurrentBudget: z.boolean().optional(),
       });
-      const { workflowId, baseDir } = validateParams(schema, params);
+      const { workflowId, baseDir, useCurrentBudget } = validateParams(schema, params);
 
       try {
         let resolvedId: WorkflowId;
@@ -428,7 +467,7 @@ export async function workflowDispatch(
           throw new RpcError('INVALID_PARAMS', 'Either workflowId or baseDir must be provided');
         }
 
-        await controller.resume(resolvedId);
+        await controller.resume(resolvedId, useCurrentBudget ? { useCurrentBudget: true } : undefined);
         return { accepted: true, workflowId: resolvedId };
       } catch (err) {
         if (isWorkflowResumeError(err)) {
@@ -568,6 +607,7 @@ function buildDetailDto(id: WorkflowId, status: WorkflowStatus, detail?: Workflo
     gate: status.phase === 'waiting_human' ? toHumanGateRequestDto(status.gate) : undefined,
     workspacePath: detail?.workspacePath ?? '',
     hasReadme: workflowHasReadme(base.name),
+    budget: detail?.budget,
   };
 }
 
@@ -757,6 +797,10 @@ export function buildDetailFromPastRun(
       gate: undefined,
       workspacePath: checkpoint.workspacePath ?? '',
       hasReadme: workflowHasReadme(definition.name),
+      budget: {
+        ...(checkpoint.resourceBudget ?? legacyWorkflowBudget(definition.settings)),
+        activeSessionCount: 0,
+      },
     };
   }
 
@@ -790,6 +834,7 @@ export function buildDetailFromPastRun(
     gate: undefined,
     workspacePath: recoveredWorkspace,
     hasReadme: workflowHasReadme(definition.name),
+    budget: { ...legacyWorkflowBudget(definition.settings), activeSessionCount: 0 },
   };
 }
 

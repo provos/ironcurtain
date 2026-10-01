@@ -334,6 +334,26 @@ describe('createWorkflowSessionFactory precedence', () => {
     vi.resetModules();
   });
 
+  it('reloads current config on each session creation', async () => {
+    let maxEstimatedCostUsd = 10;
+    const captured: SessionOptions[] = [];
+    vi.doMock('../../src/config/index.js', () => ({
+      loadConfig: () => ({ agentModelId: 'test', userConfig: { resourceBudget: { maxEstimatedCostUsd } } }),
+    }));
+    vi.doMock('../../src/session/index.js', () => ({
+      createSession: async (opts: SessionOptions) => {
+        captured.push(opts);
+        return new MockSession({ responses: [] });
+      },
+    }));
+    const { createWorkflowSessionFactory } = await import('../../src/workflow/cli-support.js');
+    const factory = createWorkflowSessionFactory();
+    await factory({});
+    maxEstimatedCostUsd = 20;
+    await factory({});
+    expect(captured.map((opts) => opts.config?.userConfig.resourceBudget.maxEstimatedCostUsd)).toEqual([10, 20]);
+  });
+
   async function runFactoryCase(args: {
     modelOverride?: string;
     perCallOverride?: string;

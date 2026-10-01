@@ -10,8 +10,11 @@
     importWorkflow as rpcImportWorkflow,
     getWorkflowReadme,
     workflowHistoryGeneration,
+    getWorkflowBudgetPreview,
+    configChangedGeneration,
+    connectionGeneration,
   } from '../lib/stores.svelte.js';
-  import type { WorkflowSummaryDto, WorkflowDefinitionDto, PastRunDto } from '$lib/types.js';
+  import type { WorkflowSummaryDto, WorkflowDefinitionDto, PastRunDto, WorkflowBudgetDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import {
     mergePastRuns,
@@ -36,6 +39,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
+  import ResourceBudgetPanel from '$lib/components/features/resource-budget-panel.svelte';
   import WorkflowDetail from './WorkflowDetail.svelte';
   import WorkflowReadmeModal from '$lib/components/features/workflow-readme-modal.svelte';
   import Copy from 'phosphor-svelte/lib/Copy';
@@ -53,6 +57,9 @@
   let workspacePath = $state('');
   let starting = $state(false);
   let actionError = $state('');
+  let budgetPreview = $state<WorkflowBudgetDto | null>(null);
+  let budgetPreviewLoading = $state(false);
+  let budgetPreviewError = $state('');
   // README modal for the currently-selected definition in the Start form.
   let readmeOpen = $state(false);
   // Track the gate set that was visible when the user dismissed the detail view.
@@ -66,6 +73,7 @@
   let importDir = $state('');
   let importing = $state(false);
   let resumeMessage = $state('');
+  let useCurrentBudget = $state(false);
   let pastRunFilter: PastRunFilter = $state('all');
   // Per-row expansion of the truncated taskDescription cell. Keyed by
   // workflowId so selections survive re-renders. Toggles between the 40-char
@@ -144,6 +152,38 @@
     loadResumable();
   });
 
+  $effect(() => {
+    const path = effectivePath;
+    void connectionGeneration.value;
+    void configChangedGeneration.value;
+    let cancelled = false;
+    budgetPreview = null;
+    budgetPreviewError = '';
+    budgetPreviewLoading = Boolean(path);
+    if (!path) return;
+    // Debounce custom-path typing and discard obsolete responses on selection changes.
+    const timer = setTimeout(
+      () => {
+        getWorkflowBudgetPreview(path)
+          .then((result) => {
+            if (!cancelled) budgetPreview = result;
+          })
+          .catch((err) => {
+            if (!cancelled)
+              budgetPreviewError = `Limits preview unavailable: ${err instanceof Error ? err.message : String(err)}`;
+          })
+          .finally(() => {
+            if (!cancelled) budgetPreviewLoading = false;
+          });
+      },
+      isCustomPath ? 300 : 0,
+    );
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  });
+
   async function loadDefinitions(): Promise<void> {
     try {
       definitions = await listWorkflowDefinitions();
@@ -200,7 +240,7 @@
       );
     }
     try {
-      await rpcResumeWorkflow(workflowId);
+      await (useCurrentBudget ? rpcResumeWorkflow(workflowId, true) : rpcResumeWorkflow(workflowId));
       resumeMessage = `Workflow ${workflowId.slice(0, 8)}... resumed`;
       await Promise.all([refreshWorkflows(), loadResumable()]);
     } catch (err) {
@@ -229,7 +269,7 @@
           buildSummaryPlaceholder({ workflowId: workflowId, currentState: 'resuming...' }),
         );
       }
-      await rpcResumeWorkflow(workflowId);
+      await (useCurrentBudget ? rpcResumeWorkflow(workflowId, true) : rpcResumeWorkflow(workflowId));
       resumeMessage = `Imported and resumed workflow ${workflowId.slice(0, 8)}...`;
       importDir = '';
       importDirExpanded = false;
@@ -443,6 +483,17 @@
             </label>
             <Input id="ws-path" bind:value={workspacePath} placeholder="/path/to/workspace" />
           </div>
+          {#if effectivePath}
+            <div data-testid="workflow-budget-preview" aria-live="polite">
+              {#if budgetPreviewLoading}
+                <p class="text-xs text-muted-foreground py-2">Loading effective resource limits…</p>
+              {:else if budgetPreviewError}
+                <Alert variant="default" class="border-amber-500/30 bg-amber-500/5">{budgetPreviewError}</Alert>
+              {:else if budgetPreview}
+                <ResourceBudgetPanel budget={budgetPreview} preview />
+              {/if}
+            </div>
+          {/if}
           <Button onclick={handleStart} loading={starting} disabled={!effectivePath || !taskDescription.trim()}>
             {#if !starting}<Rocket size={16} weight="duotone" class="mr-1.5" />{/if}
             Start Workflow
@@ -591,6 +642,21 @@
 
       <Card>
         <CardContent>
+          <label
+            class="flex items-start gap-2 rounded-lg border border-border bg-muted/10 p-3 text-xs text-muted-foreground"
+          >
+            <input
+              type="checkbox"
+              bind:checked={useCurrentBudget}
+              data-testid="resume-use-current-budget"
+              class="accent-primary mt-0.5"
+            />
+            <span
+              ><span class="font-medium text-foreground">Apply current resource limits when resuming</span><br
+              />Otherwise, resumed runs keep their recorded limits. Any change is saved with the run.</span
+            >
+          </label>
+
           <!-- Filter pills -->
           <div class="flex flex-wrap gap-2 mb-4" role="tablist" aria-label="Past runs filter">
             {#each PAST_RUN_FILTERS as f (f.id)}

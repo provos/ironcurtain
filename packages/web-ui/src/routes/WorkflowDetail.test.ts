@@ -7,7 +7,9 @@ import type {
   TransitionRecordDto,
   MessageLogEntry,
   MessageLogResponseDto,
+  WorkflowBudgetDto,
 } from '$lib/types.js';
+import { tick } from 'svelte';
 import { RpcError } from '$lib/ws-client.js';
 
 // jsdom does not provide ResizeObserver -- stub it globally
@@ -25,6 +27,7 @@ vi.stubGlobal(
 // ---------------------------------------------------------------------------
 
 const {
+  mockGetWorkflowBudget,
   mockGetWorkflowDetail,
   mockResolveWorkflowGate,
   mockGetWorkflowFileTree,
@@ -33,6 +36,7 @@ const {
   mockGetWorkflowMessageLog,
   mockAppState,
 } = vi.hoisted(() => ({
+  mockGetWorkflowBudget: vi.fn<(id: string) => Promise<WorkflowBudgetDto>>(),
   mockGetWorkflowDetail: vi.fn<(id: string) => Promise<WorkflowDetailDto>>(),
   mockResolveWorkflowGate: vi.fn<(id: string, event: string, prompt?: string) => Promise<void>>(),
   mockGetWorkflowFileTree: vi.fn(),
@@ -47,6 +51,7 @@ const {
 
 vi.mock('$lib/stores.svelte.js', () => ({
   appState: mockAppState,
+  getWorkflowBudget: (id: string) => mockGetWorkflowBudget(id),
   connectionGeneration: { value: 0 },
   getWorkflowDetail: (...args: unknown[]) => mockGetWorkflowDetail(...(args as [string])),
   resolveWorkflowGate: (...args: unknown[]) =>
@@ -166,6 +171,8 @@ describe('WorkflowDetail', () => {
     // `restoreAllMocks` does not reset the call history of the hoisted
     // `vi.fn()` instances; explicitly clear so per-test assertions on
     // call counts (e.g. message-log fetch counts) start from zero.
+    mockGetWorkflowBudget.mockReset();
+    mockGetWorkflowBudget.mockRejectedValue(new Error('Limits unavailable'));
     mockGetWorkflowDetail.mockReset();
     mockResolveWorkflowGate.mockReset();
     mockGetWorkflowFileTree.mockReset();
@@ -953,5 +960,110 @@ describe('WorkflowDetail', () => {
     });
     // No corruption-specific panel
     expect(screen.queryByText('Workflow checkpoint is corrupted')).toBeNull();
+  });
+});
+
+describe('workflow budget refresh', () => {
+  const snapshot: WorkflowBudgetDto = {
+    limits: {
+      maxTotalTokens: 1000,
+      maxSteps: 200,
+      maxSessionSeconds: 1800,
+      maxEstimatedCostUsd: 5,
+      warnThresholdPercent: 80,
+    },
+    sources: {
+      maxTotalTokens: 'default',
+      maxSteps: 'default',
+      maxSessionSeconds: 'default',
+      maxEstimatedCostUsd: 'default',
+      warnThresholdPercent: 'default',
+    },
+    recorded: true,
+  };
+  it('uses detail budget without a duplicate initial read and polls only running runs', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetWorkflowDetail.mockResolvedValue(makeDetail({ budget: snapshot }));
+      mockGetWorkflowBudget.mockReset();
+      mockGetWorkflowBudget.mockResolvedValue(snapshot);
+      const view = render(WorkflowDetail, { props: makeProps() });
+      await tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('$5.00');
+      expect(mockGetWorkflowBudget).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(1);
+      await view.rerender(makeProps({ summary: makeSummary({ phase: 'completed' }) }));
+      await tick();
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('discards obsolete poll responses after a state refresh seeds a newer snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetWorkflowDetail.mockResolvedValue(makeDetail({ budget: snapshot }));
+      mockGetWorkflowBudget.mockReset();
+      let resolveOld!: (value: WorkflowBudgetDto) => void;
+      mockGetWorkflowBudget.mockReturnValue(
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+      );
+      const view = render(WorkflowDetail, { props: makeProps() });
+      await tick();
+      await vi.advanceTimersByTimeAsync(5000);
+      const newer = { ...snapshot, limits: { ...snapshot.limits, maxEstimatedCostUsd: 30 } };
+      mockGetWorkflowDetail.mockResolvedValue(makeDetail({ budget: newer }));
+      await view.rerender(makeProps({ summary: makeSummary({ currentState: 'review' }) }));
+      await tick();
+      await vi.advanceTimersByTimeAsync(0);
+      resolveOld(snapshot);
+      await tick();
+      expect(screen.getByTestId('budget-maxEstimatedCostUsd').textContent).toContain('$30.00');
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls a running workflow and cleans up polling when detail is unmounted', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGetWorkflowDetail.mockResolvedValue(makeDetail());
+      mockGetWorkflowBudget.mockReset();
+      mockGetWorkflowBudget.mockResolvedValue({
+        limits: {
+          maxTotalTokens: 1000,
+          maxSteps: 200,
+          maxSessionSeconds: 1800,
+          maxEstimatedCostUsd: 5,
+          warnThresholdPercent: 80,
+        },
+        sources: {
+          maxTotalTokens: 'default',
+          maxSteps: 'default',
+          maxSessionSeconds: 'default',
+          maxEstimatedCostUsd: 'default',
+          warnThresholdPercent: 'default',
+        },
+        recorded: true,
+      });
+      const view = render(WorkflowDetail, { props: makeProps() });
+      await tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(2);
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(mockGetWorkflowBudget).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

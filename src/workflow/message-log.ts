@@ -2,6 +2,7 @@ import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { TransientFailureKind } from '../docker/agent-adapter.js';
 import type { TerminalWorkflowPhase } from './terminal-phase.js';
+import type { WorkflowBudget } from './resource-budget.js';
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -16,6 +17,7 @@ interface BaseEntry {
 /** Declares that a newly-started attempt will emit a terminal phase barrier. */
 interface RunStartedControlEntry extends BaseEntry {
   readonly type: 'run_started';
+  readonly resourceBudget?: WorkflowBudget;
 }
 
 /**
@@ -25,6 +27,9 @@ interface RunStartedControlEntry extends BaseEntry {
  */
 interface RunResumedControlEntry extends BaseEntry {
   readonly type: 'run_resumed';
+  readonly resourceBudget?: WorkflowBudget;
+  readonly useCurrentBudget?: boolean;
+  readonly originalBudgetUnknown?: boolean;
   /** mtime of the checkpoint being resumed, used to reject stale terminal data. */
   readonly checkpointMtimeMs?: number;
   /** Exact digest of the checkpoint being resumed (preferred over mtimes). */
@@ -52,11 +57,7 @@ export interface AgentReceivedEntry extends BaseEntry {
 }
 
 export type AgentRetryReason =
-  | 'missing_status_block'
-  | 'malformed_status_block'
-  | 'missing_artifacts'
-  | 'invalid_verdict'
-  | 'upstream_stall';
+  'missing_status_block' | 'malformed_status_block' | 'missing_artifacts' | 'invalid_verdict' | 'upstream_stall';
 
 export interface AgentRetryEntry extends BaseEntry {
   readonly type: 'agent_retry';
