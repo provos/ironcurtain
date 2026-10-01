@@ -102,7 +102,11 @@ export interface ResourceWatchdogSample {
 }
 
 export type ResourceWatchdogTripCode =
-  'hard-state-threshold' | 'host-reserve' | 'sample-error' | 'sample-stale' | 'target-identity';
+  | 'hard-state-threshold'
+  | 'host-reserve'
+  | 'sample-error'
+  | 'sample-stale'
+  | 'target-identity';
 
 export interface ResourceWatchdogTrip {
   readonly code: ResourceWatchdogTripCode;

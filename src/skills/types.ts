@@ -40,7 +40,11 @@ export interface ResolvedSkill {
  *   `ResolvedSkill`.
  */
 export type SkillDiscoveryErrorReason =
-  'missing-manifest' | 'unreadable' | 'malformed-frontmatter' | 'missing-required-fields' | 'duplicate-name';
+  | 'missing-manifest'
+  | 'unreadable'
+  | 'malformed-frontmatter'
+  | 'missing-required-fields'
+  | 'duplicate-name';
 
 export interface SkillDiscoveryError {
   /** Absolute path to the offending directory under the skills root. */

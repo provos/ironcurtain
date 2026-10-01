@@ -50,7 +50,7 @@ function findFencedBlocks(text: string): FencedBlock[] {
   const blocks: FencedBlock[] = [];
   let open: { readonly marker: string; readonly start: number; readonly contentStart: number } | undefined;
 
-  for (let start = 0; start < text.length;) {
+  for (let start = 0; start < text.length; ) {
     const newline = text.indexOf('\n', start);
     const end = newline === -1 ? text.length : newline + 1;
     let contentEnd = newline === -1 ? end : newline;

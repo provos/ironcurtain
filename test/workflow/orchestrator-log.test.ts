@@ -225,7 +225,8 @@ describe('WorkflowOrchestrator message log', () => {
 
     // Verify agent_received for plan
     const planReceived = entries.find((e) => e.type === 'agent_received' && e.role === 'planner') as
-      AgentReceivedEntry | undefined;
+      | AgentReceivedEntry
+      | undefined;
     expect(planReceived).toBeDefined();
     expect(planReceived!.verdict).toBe('approved');
 

@@ -437,7 +437,8 @@ function uniqueByDigest<T extends { readonly digest: string }>(values: readonly 
 function writeCanonicalArchive(
   path: string,
   entries: readonly (
-    { readonly name: string; readonly content: Buffer } | { readonly name: string; readonly filePath: string }
+    | { readonly name: string; readonly content: Buffer }
+    | { readonly name: string; readonly filePath: string }
   )[],
 ): { readonly sizeBytes: number } {
   const descriptor = openSync(

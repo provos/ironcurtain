@@ -52,7 +52,8 @@ const engine = new PolicyEngine(
 /** Look up the ToolAnnotation for a scenario's request. */
 function getAnnotation(scenario: EscalationScenario): ToolAnnotation | undefined {
   const serverAnnotations = testToolAnnotations.servers[scenario.request.serverName] as
-    { inputHash: string; tools: ToolAnnotation[] } | undefined;
+    | { inputHash: string; tools: ToolAnnotation[] }
+    | undefined;
   if (!serverAnnotations) return undefined;
   return serverAnnotations.tools.find((t) => t.toolName === scenario.request.toolName);
 }

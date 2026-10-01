@@ -116,7 +116,8 @@ export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnTy
  * or a structured failure carrying the parse error message.
  */
 export type ParseArgsResult =
-  ({ readonly ok: true } & ReturnType<typeof parseArgs>) | { readonly ok: false; readonly message: string };
+  | ({ readonly ok: true } & ReturnType<typeof parseArgs>)
+  | { readonly ok: false; readonly message: string };
 
 /**
  * Strict {@link parseArgs} that RETURNS a discriminated failure on an unknown/

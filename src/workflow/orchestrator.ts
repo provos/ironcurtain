@@ -282,7 +282,9 @@ const EVOLVE_LANE_STEP_RE = /^step_(\d+)(?:_lane_(\d+))?$/;
  * `kind` discriminator to decide whether to retry, abort, or proceed.
  */
 type ParseResult =
-  { kind: 'ok'; output: AgentOutput } | { kind: 'missing' } | { kind: 'malformed'; error: AgentStatusParseError };
+  | { kind: 'ok'; output: AgentOutput }
+  | { kind: 'missing' }
+  | { kind: 'malformed'; error: AgentStatusParseError };
 
 function tryParseAgentStatus(responseText: string): ParseResult {
   try {

@@ -8,7 +8,10 @@
  */
 
 export type BuiltInLlmProtocol =
-  'anthropic-messages' | 'openai-responses' | 'openai-chat-completions' | 'google-generate-content';
+  | 'anthropic-messages'
+  | 'openai-responses'
+  | 'openai-chat-completions'
+  | 'google-generate-content';
 
 export type LlmProtocolId = BuiltInLlmProtocol | (string & {});
 
@@ -17,7 +20,11 @@ export type UsageCompleteness = 'complete' | 'partial' | 'missing' | 'invalid';
 export type OutputTokenSemantics = 'includes_thinking' | 'excludes_thinking' | 'no_thinking_breakdown' | 'unknown';
 
 export type TokenMeasurementAccuracy =
-  'reported_exact' | 'provider_estimate' | 'derived_exact' | 'derived_from_estimate' | 'unknown';
+  | 'reported_exact'
+  | 'provider_estimate'
+  | 'derived_exact'
+  | 'derived_from_estimate'
+  | 'unknown';
 
 export interface NormalizedUsage {
   readonly inputTokensReported: number | null;
@@ -73,7 +80,14 @@ export interface LlmModelIdentity {
 }
 
 export type NormalizedTermination =
-  'stop' | 'length' | 'tool' | 'refusal' | 'content_filter' | 'error' | 'aborted' | 'unknown';
+  | 'stop'
+  | 'length'
+  | 'tool'
+  | 'refusal'
+  | 'content_filter'
+  | 'error'
+  | 'aborted'
+  | 'unknown';
 
 export type NormalizedStopReason =
   | 'end_turn'
@@ -92,7 +106,12 @@ export type NormalizedStopReason =
   | 'not_reported';
 
 export type RefusalSource =
-  'stop_reason' | 'stop_details' | 'content_item' | 'content_filter' | 'prompt_feedback' | 'not_reported';
+  | 'stop_reason'
+  | 'stop_details'
+  | 'content_item'
+  | 'content_filter'
+  | 'prompt_feedback'
+  | 'not_reported';
 
 export interface LlmOutcome {
   readonly termination: NormalizedTermination;

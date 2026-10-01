@@ -67,7 +67,18 @@ import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
  * lint became unreachable and the number was reclaimed for child-bounds.
  */
 export type DiagnosticCode =
-  'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008' | 'WF010' | 'WF011' | 'WF012' | 'WF013' | 'WF014';
+  | 'WF001'
+  | 'WF002'
+  | 'WF003'
+  | 'WF004'
+  | 'WF006'
+  | 'WF007'
+  | 'WF008'
+  | 'WF010'
+  | 'WF011'
+  | 'WF012'
+  | 'WF013'
+  | 'WF014';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {

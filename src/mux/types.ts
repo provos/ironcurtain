@@ -6,7 +6,13 @@ import type { PtyBridge } from '../pty/pty-bridge.js';
 
 /** Input mode for the mux. */
 export type InputMode =
-  'pty' | 'command' | 'picker' | 'resume-picker' | 'persona-picker' | 'provider-picker' | 'escalation-picker';
+  | 'pty'
+  | 'command'
+  | 'picker'
+  | 'resume-picker'
+  | 'persona-picker'
+  | 'provider-picker'
+  | 'escalation-picker';
 
 /** Whether the mode is any picker variant. */
 export function isPickerMode(mode: InputMode): boolean {

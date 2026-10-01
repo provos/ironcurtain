@@ -633,11 +633,13 @@ describe('checkMcpServerLiveness', () => {
 
   it('runs probes for servers with credentials', async () => {
     process.env.MY_TOKEN = 'value';
-    const probe = vi.fn(async (): Promise<ProbeResult> => ({
-      status: 'ok',
-      toolCount: 7,
-      elapsedMs: 412,
-    }));
+    const probe = vi.fn(
+      async (): Promise<ProbeResult> => ({
+        status: 'ok',
+        toolCount: 7,
+        elapsedMs: 412,
+      }),
+    );
     const cfg = buildConfig({
       mcpServers: { svc: buildServerConfig({ args: ['-e', 'MY_TOKEN'] }) },
     });
@@ -649,11 +651,13 @@ describe('checkMcpServerLiveness', () => {
   });
 
   it('reports probe failures as fail with reason in hint', async () => {
-    const probe = vi.fn(async (): Promise<ProbeResult> => ({
-      status: 'fail',
-      elapsedMs: 1200,
-      reason: 'spawn ENOENT',
-    }));
+    const probe = vi.fn(
+      async (): Promise<ProbeResult> => ({
+        status: 'fail',
+        elapsedMs: 1200,
+        reason: 'spawn ENOENT',
+      }),
+    );
     const cfg = buildConfig({ mcpServers: { svc: buildServerConfig() } });
     const results = await checkMcpServerLiveness(cfg, { probe });
     expect(results[0].status).toBe('fail');
@@ -707,11 +711,13 @@ describe('runDoctorCommand', () => {
     // in the repo. We pass a probe stub through DoctorDeps to avoid
     // actually spawning the configured MCP server processes.
     const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
-    const probeStub = vi.fn(async (): Promise<ProbeResult> => ({
-      status: 'ok',
-      toolCount: 1,
-      elapsedMs: 10,
-    }));
+    const probeStub = vi.fn(
+      async (): Promise<ProbeResult> => ({
+        status: 'ok',
+        toolCount: 1,
+        elapsedMs: 10,
+      }),
+    );
     const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
     expect(output).toContain('Environment');
     expect(output).toContain('Configuration');

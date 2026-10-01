@@ -23,7 +23,11 @@ export const DEFAULT_SSE_EVENT_FRAMER_LIMITS: SseEventFramerLimits = Object.free
 });
 
 export type SseFramingFailureReason =
-  'stream-limit' | 'line-limit' | 'event-limit' | 'event-count-limit' | 'already-ended';
+  | 'stream-limit'
+  | 'line-limit'
+  | 'event-limit'
+  | 'event-count-limit'
+  | 'already-ended';
 
 export class SseFramingError extends Error {
   constructor(

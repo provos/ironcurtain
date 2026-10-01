@@ -96,7 +96,7 @@ export async function readSelectedImageRealRunc(artifact: SelectedAgentArtifact)
             candidate = (await reader.readExact(size)) ?? undefined;
             if (candidate === undefined) throw new Error('truncated selected real-runc');
           } else {
-            for (let remaining = size; remaining > 0;) {
+            for (let remaining = size; remaining > 0; ) {
               const chunk = await reader.readExact(Math.min(remaining, 256 * 1024));
               if (chunk === null) throw new Error('truncated image layer entry');
               remaining -= chunk.length;
