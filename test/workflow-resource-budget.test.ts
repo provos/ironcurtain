@@ -179,12 +179,13 @@ describe('resource budget config APIs', () => {
 });
 
 describe('workflow budget reads', () => {
-  it.each([1, 3])('polls %i active sessions without cloning detail or summing session usage', async (sessionCount) => {
+  it.each([1, 3])('samples %i active sessions and preserves usage on abort', async (sessionCount) => {
     const sessions: MockSession[] = [];
     const baseDir = resolve(env.testHome, 'runs');
+    const store = new FileCheckpointStore(baseDir);
     const orchestrator = new WorkflowOrchestrator(
       createDeps(baseDir, {
-        checkpointStore: new FileCheckpointStore(baseDir),
+        checkpointStore: store,
         createSession: async () => {
           const session = new MockSession({ responses: async () => new Promise<never>(() => {}) });
           const status = session.getBudgetStatus();
@@ -242,7 +243,12 @@ describe('workflow budget reads', () => {
     } finally {
       await orchestrator.abort(id);
     }
-    expect(orchestrator.getBudget(id)?.activeSessionCount).toBe(0);
+    const stoppedBudget = {
+      activeSessionCount: 0,
+      usage: { totalTokens: 100, estimatedCostUsd: 1, stepCount: 1 },
+    };
+    expect(orchestrator.getBudget(id)).toMatchObject(stoppedBudget);
+    expect(store.load(id)?.resourceBudget).toMatchObject(stoppedBudget);
   });
 
   it('returns saved run limits, marks legacy fallback, and reports missing runs', async () => {

@@ -109,13 +109,12 @@
   <CardHeader class="flex-col items-start gap-2">
     <CardTitle
       ><span class="flex items-center gap-2"
-        ><Gauge size={20} weight="duotone" class="text-primary" />Resource Limits</span
+        ><Gauge size={20} weight="duotone" class="text-primary" />Agent resource limits</span
       ></CardTitle
     >
     <p class="text-sm text-muted-foreground leading-relaxed">
-      Global defaults for agent turns and recovery checks. Workflow YAML can override each limit; <code
-        class="text-xs bg-muted rounded px-1">null</code
-      > disables it.
+      Defaults for standalone agent sessions and agents in workflows. Workflows can override each limit; scheduled jobs
+      use separate budgets.
     </p>
   </CardHeader>
   <CardContent>
@@ -182,9 +181,12 @@
             </div>
           </div>
           <p class="text-xs text-muted-foreground leading-relaxed">
-            Changes apply to new runs. Existing runs keep their recorded limits unless resumed with current settings.
-            Cost is estimated and checked before recovery turns, so a completed turn can exceed the threshold. Timeouts
-            apply to each turn.
+            Built-in agents enforce all limits per turn. Container batch agents enforce the timeout; workflows also
+            check token, step, and cost usage before recovery turns. Interactive terminals are unaffected.
+          </p>
+          <p class="text-xs text-muted-foreground leading-relaxed">
+            Changes apply to new sessions and workflow runs. Existing workflow runs keep their saved limits unless
+            resumed with current settings. A completed turn can exceed a cost threshold.
           </p>
           {#if mutationAllowed}
             {#if validation && dirty}<p role="alert" class="text-xs text-destructive">{validation}</p>{/if}

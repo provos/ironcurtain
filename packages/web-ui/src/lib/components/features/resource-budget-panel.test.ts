@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { render, screen, within, fireEvent } from '@testing-library/svelte';
 import type { WorkflowBudgetDto } from '$lib/types.js';
 import ResourceBudgetPanel from './resource-budget-panel.svelte';
 
@@ -29,8 +29,24 @@ const budget: WorkflowBudgetDto = {
 };
 
 describe('ResourceBudgetPanel', () => {
-  it('shows usage overshoot, limit provenance and explicit disabled state', () => {
+  it('keeps warnings visible while collapsed and toggles the details', async () => {
     render(ResourceBudgetPanel, { budget });
+    const toggle = screen.getByTestId('budget-toggle');
+    const details = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(details.hidden).toBe(true);
+    expect(within(toggle).getByText('Limit reached')).toBeTruthy();
+    expect(screen.queryAllByRole('progressbar')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(details.hidden).toBe(false);
+    expect(screen.getByRole('progressbar', { name: 'Estimated cost usage' })).toBeTruthy();
+    await fireEvent.click(toggle);
+    expect(details.hidden).toBe(true);
+  });
+  it('shows usage overshoot, limit provenance and explicit disabled state', async () => {
+    render(ResourceBudgetPanel, { budget });
+    await fireEvent.click(screen.getByTestId('budget-toggle'));
     const cost = within(screen.getByTestId('budget-maxEstimatedCostUsd'));
     expect(cost.getByText('$5.00')).toBeTruthy();
     expect(cost.getByText('default')).toBeTruthy();
@@ -49,6 +65,7 @@ describe('ResourceBudgetPanel', () => {
     render(ResourceBudgetPanel, { budget: { ...budget, recorded: false } });
     expect(screen.getByTestId('budget-legacy-note')).toBeTruthy();
     expect(screen.getAllByText('Usage unavailable')).toHaveLength(3);
+    expect(within(screen.getByTestId('budget-toggle')).getByText('Historical limits unknown')).toBeTruthy();
     expect(screen.queryByText('$7.12 used · Limit reached')).toBeNull();
     expect(screen.queryAllByRole('progressbar')).toHaveLength(0);
   });
@@ -57,5 +74,7 @@ describe('ResourceBudgetPanel', () => {
     expect(screen.getByText('Effective settings for this run')).toBeTruthy();
     expect(screen.queryByTestId('budget-legacy-note')).toBeNull();
     expect(screen.queryByText('Usage unavailable')).toBeNull();
+    expect(screen.queryByTestId('budget-toggle')).toBeNull();
+    expect(screen.getByTestId('budget-maxEstimatedCostUsd').closest('[hidden]')).toBeNull();
   });
 });

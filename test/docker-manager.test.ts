@@ -20,8 +20,7 @@ type ExecCall = {
 };
 
 type MockResponse =
-  | { stdout: string; stderr?: string }
-  | { error: true; code: number; stdout?: string; stderr?: string };
+  { stdout: string; stderr?: string } | { error: true; code: number; stdout?: string; stderr?: string };
 
 interface MockState {
   responseStdout: string;
@@ -590,12 +589,12 @@ describe('DockerManager', () => {
       expect(result.stderr).toBe('stderr output');
     });
 
-    it('passes custom timeout', async () => {
+    it.each([0, 5000])('passes an explicit timeout of %i ms', async (timeoutMs) => {
       mock.setResponse('ok');
       const manager = createDockerManager(mock.mockExec);
 
-      await manager.exec('container-id', ['cmd'], 5000);
-      expect(mock.calls[0].opts.timeout).toBe(5000);
+      await manager.exec('container-id', ['cmd'], timeoutMs);
+      expect(mock.calls[0].opts.timeout).toBe(timeoutMs);
     });
 
     it('detects timeout errors and returns non-zero exit code', async () => {

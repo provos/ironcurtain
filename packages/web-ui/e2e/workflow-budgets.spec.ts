@@ -110,6 +110,20 @@ test.describe('Workflow budget UI', () => {
     await page.locator('tr', { hasText: 'design-and-code' }).click();
     const panel = page.getByTestId('workflow-budget-detail');
     await expect(panel).toBeVisible();
+    const toggle = panel.getByTestId('budget-toggle');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toContainText('Near limit');
+    await expect(panel.getByTestId('budget-maxEstimatedCostUsd')).toBeHidden();
+    if (process.env.WORKFLOW_BUDGET_SCREENSHOT_DIR) {
+      await page.screenshot({
+        path: `${process.env.WORKFLOW_BUDGET_SCREENSHOT_DIR}/desktop-detail-collapsed.png`,
+        fullPage: true,
+        animations: 'disabled',
+      });
+    }
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(panel.getByTestId('budget-maxEstimatedCostUsd')).toBeVisible();
     await expect(panel.getByTestId('budget-maxEstimatedCostUsd')).toContainText('20');
     await expect(panel.getByTestId('budget-maxEstimatedCostUsd')).toContainText('17');
     await expect(panel).toContainText(/session/i);

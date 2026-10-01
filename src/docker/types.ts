@@ -332,7 +332,8 @@ export interface ContainerRuntime {
    * Execute a command inside a running container via `docker exec`.
    * Returns when the command exits. Both stdout and stderr are captured.
    *
-   * @param timeoutMs - kill the exec process after this many ms.
+   * @param timeoutMs - kill the exec process after this many ms. Zero disables
+   *   the timeout; undefined uses the runtime's default timeout.
    * @param execUser - override the exec user via `docker exec --user <value>`.
    *   - `undefined` (default): pins `--user codespace`, the correct behavior
    *     for agent containers (which on Linux are created with `--user 0:0`

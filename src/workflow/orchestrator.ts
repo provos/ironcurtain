@@ -2082,6 +2082,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       closePromises.push(session.close().catch(() => {}));
     }
     await Promise.allSettled(closePromises);
+    // Closing a borrowed session can leave its turn pending. Preserve the
+    // sampled usage before clearing sessions and writing the terminal checkpoint.
+    instance.resourceBudget = this.getInstanceBudget(instance);
     instance.activeSessions.clear();
 
     instance.actor.stop();
