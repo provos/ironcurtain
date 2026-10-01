@@ -444,8 +444,7 @@ function socketPathIn(directory: string): string {
 
 function trackProxies(
   listeners:
-    | DockerWorkloadEgressSet<{ readonly listener: MitmProxy }, { readonly listener: PackageEgressProxy }>
-    | undefined,
+    DockerWorkloadEgressSet<{ readonly listener: MitmProxy }, { readonly listener: PackageEgressProxy }> | undefined,
 ): void {
   if (listeners === undefined) return;
   proxies.push(listeners.registry.listener);

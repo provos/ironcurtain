@@ -733,10 +733,9 @@ describe('strict package egress proxy', () => {
   });
 
   it('bounds concurrent derived metadata and aborts the owned operation during stop', async () => {
-    const fixture = await startFixture((request, response) => {
+    const fixture = await startFixture((request) => {
       if (request.url !== '/demo') throw new Error('artifact must not be contacted before metadata admission');
       // Deliberately leave the first metadata response open until proxy stop.
-      void response;
     });
     const auditLogPath = join(caDir, `package-egress-audit-${auditCounter++}.jsonl`);
     const started = await startPolicyProxy(fixture.transport, {

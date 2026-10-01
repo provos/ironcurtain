@@ -75,8 +75,7 @@ export interface OpenRouterRewriterConfig {
   readonly modelMap: readonly { match: string; model: string }[];
   readonly perAgentDefault: string | undefined;
   readonly providerPreference:
-    | { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean }
-    | undefined;
+    { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean } | undefined;
   readonly sessionAffinity: boolean;
 }
 

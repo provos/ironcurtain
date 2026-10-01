@@ -95,10 +95,10 @@ export function runCliPreflightLint(definitionPath: string, mode: LintMode): Wor
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-type ParseArgsConfig = Parameters<typeof parseArgs>[0];
+type ParseArgsConfig = NonNullable<Parameters<typeof parseArgs>[0]>;
 
 /** The `options` map accepted by {@link parseArgsStrict} / {@link parseArgsResult}. */
-export type ParseArgsOptions = NonNullable<NonNullable<ParseArgsConfig>['options']>;
+export type ParseArgsOptions = NonNullable<ParseArgsConfig['options']>;
 
 export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnType<typeof parseArgs> {
   try {
@@ -116,8 +116,7 @@ export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnTy
  * or a structured failure carrying the parse error message.
  */
 export type ParseArgsResult =
-  | ({ readonly ok: true } & ReturnType<typeof parseArgs>)
-  | { readonly ok: false; readonly message: string };
+  ({ readonly ok: true } & ReturnType<typeof parseArgs>) | { readonly ok: false; readonly message: string };
 
 /**
  * Strict {@link parseArgs} that RETURNS a discriminated failure on an unknown/

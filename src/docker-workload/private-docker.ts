@@ -217,8 +217,7 @@ export interface DockerDesktopPrivateDockerImageObservation {
 
 /** Backend-discriminated selected-image evidence for one private daemon. */
 export type PrivateDockerImageObservation =
-  | ApplePrivateDockerImageObservation
-  | DockerDesktopPrivateDockerImageObservation;
+  ApplePrivateDockerImageObservation | DockerDesktopPrivateDockerImageObservation;
 
 export interface PrivateDockerBootstrapObservation {
   readonly preflight: ClientToolchainPreflight;

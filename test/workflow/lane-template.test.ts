@@ -34,8 +34,8 @@ function contextWithLane(lane: number): WorkflowContext {
 }
 
 function contextWithoutLane(): WorkflowContext {
-  const { lane, ...context } = contextWithLane(0);
-  void lane;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Deliberately omit the lane for this fixture.
+  const { lane: _lane, ...context } = contextWithLane(0);
   return context;
 }
 

@@ -327,8 +327,7 @@ export interface ProviderKeyMapping {
  *   TLS-terminates every host and authorizes decrypted pulls via `guard`.
  */
 type ListenerMode =
-  | { readonly kind: 'standard' }
-  | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
+  { readonly kind: 'standard' } | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
 
 /**
  * Resolve the single listener mode from the proxy options. A proxy without the

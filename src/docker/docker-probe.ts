@@ -53,8 +53,7 @@ export interface DockerServerFacts {
 }
 
 export type DockerAvailability =
-  | { available: true; server?: DockerServerFacts }
-  | { available: false; reason: string; detailedMessage: string };
+  { available: true; server?: DockerServerFacts } | { available: false; reason: string; detailedMessage: string };
 
 export function parseDockerServerFacts(value: unknown): DockerServerFacts {
   if (value === null || typeof value !== 'object') throw new Error('Docker info did not return an object');

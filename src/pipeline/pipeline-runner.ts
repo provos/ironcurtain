@@ -1564,8 +1564,7 @@ export class PipelineRunner {
     // applied — no post-loop catch-up needed.
     for (let attempt = 0; attempt <= MAX_REPAIRS; attempt++) {
       const lastRound = state.verificationResult.rounds[state.verificationResult.rounds.length - 1] as
-        | (typeof state.verificationResult.rounds)[number]
-        | undefined;
+        (typeof state.verificationResult.rounds)[number] | undefined;
       const judgeAnalysis = lastRound?.llmAnalysis ?? state.verificationResult.summary;
       const attributedFailures = lastRound?.attributedFailures ?? [];
 

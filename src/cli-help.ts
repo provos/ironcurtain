@@ -155,7 +155,7 @@ export function checkHelp(values: { help?: boolean }, spec: CommandSpec): boolea
  * actually consume their flags.
  */
 export function parseArgsStrict(
-  config: Omit<Parameters<typeof parseArgs>[0], 'strict'>,
+  config: Omit<NonNullable<Parameters<typeof parseArgs>[0]>, 'strict'>,
   commandName: string,
 ): ReturnType<typeof parseArgs> {
   try {

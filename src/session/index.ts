@@ -271,8 +271,7 @@ async function createDockerSession(
   // is undefined and `session?.close()` is a no-op — the container,
   // sidecar, network, and proxies all leak.
   let infra:
-    | Awaited<ReturnType<typeof import('../docker/docker-infrastructure.js').createDockerInfrastructure>>
-    | undefined;
+    Awaited<ReturnType<typeof import('../docker/docker-infrastructure.js').createDockerInfrastructure>> | undefined;
   // Tracks whether THIS factory allocated the infra bundle. When true and
   // the session never reaches a constructed state, the catch path tears
   // down the bundle directly. When false (borrow path), the caller owns

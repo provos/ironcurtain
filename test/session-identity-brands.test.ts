@@ -84,8 +84,8 @@ describe('brand distinctness', () => {
     const _a: AgentConversationId = bundle;
     // @ts-expect-error -- AgentConversationId is not assignable to BundleId
     const _b: BundleId = convo;
-    void _a;
-    void _b;
+    expect(_a).toBe(bundle);
+    expect(_b).toBe(convo);
   });
 
   it('rejects plain string assignments to branded ids at the type level', () => {
@@ -95,9 +95,7 @@ describe('brand distinctness', () => {
     const _b: AgentConversationId = 'not-a-convo-id';
     // @ts-expect-error -- plain string is not assignable to SessionId
     const _c: SessionId = 'not-a-session-id';
-    void _a;
-    void _b;
-    void _c;
+    expect([_a, _b, _c]).toEqual(['not-a-bundle-id', 'not-a-convo-id', 'not-a-session-id']);
   });
 
   it('rejects cross-brand assignments between SessionId and BundleId at the type level', () => {
@@ -107,8 +105,8 @@ describe('brand distinctness', () => {
     const _a: BundleId = session;
     // @ts-expect-error -- BundleId is not assignable to SessionId
     const _b: SessionId = bundle;
-    void _a;
-    void _b;
+    expect(_a).toBe(session);
+    expect(_b).toBe(bundle);
   });
 
   it('rejects cross-brand assignments between SessionId and AgentConversationId at the type level', () => {
@@ -118,8 +116,8 @@ describe('brand distinctness', () => {
     const _a: AgentConversationId = session;
     // @ts-expect-error -- AgentConversationId is not assignable to SessionId
     const _b: SessionId = convo;
-    void _a;
-    void _b;
+    expect(_a).toBe(session);
+    expect(_b).toBe(convo);
   });
 
   it('createBundleId and createAgentConversationId produce disjoint value sets', () => {

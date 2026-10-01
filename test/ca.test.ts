@@ -725,8 +725,7 @@ function sha256(contents: Buffer): string {
 
 function authorityKeyIdentifierHex(certificate: forge.pki.Certificate): string | undefined {
   const extension = certificate.extensions.find((candidate) => candidate.id === '2.5.29.35') as
-    | { value?: unknown }
-    | undefined;
+    { value?: unknown } | undefined;
   if (typeof extension?.value !== 'string') return undefined;
   const parsed = forge.asn1.fromDer(extension.value);
   if (!Array.isArray(parsed.value) || parsed.value.length !== 1) return undefined;

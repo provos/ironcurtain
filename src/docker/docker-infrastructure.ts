@@ -1216,8 +1216,7 @@ export async function prepareDockerInfrastructure(
     const packageMode = dockerWorkloadConfig?.enabled === true && dockerWorkloadConfig.networkAccess === 'packages';
     let registries: import('./package-types.js').RegistryConfig[] | undefined;
     let packageValidation:
-      | { validator: import('./package-types.js').PackageValidator; auditLogPath: string }
-      | undefined;
+      { validator: import('./package-types.js').PackageValidator; auditLogPath: string } | undefined;
     let packagePolicy: import('./package-egress-proxy.js').PackageEgressPolicy | undefined;
     if (pkgConfig.enabled) {
       const { createPackageValidator } = await import('./package-validator.js');
