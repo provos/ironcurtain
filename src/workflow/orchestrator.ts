@@ -15,12 +15,7 @@ import { isWithinDirectory } from '../types/argument-roles.js';
 import { errorMessage } from '../utils/error-message.js';
 import { sha256Hex } from '../hash.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
-import {
-  resolveWorkflowResourceBudget,
-  legacyWorkflowBudget,
-  workflowBudgetUsage,
-  type WorkflowBudget,
-} from './resource-budget.js';
+import { resolveWorkflowResourceBudget, workflowBudgetUsage, type WorkflowBudget } from './resource-budget.js';
 import { isTerminalWorkflowPhase, terminalPhaseFromStateName } from './terminal-phase.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -1767,9 +1762,12 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const instance: WorkflowInstance = {
       id: workflowId,
-      resourceBudget: options?.useCurrentBudget
-        ? resolveWorkflowResourceBudget(definition.settings)
-        : (checkpoint.resourceBudget ?? legacyWorkflowBudget(definition.settings)),
+      // A legacy resume establishes limits for the resumed sessions; it does
+      // not reconstruct the settings used before this checkpoint.
+      resourceBudget:
+        options?.useCurrentBudget || !checkpoint.resourceBudget?.recorded
+          ? resolveWorkflowResourceBudget(definition.settings)
+          : checkpoint.resourceBudget,
       definition,
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,

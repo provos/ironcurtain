@@ -8,10 +8,11 @@ import type { WorkflowCheckpoint, WorkflowSettings } from './types.js';
 
 export type ResourceBudgetSource = 'workflow' | 'global' | 'default';
 
-/** Snapshot of the effective settings, including where each value came from. */
+/** Effective settings saved at start or resume, including each value's source. */
 export interface WorkflowBudget {
   readonly limits: ResolvedResourceBudgetConfig;
   readonly sources: Record<keyof ResolvedResourceBudgetConfig, ResourceBudgetSource>;
+  /** False only for legacy saved runs whose effective limits are unknown. */
   readonly recorded: boolean;
   /** Number of concurrent agent sessions; usage describes one session, never their sum. */
   readonly activeSessionCount?: number;

@@ -87,9 +87,10 @@ the saved limits by default; the web UI's **Use current resource limits** option
 explicitly resolves the run's workflow overrides against current global settings
 instead. Older runs without this information are labelled as having an unknown historical budget;
 current fallback settings must not be mistaken for the original limits.
-Resuming an older run pins those fallback settings for subsequent sessions while
-preserving the unknown historical-budget label. Only explicitly choosing current
-limits records a new budget snapshot.
+Resuming an older run records the current effective limits for the resumed agent
+sessions and enables their usage display. This does not reconstruct the original
+limits. Subsequent resumes keep the newly saved limits unless current limits are
+explicitly selected again.
 
 ## How workflows work
 
