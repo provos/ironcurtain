@@ -29,6 +29,10 @@ function makeUserConfig(overrides: Partial<ResolvedUserConfig> = {}): ResolvedUs
     anthropicApiKey: 'sk-test-anthropic',
     googleApiKey: 'AIzaSy-test-google',
     openaiApiKey: 'sk-test-openai',
+    azureOpenAIApiKey: '',
+    azureOpenAIEndpoint: '',
+    azureOpenAIDeploymentName: '',
+    azureOpenAIApiVersion: '',
     escalationTimeoutSeconds: 300,
     resourceBudget: {
       maxTotalTokens: 1_000_000,
@@ -299,6 +303,31 @@ describe('GooseAdapter.getProviders', () => {
     expect(providers[0].host).toBe('generativelanguage.googleapis.com');
   });
 
+  it('returns azureOpenAIProvider with hostname from endpoint when gooseProvider is azure_openai', () => {
+    const adapter = createGooseAdapter(
+      makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+      }),
+    );
+    const providers = adapter.getProviders({
+      userConfig: makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+      }),
+    } as IronCurtainConfig);
+    expect(providers).toHaveLength(1);
+    expect(providers[0].host).toBe('myinstance.openai.azure.com');
+  });
+
+  it('throws error when azure_openai provider is selected but AZURE_OPENAI_ENDPOINT is not set', () => {
+    const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'azure_openai' }));
+    const config = {
+      userConfig: makeUserConfig({ gooseProvider: 'azure_openai', azureOpenAIEndpoint: '' }),
+    } as IronCurtainConfig;
+    expect(() => adapter.getProviders(config)).toThrow('Azure OpenAI provider selected but AZURE_OPENAI_ENDPOINT');
+  });
+
   it('returns exactly one provider', () => {
     for (const provider of ['anthropic', 'openai', 'google'] as const) {
       const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: provider }));
@@ -393,6 +422,84 @@ describe('GooseAdapter.buildEnv', () => {
     const fakeKeys = new Map([['api.anthropic.com', 'wrong-host-key']]);
     expect(() => adapter.buildEnv(config, fakeKeys)).toThrow('No fake key generated for api.openai.com');
   });
+
+  it('sets AZURE_OPENAI_DEPLOYMENT_NAME and AZURE_OPENAI_API_VERSION for azure_openai provider', () => {
+    const adapter = createGooseAdapter(
+      makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+        azureOpenAIDeploymentName: 'gpt-4-deployment',
+        azureOpenAIApiVersion: '2024-08-01-preview',
+        azureOpenAIApiKey: 'key-test',
+      }),
+    );
+    const azureConfig = {
+      userConfig: makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+        azureOpenAIDeploymentName: 'gpt-4-deployment',
+        azureOpenAIApiVersion: '2024-08-01-preview',
+      }),
+    } as IronCurtainConfig;
+    const fakeKeys = new Map([['myinstance.openai.azure.com', 'sk-ironcurtain-FAKE']]);
+    const env = adapter.buildEnv(azureConfig, fakeKeys);
+    expect(env.GOOSE_PROVIDER).toBe('azure_openai');
+    expect(env.AZURE_OPENAI_DEPLOYMENT_NAME).toBe('gpt-4-deployment');
+    expect(env.AZURE_OPENAI_API_VERSION).toBe('2024-08-01-preview');
+    expect(env.AZURE_OPENAI_API_KEY).toBe('sk-ironcurtain-FAKE');
+  });
+
+  it('throws error when azure_openai is selected but AZURE_OPENAI_ENDPOINT is missing', () => {
+    const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'azure_openai' }));
+    const azureConfig = {
+      userConfig: makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: '',
+      }),
+    } as IronCurtainConfig;
+    const fakeKeys = new Map();
+    expect(() => adapter.buildEnv(azureConfig, fakeKeys)).toThrow(
+      'Azure OpenAI provider requires AZURE_OPENAI_ENDPOINT',
+    );
+  });
+
+  it('throws error when azure_openai is selected but AZURE_OPENAI_DEPLOYMENT_NAME is missing', () => {
+    const adapter = createGooseAdapter(
+      makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+      }),
+    );
+    const azureConfig = {
+      userConfig: makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+        azureOpenAIDeploymentName: '',
+      }),
+    } as IronCurtainConfig;
+    const fakeKeys = new Map([['myinstance.openai.azure.com', 'sk-ironcurtain-FAKE']]);
+    expect(() => adapter.buildEnv(azureConfig, fakeKeys)).toThrow('AZURE_OPENAI_DEPLOYMENT_NAME');
+  });
+
+  it('throws error when azure_openai is selected but AZURE_OPENAI_API_VERSION is missing', () => {
+    const adapter = createGooseAdapter(
+      makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+        azureOpenAIDeploymentName: 'gpt-4-deployment',
+      }),
+    );
+    const azureConfig = {
+      userConfig: makeUserConfig({
+        gooseProvider: 'azure_openai',
+        azureOpenAIEndpoint: 'https://myinstance.openai.azure.com',
+        azureOpenAIDeploymentName: 'gpt-4-deployment',
+        azureOpenAIApiVersion: '',
+      }),
+    } as IronCurtainConfig;
+    const fakeKeys = new Map([['myinstance.openai.azure.com', 'sk-ironcurtain-FAKE']]);
+    expect(() => adapter.buildEnv(azureConfig, fakeKeys)).toThrow('AZURE_OPENAI_API_VERSION');
+  });
 });
 
 // ─── detectCredential ────────────────────────────────────────
@@ -431,6 +538,18 @@ describe('GooseAdapter.detectCredential', () => {
     expect(adapter.detectCredential!(configWithKey).kind).toBe('apikey');
 
     const configWithout = { userConfig: makeUserConfig({ googleApiKey: '' }) } as unknown as IronCurtainConfig;
+    expect(adapter.detectCredential!(configWithout).kind).toBe('none');
+  });
+
+  it('checks azureOpenAIApiKey when gooseProvider is azure_openai', () => {
+    const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'azure_openai' }));
+
+    const configWithKey = {
+      userConfig: makeUserConfig({ azureOpenAIApiKey: 'key-test' }),
+    } as unknown as IronCurtainConfig;
+    expect(adapter.detectCredential!(configWithKey).kind).toBe('apikey');
+
+    const configWithout = { userConfig: makeUserConfig({ azureOpenAIApiKey: '' }) } as unknown as IronCurtainConfig;
     expect(adapter.detectCredential!(configWithout).kind).toBe('none');
   });
 });
