@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import type { SessionOptions } from '../../src/session/types.js';
 import type { WorkflowId, HumanGateRequest, WorkflowDefinition } from '../../src/workflow/types.js';
 import { WorkflowOrchestrator, type WorkflowLifecycleEvent } from '../../src/workflow/orchestrator.js';
@@ -238,6 +239,41 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     activeOrchestrators.push(o);
     return o;
   }
+
+  it('keeps the resume marker tied to the prior terminal checkpoint while refreshing the saved budget', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = new FileCheckpointStore(tmpDir);
+    const raiseGate = vi.fn();
+    const orchestrator = trackOrchestrator(
+      new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          raiseGate,
+          createSession: async () =>
+            createArtifactAwareSession([{ text: approvedResponse(), artifacts: ['plan'] }], tmpDir),
+        }),
+      ),
+    );
+    const workflowId = await orchestrator.start(defPath, 'task');
+    await waitForGate(raiseGate, 1);
+    await orchestrator.abort(workflowId);
+    const checkpointPath = resolve(tmpDir, workflowId, 'checkpoint.json');
+    const oldFingerprint = createHash('sha256').update(readFileSync(checkpointPath)).digest('hex');
+    const prior = checkpointStore.load(workflowId)!;
+    const resumed = trackOrchestrator(new WorkflowOrchestrator(createDeps(tmpDir, { checkpointStore })));
+    await resumed.resume(workflowId, { useCurrentBudget: true });
+    const current = checkpointStore.load(workflowId)!;
+    expect(current.machineState).toEqual(prior.machineState);
+    expect(current.context).toEqual(prior.context);
+    expect(current.finalStatus).toBeUndefined();
+    expect(current.resourceBudget?.recorded).toBe(true);
+    const entries = readFileSync(resolve(tmpDir, workflowId, 'messages.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; checkpointFingerprint?: string });
+    expect(entries.find((entry) => entry.type === 'run_resumed')?.checkpointFingerprint).toBe(oldFingerprint);
+    expect(createHash('sha256').update(readFileSync(checkpointPath)).digest('hex')).not.toBe(oldFingerprint);
+  });
 
   // -----------------------------------------------------------------------
   // Test 1: Checkpoint is saved on every state transition

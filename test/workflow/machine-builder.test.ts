@@ -1032,7 +1032,6 @@ describe('buildWorkflowMachine', () => {
       const testMachine = result.machine.provide({
         actors: {
           agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
-            void input.context;
             if (input.stateId === 'review') return makeAgentResult(); // approve
             return makeAgentResult();
           }),

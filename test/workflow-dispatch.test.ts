@@ -23,6 +23,7 @@ import {
   type WorkflowDispatchContext,
 } from '../src/web-ui/dispatch/workflow-dispatch.js';
 import { RpcError, type PastRunDto, type MessageLogResponseDto } from '../src/web-ui/web-ui-types.js';
+import { resolveWorkflowResourceBudget } from '../src/workflow/resource-budget.js';
 import type { MessageLogEntry } from '../src/workflow/message-log.js';
 import type { WorkflowRunSummary } from '../src/workflow/workflow-discovery.js';
 import * as logger from '../src/logger.js';
@@ -210,6 +211,7 @@ function createContext(opts: {
     listResumable: vi.fn().mockReturnValue([]),
     getStatus: vi.fn().mockReturnValue(undefined),
     getDetail: vi.fn().mockReturnValue(undefined),
+    getBudget: vi.fn().mockReturnValue(undefined),
     listActive: vi.fn().mockReturnValue([]),
     resolveGate: vi.fn(),
     abort: vi.fn().mockResolvedValue(undefined),
@@ -813,6 +815,21 @@ describe('synthesizePhaseFromMessageLog', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildDetailFromPastRun', () => {
+  it('reports zero live agent sessions for recorded past-run budget snapshots', () => {
+    const id = 'past-budget-count' as WorkflowId;
+    const budget = {
+      ...resolveWorkflowResourceBudget(undefined, {}),
+      activeSessionCount: 3,
+      usage: { totalTokens: 1200, estimatedCostUsd: 2, stepCount: 4, elapsedSeconds: 20, tokenTrackingAvailable: true },
+    };
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: makeCheckpoint({ resourceBudget: budget }) }),
+      makeSummary({ workflowId: id }),
+    );
+    expect(dto.budget).toEqual({ ...budget, activeSessionCount: 0 });
+  });
+
   it('produces a WorkflowDetailDto with synthesized "interrupted" phase', () => {
     const id = 'wf-001' as WorkflowId;
     const cp = makeCheckpoint({ machineState: 'plan' });

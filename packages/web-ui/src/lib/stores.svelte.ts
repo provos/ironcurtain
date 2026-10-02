@@ -21,6 +21,8 @@ import type {
   ResumableWorkflowDto,
   WorkflowSummaryDto,
   WorkflowDetailDto,
+  WorkflowBudgetDto,
+  ResourceBudgetConfigDto,
   WorkflowDefinitionDto,
   WorkflowReadmeDto,
   HumanGateRequestDto,
@@ -53,14 +55,7 @@ import { createWsClient, type PreflightResult, type WsClient } from './ws-client
 import { handleEvent as handleEventPure, SESSION_MUTATION_EVENTS } from './event-handler.js';
 
 export type ViewId =
-  | 'dashboard'
-  | 'statistics'
-  | 'sessions'
-  | 'escalations'
-  | 'jobs'
-  | 'workflows'
-  | 'personas'
-  | 'settings';
+  'dashboard' | 'statistics' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -824,8 +819,11 @@ export async function importWorkflow(baseDir: string): Promise<{ workflowId: str
   return getWsClient().request<{ workflowId: string }>('workflows.import', { baseDir });
 }
 
-export async function resumeWorkflow(workflowId: string): Promise<{ workflowId: string }> {
-  return getWsClient().request<{ workflowId: string }>('workflows.resume', { workflowId });
+export async function resumeWorkflow(workflowId: string, useCurrentBudget = false): Promise<{ workflowId: string }> {
+  return getWsClient().request<{ workflowId: string }>('workflows.resume', {
+    workflowId,
+    ...(useCurrentBudget ? { useCurrentBudget } : {}),
+  });
 }
 
 // ── Workflow file browser RPC actions ──────────────────────────────────
@@ -1028,4 +1026,20 @@ async function startConnectionWithToken(client: WsClient, token: string): Promis
   // enter the reconnect loop and preflight again each time.
   appState.hasToken = true;
   client.connect(buildWsUrl(), token);
+}
+
+export async function getWorkflowBudgetPreview(definitionPath: string): Promise<WorkflowBudgetDto> {
+  return getWsClient().request<WorkflowBudgetDto>('workflows.getBudgetPreview', { definitionPath });
+}
+
+export async function getWorkflowBudget(workflowId: string): Promise<WorkflowBudgetDto> {
+  return getWsClient().request<WorkflowBudgetDto>('workflows.getBudget', { workflowId });
+}
+
+export async function getResourceBudget(): Promise<ResourceBudgetConfigDto> {
+  return getWsClient().request<ResourceBudgetConfigDto>('config.getResourceBudget', {});
+}
+
+export async function setResourceBudget(budget: ResourceBudgetConfigDto): Promise<ResourceBudgetConfigDto> {
+  return getWsClient().request<ResourceBudgetConfigDto>('config.setResourceBudget', { ...budget });
 }

@@ -41,6 +41,15 @@ const connectionGenerationMock = { value: 0 };
 const configChangedGenerationMock = { value: 0 };
 
 vi.mock('$lib/stores.svelte.js', () => ({
+  getResourceBudget: () =>
+    Promise.resolve({
+      maxTotalTokens: 1000000,
+      maxSteps: 200,
+      maxSessionSeconds: 1800,
+      maxEstimatedCostUsd: 5,
+      warnThresholdPercent: 80,
+    }),
+  setResourceBudget: (input: unknown) => Promise.resolve(input),
   getDockerWorkloadSettings: (...args: unknown[]) => mockGetDockerWorkload(...(args as [])),
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
   setDockerWorkloadSettings: (...args: unknown[]) => mockSetDockerWorkload(...(args as [DockerWorkloadSettingsDto])),

@@ -21,6 +21,15 @@ import { parsePort } from './parse-port.js';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
 import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 import {
+  DEFAULT_RESOURCE_BUDGET,
+  buildBudgetPreview,
+  buildRunBudget,
+  validateResourceBudget,
+  type ResourceBudgetFixture,
+  type WorkflowBudgetFixture,
+  type WorkflowBudgetScenario,
+} from './workflow-budget-fixtures.js';
+import {
   createStatisticsFixtureEngine,
   type FixtureSeriesQuery,
   type StatisticsFixtureScenario,
@@ -110,6 +119,7 @@ const startTime = Date.now();
 interface ResetOptions {
   allowPolicyMutation?: boolean;
   statisticsScenario?: StatisticsFixtureScenario;
+  workflowBudgetScenario?: WorkflowBudgetScenario;
 }
 
 /** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */
@@ -910,6 +920,7 @@ interface MockWorkflow {
   currentState: string;
   startedAt: string;
   lastState?: string;
+  budget?: WorkflowBudgetFixture;
 }
 
 interface MockGate {
@@ -939,6 +950,9 @@ const CANNED_WORKFLOWS: MockWorkflow[] = [
 ];
 
 const workflows = new Map<string, MockWorkflow>();
+let resourceBudgetSettings = { ...DEFAULT_RESOURCE_BUDGET };
+let resourceBudgetConfigured = false;
+let workflowBudgetScenario: WorkflowBudgetScenario = 'normal';
 const workflowGates = new Map<string, MockGate>();
 const workflowTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
 
@@ -964,6 +978,7 @@ function initWorkflows(): void {
   }
   workflowTimers.clear();
   for (const wf of structuredClone(CANNED_WORKFLOWS)) {
+    wf.budget = buildRunBudget(wf.name, resourceBudgetSettings, resourceBudgetConfigured, workflowBudgetScenario);
     workflows.set(wf.workflowId, wf);
   }
   // Add a gate for the waiting workflow
@@ -1108,6 +1123,9 @@ function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
 
   return {
     ...wf,
+    budget: wf.budget?.recorded
+      ? wf.budget
+      : buildRunBudget(wf.name, resourceBudgetSettings, resourceBudgetConfigured, 'legacy'),
     description: `Mock workflow: ${wf.name}`,
     stateGraph: graph,
     transitionHistory,
@@ -1406,6 +1424,9 @@ function resetState(opts?: ResetOptions): void {
   eventSeq = 0;
   jobs.length = 0;
   jobs.push(...structuredClone(CANNED_JOBS));
+  resourceBudgetSettings = { ...DEFAULT_RESOURCE_BUDGET };
+  resourceBudgetConfigured = false;
+  workflowBudgetScenario = opts?.workflowBudgetScenario ?? 'normal';
   initWorkflows();
   clearCompileState();
   // Restore the model-provider registry so a set-mutating e2e starts fresh.
@@ -2207,6 +2228,23 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'config.getStatistics':
       return { ...statisticsConfig };
 
+    case 'config.getResourceBudget':
+      if (Object.keys(params).length !== 0) return errorResult('INVALID_PARAMS', 'No parameters are supported');
+      return { ...resourceBudgetSettings };
+
+    case 'config.setResourceBudget': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      if (!validateResourceBudget(params)) {
+        return errorResult('INVALID_PARAMS', 'Resource budget settings are invalid');
+      }
+      // Replace this section only; other settings and existing run snapshots remain intact.
+      resourceBudgetSettings = { ...params } as unknown as ResourceBudgetFixture;
+      resourceBudgetConfigured = true;
+      broadcast('config.changed', {});
+      return { ...resourceBudgetSettings };
+    }
+
     case 'config.setStatistics': {
       const gate = requireMutation();
       if (gate) return gate;
@@ -2259,6 +2297,49 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       );
 
     // Workflow methods
+    case 'workflows.getBudgetPreview': {
+      if (
+        Object.keys(params).some((key) => key !== 'definitionPath') ||
+        typeof params.definitionPath !== 'string' ||
+        params.definitionPath.length === 0
+      ) {
+        return errorResult('INVALID_PARAMS', 'definitionPath must be a non-empty string');
+      }
+      if (
+        ![
+          '/opt/ironcurtain/workflows/design-and-code/workflow.yaml',
+          '/opt/ironcurtain/workflows/code-review/workflow.yaml',
+          '/home/user/.ironcurtain/workflows/my-custom-flow/workflow.yaml',
+        ].includes(resolve(params.definitionPath))
+      ) {
+        return errorResult('WORKFLOW_NOT_FOUND', 'Workflow definition not found in discovered definitions');
+      }
+      return buildBudgetPreview(params.definitionPath, resourceBudgetSettings, resourceBudgetConfigured);
+    }
+
+    case 'workflows.getBudget': {
+      if (
+        Object.keys(params).some((key) => key !== 'workflowId') ||
+        typeof params.workflowId !== 'string' ||
+        params.workflowId.length === 0
+      )
+        return errorResult('INVALID_PARAMS', 'workflowId must be a non-empty string');
+      const wf = workflows.get(params.workflowId as string);
+      if (wf?.budget) {
+        return wf.budget.recorded
+          ? wf.budget
+          : buildRunBudget(wf.name, resourceBudgetSettings, resourceBudgetConfigured, 'legacy');
+      }
+      const past = buildPastRunFixtures().find((run) => run.workflowId === params.workflowId);
+      if (past) {
+        return buildRunBudget(past.name, resourceBudgetSettings, resourceBudgetConfigured, 'legacy');
+      }
+      if (replayController && replayController.getStatus().workflowId === params.workflowId) {
+        return buildRunBudget('replay', DEFAULT_RESOURCE_BUDGET, false, 'legacy');
+      }
+      return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${String(params.workflowId)} not found`);
+    }
+
     case 'workflows.listDefinitions':
       // Mirrors the daemon: hidden (smoke/fixture) workflows are never returned
       // here, and each entry carries `hasReadme`.
@@ -2328,6 +2409,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         phase: 'running',
         currentState: 'plan',
         startedAt: new Date().toISOString(),
+        budget: buildBudgetPreview(String(params.definitionPath), resourceBudgetSettings, resourceBudgetConfigured),
       };
       workflows.set(newId, newWf);
       broadcast('workflow.started', {
@@ -2541,6 +2623,10 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       }
       if (wf.phase === 'completed') {
         return errorResult('WORKFLOW_NOT_RESUMABLE', `Workflow ${workflowId} has already completed`);
+      }
+
+      if (params.useCurrentBudget === true || !wf.budget?.recorded) {
+        wf.budget = buildBudgetPreview(wf.name, resourceBudgetSettings, resourceBudgetConfigured);
       }
 
       wf.phase = 'running';

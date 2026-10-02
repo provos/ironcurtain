@@ -14,7 +14,7 @@ import type {
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES, SKILLS_NONE } from './types.js';
 import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR, resolveFanOutWorkers } from './lane-template.js';
 import { REGISTERED_GUARDS } from './guards.js';
-import { looseModelId } from '../config/user-config.js';
+import { resourceBudgetFieldsSchema, looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 
 // ---------------------------------------------------------------------------
@@ -141,12 +141,20 @@ const workflowSettingsSchema = z
     gitRepoPath: z.string().optional(),
     workers: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
-    maxSessionSeconds: z.number().positive().optional(),
+    maxSessionSeconds: z.number().positive().nullable().optional(),
+    resourceBudget: resourceBudgetFieldsSchema.strict().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
     model: looseModelId.optional(),
     sharedContainer: z.boolean().optional(),
     snapshotOnStop: z.boolean().optional(),
   })
+  .refine(
+    (settings) =>
+      settings.maxSessionSeconds === undefined ||
+      settings.resourceBudget?.maxSessionSeconds === undefined ||
+      settings.maxSessionSeconds === settings.resourceBudget.maxSessionSeconds,
+    { message: 'Conflicting maxSessionSeconds values in settings and settings.resourceBudget' },
+  )
   .optional();
 
 const workflowDefinitionSchema = z.object({

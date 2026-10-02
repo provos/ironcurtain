@@ -67,7 +67,7 @@ export function writeStderr(msg: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a session factory that loads config once and routes model
+ * Creates a session factory that reads current config and routes model
  * selection through:
  *
  *   `--model` CLI flag  >  per-call `agentModelOverride`  >  user config
@@ -79,9 +79,8 @@ export function writeStderr(msg: string): void {
  * policy); any other value passes through for per-persona policy/memory.
  */
 export function createWorkflowSessionFactory(modelOverride?: string): (opts: SessionOptions) => Promise<Session> {
-  const baseConfig = loadConfig();
-
   return async (opts: SessionOptions): Promise<Session> => {
+    const baseConfig = loadConfig();
     const persona = opts.persona;
     const personaStripped = persona === GLOBAL_PERSONA ? undefined : persona;
 

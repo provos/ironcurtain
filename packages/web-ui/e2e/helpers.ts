@@ -17,6 +17,7 @@ export async function resetMockServer(
   opts?: {
     allowPolicyMutation?: boolean;
     statisticsScenario?: 'mixed' | 'empty' | 'disabled' | 'degraded' | 'reader-unavailable';
+    workflowBudgetScenario?: 'normal' | 'no-usage' | 'legacy';
   },
 ): Promise<void> {
   await request.post(`http://127.0.0.1:${MOCK_RESET_PORT}/__reset`, opts ? { data: opts } : undefined);
@@ -168,6 +169,11 @@ let rpcSeq = 0;
  * test raise a terminal-backed escalation while the UI remains on another view.
  */
 export async function sendPtyPromptRpc(label: number, text: string): Promise<void> {
+  await sendMockRpc('sessions.ptyPrompt', { label, text });
+}
+
+/** Exercise daemon contracts directly without making UI tests depend on internal stores. */
+export async function sendMockRpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
   const ws = new WebSocket(`ws://127.0.0.1:${MOCK_PORT}/ws?token=mock-dev-token`);
 
   try {
@@ -197,8 +203,8 @@ export async function sendPtyPromptRpc(label: number, text: string): Promise<voi
       ws.once('error', onError);
     });
 
-    const id = `e2e-pty-prompt-${Date.now()}-${++rpcSeq}`;
-    await new Promise<void>((resolve, reject) => {
+    const id = `e2e-rpc-${Date.now()}-${++rpcSeq}`;
+    return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting for ${id}`));
@@ -212,18 +218,18 @@ export async function sendPtyPromptRpc(label: number, text: string): Promise<voi
       }
 
       function onMessage(raw: WebSocket.RawData): void {
-        let frame: { id?: string; ok?: boolean; error?: { message?: string } };
+        let frame: { id?: string; ok?: boolean; payload?: T; error?: { code?: string; message?: string } };
         try {
-          frame = JSON.parse(raw.toString()) as { id?: string; ok?: boolean; error?: { message?: string } };
+          frame = JSON.parse(raw.toString()) as typeof frame;
         } catch {
           return;
         }
         if (frame.id !== id) return;
         cleanup();
         if (frame.ok) {
-          resolve();
+          resolve(frame.payload as T);
         } else {
-          reject(new Error(frame.error?.message ?? `Mock RPC ${id} failed`));
+          reject(new Error(`${frame.error?.code ?? 'RPC_ERROR'}: ${frame.error?.message ?? `Mock RPC ${id} failed`}`));
         }
       }
 
@@ -240,7 +246,7 @@ export async function sendPtyPromptRpc(label: number, text: string): Promise<voi
       ws.on('message', onMessage);
       ws.once('error', onError);
       ws.once('close', onClose);
-      ws.send(JSON.stringify({ id, method: 'sessions.ptyPrompt', params: { label, text } }));
+      ws.send(JSON.stringify({ id, method, params }));
     });
   } finally {
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {

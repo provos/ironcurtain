@@ -8,6 +8,8 @@ import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 import type { WorkflowId, HumanGateRequestDto } from '../workflow/types.js';
 import type { MessageLogEntry } from '../workflow/message-log.js';
+import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
+import type { WorkflowBudget } from '../workflow/resource-budget.js';
 // TYPE-ONLY import of the 9-value pipeline phase union. The import-boundary
 // rule (test/pipeline-import-boundary.test.ts + ESLint no-restricted-imports)
 // forbids VALUE imports from pipeline/* on the live path; `import type` is the
@@ -65,6 +67,8 @@ export type MethodName =
   | 'personas.list'
   | 'workflows.list'
   | 'workflows.get'
+  | 'workflows.getBudget'
+  | 'workflows.getBudgetPreview'
   | 'workflows.start'
   | 'workflows.import'
   | 'workflows.resume'
@@ -97,6 +101,8 @@ export type MethodName =
   | 'config.getDockerWorkload'
   | 'config.setDockerWorkload'
   | 'config.getStatistics'
+  | 'config.getResourceBudget'
+  | 'config.setResourceBudget'
   | 'config.setStatistics'
   // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
   // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
@@ -223,6 +229,11 @@ export interface BudgetSummaryDto {
   };
 }
 
+/** Global resource limits; null explicitly disables a numeric limit. */
+export type ResourceBudgetConfigDto = ResolvedResourceBudgetConfig;
+
+export type WorkflowBudgetDto = WorkflowBudget;
+
 /** Detailed session info including conversation history. */
 export interface SessionDetailDto extends SessionDto {
   readonly history: readonly ConversationTurn[];
@@ -334,6 +345,7 @@ export type WorkflowSummaryDto = WorkflowCardDto & {
  * `LiveWorkflowPhase` value; only the disk-fallback path can emit `'interrupted'`.
  */
 export type WorkflowDetailDto = WorkflowCardDto & {
+  readonly budget?: WorkflowBudgetDto;
   readonly startedAt: string;
   readonly description: string;
   readonly stateGraph: StateGraphDto;

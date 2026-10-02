@@ -52,7 +52,6 @@ import { SessionNotReadyError, SessionClosedError } from '../types/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';
-import { DEFAULT_EXEC_TIMEOUT_MS } from './docker-manager.js';
 import { getTokenStreamBus } from './token-stream-bus.js';
 import type { DockerExecResult } from './types.js';
 import { getLlmMetricsEventBus } from '../llm-metrics/event-bus.js';
@@ -321,10 +320,9 @@ export class DockerAgentSession implements Session {
     try {
       // Per-turn wall-clock timeout (matches builtin session semantics:
       // maxSessionSeconds is a per-turn limit, idle time doesn't count).
-      // When not configured, docker.exec applies its own default timeout
-      // (currently 10 minutes) to prevent runaway processes.
+      // Explicit null disables the timeout; execFile uses zero for no limit.
       const maxSeconds = this.config.userConfig.resourceBudget.maxSessionSeconds;
-      const execTimeout = maxSeconds != null ? maxSeconds * 1000 : undefined;
+      const execTimeout = maxSeconds === null ? 0 : maxSeconds * 1000;
 
       const turnStartMs = Date.now();
       const turnStart = new Date(turnStartMs).toISOString();
@@ -376,7 +374,7 @@ export class DockerAgentSession implements Session {
       }
       const { exitCode, stdout, stderr } = execResult;
       const execDurationMs = Date.now() - execStartMs;
-      const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
+      const timeoutLabel = execTimeout === 0 ? 'disabled' : `${execTimeout}ms`;
       logger.info(
         `[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B ` +
           `duration=${execDurationMs}ms timeout=${timeoutLabel}`,

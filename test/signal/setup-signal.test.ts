@@ -234,7 +234,6 @@ class MockSignalApi {
       let body = '';
       req.on('data', (chunk: Buffer) => (body += String(chunk)));
       req.on('end', () => {
-        void body; // consumed but not needed for mock
         res.writeHead(200);
         res.end();
       });

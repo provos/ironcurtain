@@ -47,6 +47,51 @@ ironcurtain workflow start design-and-code \
 - `ANTHROPIC_API_KEY` in environment or `~/.ironcurtain/config.json`
 - Global compiled policy (`npm run compile-policy`)
 
+## Resource limits
+
+The **New run** form previews the effective agent limits before execution. The
+workflow detail page shows those limits, their source, and the active or most
+recent agent session's usage. **Settings → Resource Limits** edits the global
+defaults. Settings changes apply to new runs; they do not change an existing
+run's saved limits.
+
+Workflows inherit `resourceBudget` from `~/.ironcurtain/config.json`. Override
+individual fields in the workflow definition:
+
+```yaml
+settings:
+  resourceBudget:
+    maxEstimatedCostUsd: 20
+    maxTotalTokens: 2000000
+    maxSteps: 400
+    maxSessionSeconds: 7200
+    warnThresholdPercent: 80
+```
+
+Omitted fields inherit their global value. A positive number sets a limit;
+`null` disables that individual limit. Token and step limits must be integers.
+The warning threshold is a percentage from 1 through 99. Unknown budget fields
+and conflicting values for the legacy `settings.maxSessionSeconds` and the
+nested timeout are rejected. The legacy timeout remains supported.
+
+These are agent limits, not a spending ceiling for the entire workflow. In
+builtin mode, token, step, time, and cost limits apply per turn. Docker mode
+uses the timeout per turn. The workflow engine also checks cumulative agent
+session tokens, steps, and cost before recovery turns. A completed turn can
+exceed a cost threshold before the engine refuses further recovery work.
+Workflow-wide total tokens and agent-session budget usage are separate values.
+
+New runs save their effective limits and their source in the checkpoint so
+resumed and historical runs can show the settings actually used. Resume keeps
+the saved limits by default; the web UI's **Use current resource limits** option
+explicitly resolves the run's workflow overrides against current global settings
+instead. Older runs without this information are labelled as having an unknown historical budget;
+current fallback settings must not be mistaken for the original limits.
+Resuming an older run records the current effective limits for the resumed agent
+sessions and enables their usage display. This does not reconstruct the original
+limits. Subsequent resumes keep the newly saved limits unless current limits are
+explicitly selected again.
+
 ## How workflows work
 
 A workflow is a YAML or JSON file that defines a state machine. Each state is one of:

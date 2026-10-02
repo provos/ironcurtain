@@ -160,8 +160,7 @@ export type PackageEgressListenTarget =
 
 /** Bound endpoint returned after successful listener startup. */
 export type PackageEgressListenAddress =
-  | { readonly socketPath: string; readonly port?: never }
-  | { readonly socketPath?: never; readonly port: number };
+  { readonly socketPath: string; readonly port?: never } | { readonly socketPath?: never; readonly port: number };
 
 export interface PackageEgressProxy {
   readonly snapshot: PackageEgressLedgerSnapshot;

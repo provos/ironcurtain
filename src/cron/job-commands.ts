@@ -357,8 +357,8 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
         }
         // Destructure-omit `memory` so we can either re-attach it (off case)
         // or drop it entirely (on case). Avoids `memory: undefined` in spread.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Destructure to omit the optional property.
         const { memory: _omit, ...rest } = job;
-        void _omit;
         job = !enabled ? { ...rest, memory: { enabled: false } } : rest;
         break;
       }

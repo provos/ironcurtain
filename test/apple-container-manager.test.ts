@@ -462,6 +462,12 @@ describe('AppleContainerManager', () => {
   });
 
   describe('exec', () => {
+    it.each([0, 5000])('passes an explicit timeout of %i ms', async (timeoutMs) => {
+      mock.setResponse('out');
+      await manager().exec('c1', ['echo', 'hi'], timeoutMs);
+      expect(mock.calls[0]?.opts.timeout).toBe(timeoutMs);
+    });
+
     it('pins --user codespace by default', async () => {
       mock.setResponse('out');
       const result = await manager().exec('c1', ['echo', 'hi']);

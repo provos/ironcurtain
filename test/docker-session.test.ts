@@ -417,6 +417,36 @@ describe('DockerAgentSession', () => {
     expect(session.getInfo().status).toBe('ready');
   });
 
+  it.each([
+    { maxSeconds: null, timeoutMs: 0 },
+    { maxSeconds: 30, timeoutMs: 30_000 },
+  ])('honors a $maxSeconds per-turn timeout', async ({ maxSeconds, timeoutMs }) => {
+    deps = {
+      ...deps,
+      config: {
+        ...deps.config,
+        userConfig: {
+          ...deps.config.userConfig,
+          resourceBudget: { ...deps.config.userConfig.resourceBudget, maxSessionSeconds: maxSeconds },
+        },
+      },
+    };
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+    const exec = vi.spyOn(deps.infra.docker, 'exec');
+
+    await session.sendMessage('Work with the configured timeout');
+
+    expect(exec).toHaveBeenCalledWith(
+      deps.infra.containerId,
+      expect.any(Array),
+      timeoutMs,
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
   it('records conversation turns', async () => {
     session = new DockerAgentSession(deps);
     await session.initialize();

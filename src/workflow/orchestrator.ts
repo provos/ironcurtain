@@ -15,6 +15,7 @@ import { isWithinDirectory } from '../types/argument-roles.js';
 import { errorMessage } from '../utils/error-message.js';
 import { sha256Hex } from '../hash.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
+import { resolveWorkflowResourceBudget, workflowBudgetUsage, type WorkflowBudget } from './resource-budget.js';
 import { isTerminalWorkflowPhase, terminalPhaseFromStateName } from './terminal-phase.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -281,9 +282,7 @@ const EVOLVE_LANE_STEP_RE = /^step_(\d+)(?:_lane_(\d+))?$/;
  * `kind` discriminator to decide whether to retry, abort, or proceed.
  */
 type ParseResult =
-  | { kind: 'ok'; output: AgentOutput }
-  | { kind: 'missing' }
-  | { kind: 'malformed'; error: AgentStatusParseError };
+  { kind: 'ok'; output: AgentOutput } | { kind: 'missing' } | { kind: 'malformed'; error: AgentStatusParseError };
 
 function tryParseAgentStatus(responseText: string): ParseResult {
   try {
@@ -720,6 +719,7 @@ export type WorkflowLifecycleEvent =
 
 /** Extended workflow detail for the web UI. */
 export interface WorkflowDetail {
+  readonly budget?: WorkflowBudget;
   readonly definition: WorkflowDefinition;
   readonly transitionHistory: readonly TransitionRecord[];
   readonly workspacePath: string;
@@ -735,9 +735,10 @@ export interface WorkflowDetail {
 /** The narrow controller interface exposed to the mux. */
 export interface WorkflowController {
   start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId>;
-  resume(workflowId: WorkflowId): Promise<void>;
+  resume(workflowId: WorkflowId, options?: { useCurrentBudget?: boolean }): Promise<void>;
   listResumable(): WorkflowId[];
   getStatus(id: WorkflowId): WorkflowStatus | undefined;
+  getBudget(id: WorkflowId): WorkflowBudget | undefined;
   getDetail(id: WorkflowId): WorkflowDetail | undefined;
   listActive(): readonly WorkflowId[];
   resolveGate(id: WorkflowId, event: HumanGateEvent): void;
@@ -751,6 +752,7 @@ export interface WorkflowController {
 // ---------------------------------------------------------------------------
 
 interface WorkflowInstance {
+  resourceBudget: WorkflowBudget;
   readonly id: WorkflowId;
   readonly definition: WorkflowDefinition;
   readonly definitionPath: string;
@@ -1595,6 +1597,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const instance: WorkflowInstance = {
       id: workflowId,
+      resourceBudget: resolveWorkflowResourceBudget(definition.settings),
       definition,
       definitionPath,
       workflowSkillsDir,
@@ -1639,7 +1642,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Persist the initial executable state before it can transition directly
     // to a terminal. Terminal saves preserve this non-terminal resume point.
     this.saveCheckpoint(instance, actor.getSnapshot() as { value: unknown; context: unknown });
-    messageLog.appendRunStarted(this.logBase(instance));
+    messageLog.appendRunStarted({ ...this.logBase(instance), resourceBudget: instance.resourceBudget });
     actor.start();
     return workflowId;
   }
@@ -1647,7 +1650,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Intentionally has no await: the instance must be installed before a
   // second resume call can observe an opening in the active-workflow guard.
   // eslint-disable-next-line @typescript-eslint/require-await
-  async resume(workflowId: WorkflowId): Promise<void> {
+  async resume(workflowId: WorkflowId, options?: { useCurrentBudget?: boolean }): Promise<void> {
     const existing = this.workflows.get(workflowId);
     if (existing && (!existing.finalStatus || !existing.terminalReady)) {
       throw new WorkflowResumeError('WORKFLOW_ALREADY_ACTIVE', `Workflow ${workflowId} is already active`);
@@ -1757,6 +1760,12 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const instance: WorkflowInstance = {
       id: workflowId,
+      // A legacy resume establishes limits for the resumed sessions; it does
+      // not reconstruct the settings used before this checkpoint.
+      resourceBudget:
+        options?.useCurrentBudget || !checkpoint.resourceBudget?.recorded
+          ? resolveWorkflowResourceBudget(definition.settings)
+          : checkpoint.resourceBudget,
       definition,
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,
@@ -1825,9 +1834,20 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
     messageLog.appendRunResumed({
       ...this.logBase(instance),
+      resourceBudget: instance.resourceBudget,
+      ...(!checkpoint.resourceBudget?.recorded ? { originalBudgetUnknown: true } : {}),
+      ...(options?.useCurrentBudget ? { useCurrentBudget: true } : {}),
       ...(checkpointMtimeMs !== undefined ? { checkpointMtimeMs } : {}),
       ...(checkpointFingerprint !== undefined ? { checkpointFingerprint } : {}),
     });
+    // Preserve restore-image references until the next stop can replace and
+    // remove them. The resumed checkpoint clears the previous finalStatus;
+    // the marker's fingerprint above still identifies that stale terminal save.
+    this.saveCheckpoint(
+      instance,
+      restored.actor.getSnapshot() as { value: unknown; context: unknown },
+      checkpoint.containerSnapshots,
+    );
     restored.actor.start();
 
     // XState v5's resolveState() restores *to* a state but does not *enter* it.
@@ -1959,6 +1979,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const ctx = snapshot.context;
 
     return {
+      budget: this.getInstanceBudget(instance),
       definition: instance.definition,
       transitionHistory: [...instance.transitionHistory],
       workspacePath: instance.workspacePath,
@@ -1969,6 +1990,20 @@ export class WorkflowOrchestrator implements WorkflowController {
         totalTokens: ctx.totalTokens,
         visitCounts: { ...ctx.visitCounts },
       },
+    };
+  }
+
+  getBudget(id: WorkflowId): WorkflowBudget | undefined {
+    const instance = this.workflows.get(id);
+    return instance ? this.getInstanceBudget(instance) : undefined;
+  }
+
+  private getInstanceBudget(instance: WorkflowInstance): WorkflowBudget {
+    const session = instance.activeSessions.values().next().value;
+    return {
+      ...instance.resourceBudget,
+      activeSessionCount: instance.activeSessions.size,
+      ...(session ? { usage: workflowBudgetUsage(session.getBudgetStatus()) } : {}),
     };
   }
 
@@ -2050,6 +2085,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       closePromises.push(session.close().catch(() => {}));
     }
     await Promise.allSettled(closePromises);
+    // Closing a borrowed session can leave its turn pending. Preserve the
+    // sampled usage before clearing sessions and writing the terminal checkpoint.
+    instance.resourceBudget = this.getInstanceBudget(instance);
     instance.activeSessions.clear();
 
     instance.actor.stop();
@@ -2295,6 +2333,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   ): WorkflowCheckpoint {
     return {
       machineState: snapshot.value,
+      resourceBudget: this.getInstanceBudget(instance),
       context: snapshot.context as WorkflowContext,
       timestamp: new Date().toISOString(),
       transitionHistory: [...instance.transitionHistory],
@@ -2311,8 +2350,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
-  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
-    const checkpoint = this.buildCheckpoint(instance, snapshot);
+  private saveCheckpoint(
+    instance: WorkflowInstance,
+    snapshot: { value: unknown; context: unknown },
+    containerSnapshots?: Readonly<Record<string, ContainerSnapshotRef>>,
+  ): void {
+    const checkpoint = this.buildCheckpoint(instance, snapshot, undefined, containerSnapshots);
     try {
       this.deps.checkpointStore.save(instance.id, checkpoint);
     } catch (err) {
@@ -2478,9 +2521,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
-        ...(settings.maxSessionSeconds != null
-          ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
-          : {}),
+        resourceBudgetOverrides: instance.resourceBudget.limits,
         // The nested record colocates the borrowed bundle, per-state
         // artifact dir, and workflow-bundled skills. `buildSessionConfig`
         // enforces the borrow-mode invariant (stateDir requires
@@ -2883,6 +2924,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
       throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
+      instance.resourceBudget = { ...instance.resourceBudget, usage: workflowBudgetUsage(session.getBudgetStatus()) };
       instance.activeSessions.delete(session);
       const endedSessionId = session.getInfo().id;
       // Trajectory-capture lifecycle: end the capture session FIRST so

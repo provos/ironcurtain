@@ -62,8 +62,7 @@ export interface PackageIdentity {
  * Binary: allow or deny. No escalation.
  */
 export type PackageDecision =
-  | { readonly status: 'allow'; readonly reason: string }
-  | { readonly status: 'deny'; readonly reason: string };
+  { readonly status: 'allow'; readonly reason: string } | { readonly status: 'deny'; readonly reason: string };
 
 /**
  * Per-version metadata from the registry, focused on the fields

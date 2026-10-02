@@ -19,9 +19,7 @@ export type ProgressCategory = 'full_progress' | 'world_changed' | 'stuck' | 'fu
 export type BlockVerdict = { action: 'block'; message: string; category: ProgressCategory };
 
 export type StepVerdict =
-  | { action: 'allow' }
-  | { action: 'warn'; message: string; category: ProgressCategory }
-  | BlockVerdict;
+  { action: 'allow' } | { action: 'warn'; message: string; category: ProgressCategory } | BlockVerdict;
 
 export interface StepLoopDetectorConfig {
   stagnation: { warn: number; block: number };

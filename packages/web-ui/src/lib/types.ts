@@ -678,6 +678,28 @@ export interface WorkflowContextDto {
   readonly visitCounts: Record<string, number>;
 }
 
+export interface ResourceBudgetConfigDto {
+  readonly maxTotalTokens: number | null;
+  readonly maxSteps: number | null;
+  readonly maxSessionSeconds: number | null;
+  readonly maxEstimatedCostUsd: number | null;
+  readonly warnThresholdPercent: number;
+}
+
+export interface WorkflowBudgetDto {
+  readonly activeSessionCount?: number;
+  readonly limits: ResourceBudgetConfigDto;
+  readonly sources: Record<keyof ResourceBudgetConfigDto, 'workflow' | 'global' | 'default'>;
+  readonly recorded: boolean;
+  readonly usage?: {
+    readonly totalTokens: number;
+    readonly stepCount: number;
+    readonly elapsedSeconds: number;
+    readonly estimatedCostUsd: number;
+    readonly tokenTrackingAvailable: boolean;
+  };
+}
+
 /**
  * Full detail returned by `workflows.get`.
  *
@@ -687,6 +709,7 @@ export interface WorkflowContextDto {
  * `LiveWorkflowPhase` value; only the disk-fallback path can emit `'interrupted'`.
  */
 export type WorkflowDetailDto = WorkflowCardDto & {
+  readonly budget?: WorkflowBudgetDto;
   readonly startedAt: string;
   readonly description: string;
   readonly stateGraph: StateGraphDto;
@@ -727,11 +750,7 @@ export interface AgentReceivedEntry extends MessageLogBaseEntry {
 }
 
 export type AgentRetryReason =
-  | 'missing_status_block'
-  | 'malformed_status_block'
-  | 'missing_artifacts'
-  | 'invalid_verdict'
-  | 'upstream_stall';
+  'missing_status_block' | 'malformed_status_block' | 'missing_artifacts' | 'invalid_verdict' | 'upstream_stall';
 
 export interface AgentRetryEntry extends MessageLogBaseEntry {
   readonly type: 'agent_retry';

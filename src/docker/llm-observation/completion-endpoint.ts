@@ -1,10 +1,7 @@
 /** Generic completion routing descriptors shared by proxy observers. */
 
 export type BuiltInLlmProtocol =
-  | 'anthropic-messages'
-  | 'openai-responses'
-  | 'openai-chat-completions'
-  | 'google-generate-content';
+  'anthropic-messages' | 'openai-responses' | 'openai-chat-completions' | 'google-generate-content';
 
 export type LlmProtocolId = BuiltInLlmProtocol | (string & {});
 export type CompletionMetricsSupport = 'full' | 'partial' | 'unsupported';

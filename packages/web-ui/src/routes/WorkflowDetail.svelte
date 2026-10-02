@@ -1,9 +1,16 @@
 <script lang="ts">
-  import type { WorkflowDetailDto, WorkflowSummaryDto, HumanGateRequestDto, MessageLogEntry } from '$lib/types.js';
+  import type {
+    WorkflowDetailDto,
+    WorkflowSummaryDto,
+    HumanGateRequestDto,
+    MessageLogEntry,
+    WorkflowBudgetDto,
+  } from '$lib/types.js';
   import {
     appState,
     connectionGeneration,
     getWorkflowDetail,
+    getWorkflowBudget,
     resolveWorkflowGate,
     getWorkflowFileTree,
     getWorkflowFileContent,
@@ -19,6 +26,7 @@
   import { Card, CardHeader, CardTitle, CardContent } from '$lib/components/ui/card/index.js';
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Spinner } from '$lib/components/ui/spinner/index.js';
+  import ResourceBudgetPanel from '$lib/components/features/resource-budget-panel.svelte';
   import StateMachineGraph from '$lib/components/features/state-machine-graph.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
@@ -49,6 +57,8 @@
   let detail = $state<WorkflowDetailDto | null>(null);
   let loading = $state(true);
   let error = $state('');
+  let budget = $state<WorkflowBudgetDto | null>(null);
+  let budgetError = $state('');
   // When the daemon returns WORKFLOW_CORRUPTED we render a dedicated panel
   // instead of the generic destructive-banner so the operator can see the
   // exact corruption cause without parsing the message string.
@@ -81,41 +91,55 @@
 
   $effect(() => {
     const id = workflowId;
-    // Re-fetch detail whenever the workflow's state or phase changes.
-    // These fields are updated by workflow.state_entered / workflow.completed / etc.
-    // events via the event handler, which triggers a fresh getWorkflowDetail() call
-    // so the transition history, context, and gate stay up-to-date.
+    const running = summary.phase === 'running';
+    // State/phase events and reconnects refresh full detail, including its budget.
     void summary.currentState;
-    void summary.phase;
-    // Force re-fetch on WebSocket reconnect so we pick up any missed events.
     void connectionGeneration.value;
     const version = ++fetchVersion;
-    // Only show the loading spinner on the initial fetch, not on re-fetches.
-    // Use the version counter instead of reading `detail` to avoid making it
-    // a reactive dependency of this $effect (which would cause a re-fetch loop).
-    if (version === 1) {
-      loading = true;
-    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (version === 1) loading = true;
     error = '';
     corruptionMessage = '';
+    budget = null;
+    budgetError = '';
+
+    function scheduleBudgetRefresh(): void {
+      if (!cancelled && running) timer = setTimeout(() => void refreshBudget(), 5000);
+    }
+
+    async function refreshBudget(): Promise<void> {
+      try {
+        const result = await getWorkflowBudget(id);
+        if (!cancelled) {
+          budget = result;
+          budgetError = '';
+        }
+      } catch (err) {
+        if (!cancelled)
+          budgetError = `Resource limits unavailable: ${err instanceof Error ? err.message : String(err)}`;
+      } finally {
+        scheduleBudgetRefresh();
+      }
+    }
 
     getWorkflowDetail(id)
       .then((d) => {
-        if (version === fetchVersion) {
-          detail = d;
-          loading = false;
-
-          // Seed gate into pendingGates so the parent's selectedGate derivation picks it up
-          if (d.gate) {
-            appState.pendingGates = new Map(appState.pendingGates).set(d.gate.gateId, d.gate);
-          }
+        if (cancelled || version !== fetchVersion) return;
+        detail = d;
+        loading = false;
+        if (d.budget) {
+          budget = d.budget;
+          scheduleBudgetRefresh();
+        } else {
+          // Older detail responses lack a budget. Fetch it independently without
+          // making an unavailable budget hide the rest of the workflow.
+          void refreshBudget();
         }
+        if (d.gate) appState.pendingGates = new Map(appState.pendingGates).set(d.gate.gateId, d.gate);
       })
       .catch((err) => {
-        if (version !== fetchVersion) return;
-        // Distinguish WORKFLOW_CORRUPTED from generic RPC failures: the former
-        // gets a dedicated callout panel so the operator sees the corruption
-        // cause without parsing message text.
+        if (cancelled || version !== fetchVersion) return;
         if (err instanceof RpcError && err.code === 'WORKFLOW_CORRUPTED') {
           corruptionMessage = err.message;
           error = '';
@@ -125,6 +149,11 @@
         }
         loading = false;
       });
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   });
 
   // Auto-refresh signal for the workspace browser. It changes whenever the
@@ -237,9 +266,11 @@
 </script>
 
 <div class="p-6 space-y-5 animate-fade-in">
-  <div class="flex items-center gap-3">
-    <Button variant="ghost" size="sm" onclick={onback}>&larr; Back</Button>
-    <h2 class="text-xl font-semibold tracking-tight">{summary.name}</h2>
+  <div class="flex flex-wrap items-center gap-3">
+    <Button variant="ghost" size="sm" class="shrink-0" onclick={onback}>&larr; Back</Button>
+    <h2 class="min-w-0 flex-1 basis-48 sm:flex-none sm:basis-auto break-words text-xl font-semibold tracking-tight">
+      {summary.name}
+    </h2>
     <Badge variant={phaseBadgeVariant(summary.phase)}>{phaseLabel(summary.phase)}</Badge>
     {#if detail?.hasReadme}
       <Button
@@ -253,7 +284,7 @@
         <Info size={15} weight="duotone" class="mr-1" /> README
       </Button>
     {/if}
-    <span class="text-sm text-muted-foreground ml-auto">
+    <span class="w-full sm:w-auto sm:ml-auto break-words text-sm text-muted-foreground">
       State: <span class="font-mono">{summary.currentState}</span>
     </span>
   </div>
@@ -310,6 +341,19 @@
         </CardContent>
       </Card>
     {/if}
+
+    <div data-testid="workflow-budget-detail">
+      {#if budget}
+        <ResourceBudgetPanel {budget} />
+        {#if budgetError}<p role="status" class="mt-2 text-xs text-amber-600">
+            {budgetError}. Showing the last received values.
+          </p>{/if}
+      {:else if budgetError}
+        <Alert variant="default" class="border-amber-500/30 bg-amber-500/5">{budgetError}</Alert>
+      {:else}
+        <p class="text-xs text-muted-foreground">Loading resource limits…</p>
+      {/if}
+    </div>
 
     <Card>
       <CardHeader>

@@ -210,8 +210,8 @@ export function setPersonaConstitution(name: PersonaName, text: string, actor: s
 export function setPersonaMemory(name: PersonaName, enabled: boolean, actor: string): void {
   const persona = loadPersona(name); // throws 'not found' if missing
   // Verbatim destructure-omit from persona-command.ts.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Destructure to omit the optional property.
   const { memory: _omit, ...rest } = persona;
-  void _omit;
   const updated: PersonaDefinition = !enabled ? { ...rest, memory: { enabled: false } } : rest;
   atomicWriteJsonSync(getPersonaDefinitionPath(name), updated);
   policyMutationAuditLog.append(actor, 'setPersonaMemory', name, { enabled });
@@ -275,8 +275,8 @@ export function deletePersona(name: PersonaName, actor: string, opts: DeletePers
 export function setPersonaBroadPolicyOptIn(name: PersonaName, enabled: boolean, actor: string): PersonaDetailDto {
   const persona = loadPersona(name); // throws 'not found' if missing
   // Drop the key when disabling (default-off semantics, exactOptionalPropertyTypes).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Destructure to omit the optional property.
   const { allowBroadPolicy: _omit, ...rest } = persona;
-  void _omit;
   const updated: PersonaDefinition = enabled ? { ...rest, allowBroadPolicy: true } : rest;
   atomicWriteJsonSync(getPersonaDefinitionPath(name), updated);
   policyMutationAuditLog.append(actor, 'setPersonaBroadPolicyOptIn', name, { enabled, broadened: enabled });

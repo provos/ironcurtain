@@ -649,6 +649,8 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       );
       activeOrchestrator = resume;
       await resume.resume(workflowId);
+      expect(checkpointStore.load(workflowId)?.containerSnapshots?.primary.image).toBe(digestA1);
+      expect(checkpointStore.load(workflowId)?.finalStatus).toBeUndefined();
       const start = Date.now();
       while (resumeCreateInfra.mock.calls.length === 0 && Date.now() - start < 2000) {
         await new Promise((r) => setTimeout(r, 10));

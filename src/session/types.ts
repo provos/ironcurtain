@@ -526,11 +526,9 @@ export interface SessionOptions {
   /**
    * Partial overrides for the resolved resource budget config.
    * Applied on top of the global defaults and user config.
-   * Used by workflows to set longer per-turn timeouts.
+   * Workflows use this to apply their saved effective resource limits.
    */
-  resourceBudgetOverrides?: {
-    maxSessionSeconds?: number | null;
-  };
+  resourceBudgetOverrides?: Partial<ResolvedResourceBudgetConfig>;
 
   /**
    * Qualified model ID ("provider:model-name") for this session only.

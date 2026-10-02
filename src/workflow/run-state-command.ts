@@ -19,6 +19,7 @@ import { stageWorkflowSkillsAtStart } from './orchestrator.js';
 import { parseArgsStrict, runCliPreflightLint } from './cli-shared.js';
 import type { AgentStateDefinition, WorkflowContext, WorkflowDefinition, WorkflowStateDefinition } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR, resolveWorkflowSkillsOptions } from './types.js';
+import { resolveWorkflowResourceBudget } from './resource-budget.js';
 
 import {
   createWorkflowSessionFactory,
@@ -445,9 +446,7 @@ export async function runRunState(args: string[]): Promise<void> {
       workspacePath: staged.workspacePath,
       ...(definition.settings?.systemPrompt ? { systemPromptAugmentation: definition.settings.systemPrompt } : {}),
       ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
-      ...(settings.maxSessionSeconds != null
-        ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
-        : {}),
+      resourceBudgetOverrides: resolveWorkflowResourceBudget(settings).limits,
       workflow: {
         stateId: parsed.stateId,
         personaId: stateConfig.persona,

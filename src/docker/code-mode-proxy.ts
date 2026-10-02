@@ -105,10 +105,8 @@ export function createCodeModeProxy(options: CodeModeProxyOptions): DockerProxy 
       await sandbox.initialize(options.config);
 
       // 2. Create the MCP server exposing a single execute_code tool
-      mcpServer = new Server( // eslint-disable-line @typescript-eslint/no-deprecated
-        { name: 'ironcurtain-code-mode', version: VERSION },
-        { capabilities: { tools: {} } },
-      );
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- Low-level API exposes custom request handlers.
+      mcpServer = new Server({ name: 'ironcurtain-code-mode', version: VERSION }, { capabilities: { tools: {} } });
 
       // eslint-disable-next-line @typescript-eslint/require-await -- MCP SDK handler must return Promise
       mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({

@@ -482,10 +482,9 @@ function buildRoundChildDefinition(
     // (strip the fan-out markers, override transitions); the only difference
     // is the discriminated-union narrowing of `member`, so one block covers
     // both once the `type` guard above has run. `_fanOut`/`_segment` are
-    // destructured only to omit them from `rest`; `void` marks them used.
+    // destructured only to omit them from `rest`.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Destructure to omit fan-out markers.
     const { fanOut: _fanOut, segment: _segment, ...rest } = member;
-    void _fanOut;
-    void _segment;
     states[memberId] = { ...rest, transitions };
   }
 
