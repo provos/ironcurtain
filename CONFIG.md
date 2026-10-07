@@ -226,8 +226,6 @@ Configure a web search provider so the agent can search the web via the `web_sea
 - **Tavily**: https://tavily.com/
 - **SerpAPI**: https://serpapi.com/
 
-<a id="model-providers-first-class-openrouter"></a>
-
 ## Model Providers (OpenRouter and Z.AI)
 
 Route Docker agents (Claude Code, Codex, Goose) through named **provider profiles** for OpenRouter or direct Z.AI. Each profile binds credentials and model selection. See [MODEL_ROUTING.md](MODEL_ROUTING.md) for the quickstarts. Edit via `ironcurtain config` → **Model Providers**, or the web UI Settings view.
@@ -361,13 +359,13 @@ API keys can be set via environment variables (preferred) or in the config file.
 | `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`                          | Google AI API key                                                                                               |
 | `OPENAI_API_KEY`               | `openaiApiKey`                          | OpenAI API key                                                                                                  |
 | `ZAI_API_KEY`                  | `modelProviders.profiles.<name>.apiKey` | Z.AI key; fills every Z.AI profile without persisting the environment value |
-| `OPENROUTER_API_KEY`           | `modelProviders.profiles.<name>.apiKey` | OpenRouter key; fills every openrouter profile (see [Model Providers](#model-providers-first-class-openrouter)) |
+| `OPENROUTER_API_KEY`           | `modelProviders.profiles.<name>.apiKey` | OpenRouter key; fills every openrouter profile (see [Model Providers](#model-providers-openrouter-and-zai)) |
 
 In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
 
 ### Routing through a non-Anthropic gateway
 
-For OpenRouter and Z.AI, use the first-class [Model Providers](#model-providers-first-class-openrouter) section above. For other gateways, IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth; run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
+For OpenRouter and Z.AI, use the first-class [Model Providers](#model-providers-openrouter-and-zai) section above. For other gateways, IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth; run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
 
 ```bash
 export ANTHROPIC_API_KEY="<your-litellm-virtual-key>"

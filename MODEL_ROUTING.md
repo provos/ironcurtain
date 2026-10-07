@@ -14,7 +14,7 @@ Host roles can select named Z.AI or OpenRouter profiles through `hostModelProfil
 
 For OpenRouter specifically there is a dedicated, no-external-proxy path: **named provider profiles**. A profile is a _model preset_ — "run this session on GLM", "on Kimi" — that routes a Docker agent (Claude Code, Codex, Goose) straight through `openrouter.ai` with a bound model map and key, **no LiteLLM sidecar**. See [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the full design.
 
-Profiles live in the `modelProviders` section of `~/.ironcurtain/config.json` (see [CONFIG.md](CONFIG.md#model-providers-first-class-openrouter)). An implicit `native` profile — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present and is the fallback.
+Profiles live in the `modelProviders` section of `~/.ironcurtain/config.json` (see [CONFIG.md](CONFIG.md#model-providers-openrouter-and-zai)). An implicit `native` profile — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present and is the fallback.
 
 There are three selection surfaces:
 
