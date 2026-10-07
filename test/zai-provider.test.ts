@@ -6,7 +6,7 @@ import { parse as parseToml } from 'smol-toml';
 import { loadUserConfig, userConfigSchema, HOST_MODEL_ROLES, saveUserConfig } from '../src/config/user-config.js';
 import type { ResolvedZaiProfile, UserConfig } from '../src/config/user-config.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
-import { createLanguageModel, resolveHostModelApiKey } from '../src/config/model-provider.js';
+import { createLanguageModel, resolveHostModelApiKey, resolveHostModelId } from '../src/config/model-provider.js';
 import { autoApprove } from '../src/trusted-process/auto-approver.js';
 import { createClaudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { createCodexAdapter } from '../src/docker/adapters/codex.js';
@@ -311,6 +311,7 @@ describe('named profiles for host roles using the installed SDK', () => {
     const c = config({ hostModelProfiles: { [role]: 'glm' } });
     const model = await createLanguageModel('anthropic:claude-haiku-4-5', c.userConfig, role);
     expect(model.modelId).toBe('glm-5.3-flash');
+    expect(resolveHostModelId('anthropic:claude-haiku-4-5', c.userConfig, role)).toBe(model.modelId);
     expect(model.provider).toBe('zai.chat');
     expect(resolveHostModelApiKey('anthropic:claude-haiku-4-5', c.userConfig, role)).toBe('host-only-zai-key');
   });
@@ -460,6 +461,10 @@ describe('named profiles for host roles using the installed SDK', () => {
     const c = config({ modelProviders: { default: 'glm', profiles: { glm: { type: 'zai' } } } });
     const native = await createLanguageModel('anthropic:claude-haiku-4-5', c.userConfig, 'summary');
     expect(native.provider).toBe('anthropic.messages');
+    for (const hostModelProfiles of [undefined, { summary: 'native' }])
+      expect(resolveHostModelId('anthropic:claude-haiku-4-5', { ...c.userConfig, hostModelProfiles }, 'summary')).toBe(
+        'anthropic:claude-haiku-4-5',
+      );
     await expect(
       createLanguageModel('glm-5.3', { ...c.userConfig, hostModelProfiles: { summary: 'glm' } }, 'summary'),
     ).rejects.toThrow(/No API key.*glm/);

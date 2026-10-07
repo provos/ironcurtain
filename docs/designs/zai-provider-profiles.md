@@ -36,6 +36,8 @@ A test-only compatible definition exercises all three harness config generators 
 
 `hostModelProfiles` optionally binds `agent`, `policy`, `prefilter`, `summary`, and `autoApprove` to registry names. Unbound roles retain native resolution independently of `modelProviders.default`. Existing role model fields remain authoritative inputs to mapping. Both native and gateway-only credential preflights resolve by role.
 
+Builtin agent budget estimates use the effective mapped host model, including session model overrides. The SDK receives the original requested identity, so chained maps still apply once. Pricing uses the existing approximate table and unknown-model fallback; this does not qualify provider/account-plan billing rates.
+
 Z.AI and OpenRouter host models use the installed OpenAI SDK's explicit Chat Completions client. OpenRouter host requests preserve provider preferences, including strict pins and disabled fallback, and use the same default soft Z.AI pin as container requests. Z.AI structured output uses the documented JSON mode: the schema is included in the prompt and AI SDK validation remains in place. An invalid auto-approver response escalates to a human. A binding alone does not enable auto-approval; its default remains disabled.
 
 Unknown profile references fail config validation. A host-bound profile cannot be deleted until reassigned. The web rename operation includes explicit original identity, migrating keys, bindings, and the default in one save. The backend rejects type-changing renames and old-service masks. The editor keeps an existing profile's service fixed.

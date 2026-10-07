@@ -15,7 +15,7 @@
  */
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
-import type { ResolvedUserConfig, HostModelRole } from './user-config.js';
+import type { ResolvedUserConfig, ResolvedProviderProfile, HostModelRole } from './user-config.js';
 import { resolveActiveProfile } from './user-config.js';
 import { getGatewayDefinition, resolveGatewayModel } from './provider-definitions.js';
 import { parseModelId } from './model-id.js';
@@ -50,6 +50,21 @@ async function getProxyFetch(): Promise<typeof globalThis.fetch | undefined> {
   return cachedProxyFetch;
 }
 
+function hostProfile(config: ResolvedUserConfig, role?: HostModelRole) {
+  const name = role === undefined ? undefined : config.hostModelProfiles?.[role];
+  return name === undefined ? undefined : { name, profile: resolveActiveProfile(config.modelProviders, name) };
+}
+
+function modelIdForProfile(qualifiedId: string, profile?: ResolvedProviderProfile): string {
+  // Host roles do not inherit Docker per-agent selections.
+  return profile && profile.type !== 'native' ? resolveGatewayModel(profile, qualifiedId).selected : qualifiedId;
+}
+
+/** Effective identity for host accounting; pass the original request to SDK creation so maps apply once. */
+export function resolveHostModelId(qualifiedId: string, config: ResolvedUserConfig, role: HostModelRole): string {
+  return modelIdForProfile(qualifiedId, hostProfile(config, role)?.profile);
+}
+
 /**
  * Creates a LanguageModel from a qualified model ID and user config.
  *
@@ -65,14 +80,13 @@ export async function createLanguageModel(
   config: ResolvedUserConfig,
   role?: HostModelRole,
 ): Promise<LanguageModelV3> {
-  const profileName = role === undefined ? undefined : config.hostModelProfiles?.[role];
-  if (profileName !== undefined) {
-    const profile = resolveActiveProfile(config.modelProviders, profileName);
+  const binding = hostProfile(config, role);
+  if (binding !== undefined) {
+    const { name: profileName, profile } = binding;
     if (profile.type !== 'native') {
       if (!profile.apiKey) throw new Error(`No API key configured for host model profile "${profileName}".`);
       const definition = getGatewayDefinition(profile.type);
-      // Host roles do not inherit Docker per-agent selections.
-      const model = resolveGatewayModel(profile, qualifiedId).selected;
+      const model = modelIdForProfile(qualifiedId, profile);
       const { createOpenAI } = await import('@ai-sdk/openai');
       const proxyFetch = await getProxyFetch();
       const requestFields = definition.requestFields?.(profile, model)?.body;
@@ -189,8 +203,7 @@ export function resolveApiKeyForProvider(provider: ProviderId, config: ResolvedU
 }
 
 export function resolveHostModelApiKey(qualifiedId: string, config: ResolvedUserConfig, role: HostModelRole): string {
-  const name = config.hostModelProfiles?.[role];
-  const profile = name === undefined ? undefined : resolveActiveProfile(config.modelProviders, name);
+  const profile = hostProfile(config, role)?.profile;
   return profile && profile.type !== 'native'
     ? profile.apiKey
     : resolveApiKeyForProvider(parseModelId(qualifiedId).provider, config);
