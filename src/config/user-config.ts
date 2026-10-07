@@ -12,7 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-id.js';
-import { ZAI_DEFAULT_MODEL } from './zai.js';
+import { ZAI_DEFAULT_MODEL, ZAI_DEFAULT_FLASH_MODEL } from './zai.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 import {
   dockerWorkloadRequestedSchema,
@@ -297,7 +297,8 @@ export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
 /** Codex/Goose `base_url` when routing through OpenRouter. */
 export const OPENROUTER_API_V1 = 'https://openrouter.ai/api/v1';
 /** Default GLM slug used when no per-agent / glob mapping resolves (D2). */
-export const DEFAULT_GLM_SLUG = 'z-ai/glm-5.2';
+export const DEFAULT_GLM_SLUG = `z-ai/${ZAI_DEFAULT_MODEL}`;
+export const DEFAULT_GLM_FLASH_SLUG = `z-ai/${ZAI_DEFAULT_FLASH_MODEL}`;
 
 /** The implicit, always-present profile name. Reserved: users may not define it. */
 export const NATIVE_PROFILE_NAME = 'native';
@@ -310,15 +311,15 @@ export const NATIVE_PROFILE_NAME = 'native';
  */
 export const DEFAULT_MODEL_MAP: readonly { readonly match: string; readonly model: string }[] = [
   { match: '*opus*', model: DEFAULT_GLM_SLUG },
-  { match: '*sonnet*', model: DEFAULT_GLM_SLUG },
-  { match: '*haiku*', model: DEFAULT_GLM_SLUG },
+  { match: '*sonnet*', model: DEFAULT_GLM_FLASH_SLUG },
+  { match: '*haiku*', model: DEFAULT_GLM_FLASH_SLUG },
 ];
 
 /** A single ordered glob→slug mapping rule. First match wins. */
 const modelMapRuleSchema = z.object({
   /** Glob matched (case-insensitively) against the REQUESTED model id. `*` = any run of chars. */
   match: z.string().min(1),
-  /** OpenRouter slug to route to, e.g. "z-ai/glm-5.2". */
+  /** Provider model ID to route to, e.g. "z-ai/glm-5.3-flash". */
   model: z.string().min(1),
 });
 
@@ -1104,7 +1105,11 @@ function resolveModelProviders(config: UserConfig['modelProviders']): ResolvedMo
         apiKey: profile.apiKey ?? '',
         plan: profile.plan ?? 'api',
         model,
-        modelMap: profile.modelMap ?? ['*opus*', '*sonnet*', '*haiku*'].map((match) => ({ match, model })),
+        modelMap: profile.modelMap ?? [
+          { match: '*opus*', model },
+          { match: '*sonnet*', model: ZAI_DEFAULT_FLASH_MODEL },
+          { match: '*haiku*', model: ZAI_DEFAULT_FLASH_MODEL },
+        ],
         usesDefaultMap: profile.modelMap === undefined,
         perAgent: Object.fromEntries(DOCKER_AGENTS.map((agent) => [agent, profile.perAgent?.[agent]])) as Record<
           DockerAgent,

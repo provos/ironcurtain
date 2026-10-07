@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildProviderProfileSnapshots, hasSelectableProfiles } from '../src/mux/provider-profile-snapshot.js';
-import { DEFAULT_GLM_SLUG, DEFAULT_MODEL_MAP } from '../src/config/user-config.js';
+import { DEFAULT_GLM_SLUG, DEFAULT_GLM_FLASH_SLUG, DEFAULT_MODEL_MAP } from '../src/config/user-config.js';
 import type {
   DockerAgent,
   ResolvedModelProvidersConfig,
@@ -65,7 +65,7 @@ describe('buildProviderProfileSnapshots', () => {
       profiles: { native: { type: 'native' }, 'glm-5.2': openrouterProfile() },
     };
     const label = buildProviderProfileSnapshots(registry).find((s) => s.name === 'glm-5.2')?.primaryModelLabel;
-    expect(label).toBe(`${DEFAULT_GLM_SLUG} (OpenRouter)`);
+    expect(label).toBe(`${DEFAULT_GLM_FLASH_SLUG} (OpenRouter)`);
   });
 
   it('perAgent[claude-code] WINS over the model map for the label', () => {

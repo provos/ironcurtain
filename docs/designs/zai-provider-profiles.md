@@ -12,7 +12,7 @@ This change adds Z.AI to the existing named-provider registry and adds independe
 | Codex | Responses | `https://api.z.ai/api/v1` | Custom provider TOML using `env_key`, mounted model catalog, HTTP transport |
 | Goose | Chat Completions | `https://api.z.ai` | `OPENAI_BASE_PATH` is `api/paas/v4/chat/completions` or `api/coding/paas/v4/chat/completions` |
 
-Model resolution is `perAgent override → first map match → requested model` (or the profile default when none is requested). Default map rules map Claude tier names to the profile model; explicit empty maps are preserved. Mapping happens once at client selection. The proxy filters unsupported tools/beta fields without remapping an already selected main model. Pinned Goose 1.26.1 selects `gpt-4o-mini` internally for titles and compaction; the proxy resolves that internal fast request as `perAgent.goose → first map match → profile default`, avoiding unrelated OpenAI-model requests to Z.AI. Batch command overrides and PTY startup selections use the same resolver. Host roles omit the Docker per-agent override.
+Model resolution is `perAgent override → first map match → requested model` (or the profile default when none is requested). The default map sends `*opus*` to the profile model (`glm-5.3` by default) and `*sonnet*` / `*haiku*` to `glm-5.3-flash`. OpenRouter's default map uses the same split with `z-ai/`-prefixed IDs. Explicit maps, including empty maps, and per-agent overrides are preserved. Mapping happens once at client selection. The proxy filters unsupported tools/beta fields without remapping an already selected main model. Pinned Goose 1.26.1 selects `gpt-4o-mini` internally for titles and compaction; the proxy resolves that internal fast request as `perAgent.goose → first map match → profile default`, avoiding unrelated OpenAI-model requests to Z.AI. Batch command overrides and PTY startup selections use the same resolver. Host roles omit the Docker per-agent override.
 
 Z.AI uses an explicit provider host and narrow protocol endpoint allowlists. Container keys are sentinels; only exact sentinel matches select the host credential. Existing agent-owned credential passthrough is preserved. Native shared-root SDK normalization derives `/v1` for Anthropic SDK calls while preserving explicit SDK `/v1` bases and Docker roots. The earlier duplicate managed-header sentinel fix is retained; the custom-model-option prototype is replaced by this provider architecture.
 
@@ -37,6 +37,8 @@ With user authorization, bounded hello-world tests also ran against the actual Z
 | Claude Code 2.1.292 | `glm-5.3` / `glm-5.3` | `glm-5.3`, HTTP 200 | Passed |
 | Codex 0.160.1 | `glm-5.3` / `glm-5.3` | Unverified: capture ended with one aborted exchange and no final record | Passed completion |
 | Goose 1.26.1 | `glm-5.3` / `glm-5.3`; auxiliary `gpt-4o-mini` / `glm-5.3` | `glm-5.3`, HTTP 200 for both requests | Passed |
+
+These live checks explicitly selected `glm-5.3`. They do not qualify the later default Sonnet/Haiku routing to `glm-5.3-flash`; the tier split is covered by configuration, adapter, host-SDK, and OpenRouter wire tests.
 
 Initial attempts encountered Docker `ENOSPC` before provider exchanges. Retried tests used temporary memory-backed home/workspace directories without removing existing Docker resources. An initial isolated Codex setup removed its provider table while disabling MCP; the corrected test retained the generated table and disabled MCP through a CLI override. Real keys remained in host proxy memory, and no production configuration changed.
 

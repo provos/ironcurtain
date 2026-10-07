@@ -27,6 +27,7 @@ import {
   CONTAINER_RUNTIMES,
   NATIVE_PROFILE_NAME,
   DEFAULT_GLM_SLUG,
+  DEFAULT_GLM_FLASH_SLUG,
   maskApiKey,
   cloneProviderPreference,
   type UserConfig,
@@ -39,6 +40,7 @@ import {
   type ContainerRuntimeSetting,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
+import { ZAI_DEFAULT_MODEL, ZAI_DEFAULT_FLASH_MODEL } from './zai.js';
 import {
   listOpenrouterModels,
   catalogEnforces,
@@ -199,7 +201,7 @@ function summarizeOpenrouterProfile(profile: PendingOpenrouterProfile): string {
   return parts.join(', ');
 }
 
-/** Compact rendering of a modelMap for diffs: `*sonnet*->z-ai/glm-5.2; *opus*->…`. */
+/** Compact rendering of a modelMap for diffs: `*sonnet*->z-ai/glm-5.3-flash; *opus*->…`. */
 function formatModelMap(map: readonly { match: string; model: string }[] | undefined): string {
   if (!map) return 'default';
   if (map.length === 0) return 'per-agent only (empty map)';
@@ -1037,7 +1039,7 @@ async function addProfile(resolved: ResolvedUserConfig, pending: UserConfig): Pr
   const profiles = currentProfiles(resolved, pending);
   const name = await p.text({
     message: 'Profile name:',
-    placeholder: 'e.g. glm-5.2',
+    placeholder: 'e.g. glm-5.3',
     validate: (val) => {
       if (!val || val.trim() === '') return 'Name is required';
       if (val === NATIVE_PROFILE_NAME) return `"${NATIVE_PROFILE_NAME}" is a reserved profile name.`;
@@ -1064,8 +1066,8 @@ async function addProfile(resolved: ResolvedUserConfig, pending: UserConfig): Pr
   // Native is implicit and never user-defined.
   p.note(
     'OpenRouter routes Docker agents through openrouter.ai with a bound model map + key.\n' +
-      'Paste an sk-or-v1-... key; defaults map *sonnet*/*opus*/*haiku* -> ' +
-      `${DEFAULT_GLM_SLUG} with a soft z-ai cache pin.`,
+      `Paste an sk-or-v1-... key; defaults map *opus* -> ${DEFAULT_GLM_SLUG}, ` +
+      `*sonnet*/*haiku* -> ${DEFAULT_GLM_FLASH_SLUG} with a soft z-ai cache pin.`,
     'openrouter',
   );
 
@@ -1394,8 +1396,9 @@ async function editModelMap<T extends PendingOpenrouterProfile | PendingZaiProfi
   p.note(
     'Ordered glob -> slug rules; first match wins (matched against the requested model id).\n' +
       'An EMPTY map means "per-agent-only mode": no glob mapping, rely on per-agent overrides.\n' +
-      'Leaving the map unset uses the built-in defaults (*sonnet*/*opus*/*haiku* -> ' +
-      `${DEFAULT_GLM_SLUG}).`,
+      'Leaving the map unset uses the built-in defaults: *opus* -> ' +
+      `${profile.type === 'zai' ? (profile.model ?? ZAI_DEFAULT_MODEL) : DEFAULT_GLM_SLUG}, ` +
+      `*sonnet*/*haiku* -> ${profile.type === 'zai' ? ZAI_DEFAULT_FLASH_MODEL : DEFAULT_GLM_FLASH_SLUG}.`,
     'Model map',
   );
 
@@ -1421,7 +1424,7 @@ async function editModelMap<T extends PendingOpenrouterProfile | PendingZaiProfi
       const model =
         profile.type === 'zai'
           ? await promptZaiModel('Target Z.AI model:', 'glm-5.3', false)
-          : await promptSlug('Target OpenRouter slug (e.g. z-ai/glm-5.2):', { current: '', allowNone: false });
+          : await promptSlug('Target OpenRouter slug (e.g. z-ai/glm-5.3-flash):', { current: '', allowNone: false });
       if (model === undefined) continue;
       rows.push({ match: match as string, model });
     } else if (typeof action === 'string' && action.startsWith('row:')) {

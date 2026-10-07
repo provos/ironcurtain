@@ -4,6 +4,7 @@ import { parseModelId } from './model-id.js';
 
 export const ZAI_HOST = 'api.z.ai';
 export const ZAI_DEFAULT_MODEL = 'glm-5.3';
+export const ZAI_DEFAULT_FLASH_MODEL = 'glm-5.3-flash';
 
 /** Full SDK/client bases, kept separate because the protocols use different roots. */
 export function zaiBaseUrls(plan: ResolvedZaiProfile['plan']) {

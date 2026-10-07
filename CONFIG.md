@@ -240,12 +240,12 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 | `modelProviders.profiles`                           | object  | `{}`                                 | User-named profiles, keyed by name. A profile named `native` is rejected (reserved).                         |
 | `modelProviders.profiles.<name>.type`               | string  | —                                    | Discriminator: `openrouter`, `zai`, or `native`.                                                                     |
 | `modelProviders.profiles.<name>.apiKey`             | string  | —                                    | OpenRouter key (`sk-or-v1-...`). `OPENROUTER_API_KEY` env takes precedence. Sensitive; masked in the editor. |
-| `modelProviders.profiles.<name>.modelMap`           | array   | `*opus/sonnet/haiku* → z-ai/glm-5.2` | Ordered glob→slug rules (first match wins), matched case-insensitively against the requested model.          |
+| `modelProviders.profiles.<name>.modelMap`           | array   | Opus → `z-ai/glm-5.3`; Sonnet/Haiku → `z-ai/glm-5.3-flash` | Ordered glob→slug rules (first match wins), matched case-insensitively against the requested model.          |
 | `modelProviders.profiles.<name>.perAgent`           | object  | —                                    | Per-agent model override (`claude-code`, `goose`, `codex`). Wins over `modelMap` for that agent.             |
 | `modelProviders.profiles.<name>.providerPreference` | object  | soft z-ai pin                        | Cache pinning passthrough (`order` / `only` / `allowFallbacks`). Replaces the D3 default when set.           |
 | `modelProviders.profiles.<name>.sessionAffinity`    | boolean | `true`                               | Inject a stable top-level `session_id` for GLM cache affinity.                                               |
 
-**Defaults (per openrouter profile).** When `modelMap` is omitted it defaults to `DEFAULT_MODEL_MAP`: `*opus*`, `*sonnet*`, and `*haiku*` → `z-ai/glm-5.2`. `sessionAffinity` defaults to `true`. When the mapped slug is `z-ai/*` and `providerPreference` is unset, the MITM injects a soft pin `provider: { order: ["z-ai"] }` for cache affinity. An openrouter profile with just `{ "type": "openrouter", "apiKey": "sk-or-v1-..." }` therefore routes Claude Code to cached GLM-5.2 with no further config.
+**Defaults (per openrouter profile).** When `modelMap` is omitted it defaults to `DEFAULT_MODEL_MAP`: `*opus*` → `z-ai/glm-5.3`, and `*sonnet*` / `*haiku*` → `z-ai/glm-5.3-flash`. `sessionAffinity` defaults to `true`. When the mapped slug is `z-ai/*` and `providerPreference` is unset, the MITM injects a soft pin `provider: { order: ["z-ai"] }` for cache affinity. An openrouter profile with just `{ "type": "openrouter", "apiKey": "sk-or-v1-..." }` therefore supplies both GLM tiers with no further config. Explicit maps and per-agent overrides remain authoritative.
 
 **`OPENROUTER_API_KEY` env.** When set, it fills `apiKey` for **every** openrouter profile and takes precedence over any per-profile config `apiKey` (share one key across profiles). A profile's config `apiKey` is used only when the env var is unset. The env value is applied at resolve time and is **never persisted** to `config.json` — editing `modelProviders` via `ironcurtain config` or the web UI strips it from the write, so the env secret is never baked into the file.
 
@@ -258,17 +258,17 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 ```json
 {
   "modelProviders": {
-    "default": "glm-5.2",
+    "default": "glm-5.3",
     "profiles": {
-      "glm-5.2": {
+      "glm-5.3": {
         "type": "openrouter",
         "apiKey": "sk-or-v1-...",
         "modelMap": [
-          { "match": "*opus*", "model": "z-ai/glm-5.2" },
-          { "match": "*sonnet*", "model": "z-ai/glm-5.2" },
-          { "match": "*haiku*", "model": "z-ai/glm-5.2" }
+          { "match": "*opus*", "model": "z-ai/glm-5.3" },
+          { "match": "*sonnet*", "model": "z-ai/glm-5.3-flash" },
+          { "match": "*haiku*", "model": "z-ai/glm-5.3-flash" }
         ],
-        "perAgent": { "goose": "z-ai/glm-5.2", "codex": "z-ai/glm-5.2" },
+        "perAgent": { "goose": "z-ai/glm-5.3", "codex": "z-ai/glm-5.3" },
         "providerPreference": { "order": ["z-ai"], "allowFallbacks": false },
         "sessionAffinity": true
       },
@@ -281,7 +281,7 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 }
 ```
 
-Here `glm-5.2` is the default; `kimi` shares the env `OPENROUTER_API_KEY` (no per-profile `apiKey`) and uses a strict wildcard map. `native` need not be listed.
+Here `glm-5.3` is the default; `kimi` shares the env `OPENROUTER_API_KEY` (no per-profile `apiKey`) and uses a strict wildcard map. The explicit Goose/Codex overrides select GLM 5.3 regardless of requested tier. `native` need not be listed.
 
 ### Direct Z.AI profiles
 
@@ -302,9 +302,9 @@ Set `ZAI_API_KEY` on the host, then select the profile with `ironcurtain start -
 | Z.AI field | Default | Meaning |
 |---|---|---|
 | `plan` | `api` | `api` selects the standard Chat Completions endpoint; `coding` selects the Coding Plan endpoint. Messages and Responses use their dedicated Z.AI roots. Account access must match the chosen plan. |
-| `model` | `glm-5.3` | Default model for the profile. |
+| `model` | `glm-5.3` | Default when no model is requested; also the default Opus map target. |
 | `apiKey` | absent | Host credential; `ZAI_API_KEY` overrides every Z.AI profile. |
-| `modelMap` | Claude tier globs → `model` | Ordered, case-insensitive model mappings. Explicit `[]` disables mapping. Applied once when selecting the client model; the proxy preserves that selected model. |
+| `modelMap` | Opus → `model`; Sonnet/Haiku → `glm-5.3-flash` | Ordered, case-insensitive model mappings. Explicit `[]` disables mapping. Applied once when selecting the client model; the proxy preserves that selected model. |
 | `perAgent` | absent | Overrides for `claude-code`, `codex`, or `goose`; wins over the model map. |
 
 OpenRouter-specific `providerPreference` and `sessionAffinity` fields do not apply to Z.AI. Codex receives a generated model catalog; Claude Code uses its supported gateway endpoint and tier aliases. `ANTHROPIC_CUSTOM_MODEL_OPTION` is not required.

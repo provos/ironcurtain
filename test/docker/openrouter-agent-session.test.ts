@@ -28,6 +28,7 @@ import { getTokenStreamBus, resetTokenStreamBus } from '../../src/docker/token-s
 import type { TokenStreamEvent } from '../../src/docker/token-stream-types.js';
 import {
   DEFAULT_GLM_SLUG,
+  DEFAULT_GLM_FLASH_SLUG,
   DEFAULT_MODEL_MAP,
   OPENROUTER_BASE_URL,
   OPENROUTER_HOST,
@@ -126,10 +127,10 @@ describe('OpenRouter — Claude Code adapter', () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
     expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1');
 
-    // m2: DEFAULT_MODEL_MAP *sonnet*/*opus*/*haiku* globs all map to the GLM slug.
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(DEFAULT_GLM_SLUG);
+    // Default tier hints preserve the GLM 5.3 / GLM 5.3 Flash split.
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(DEFAULT_GLM_SLUG);
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(DEFAULT_GLM_SLUG);
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
   });
 
   it('buildEnv resolves per-tier hints via perAgent override when set (perAgent WINS over modelMap)', () => {
@@ -303,11 +304,11 @@ describe('OpenRouter — Goose adapter', () => {
 
   it('D2: GOOSE_MODEL falls back to modelMap match against gooseModel when no perAgent', () => {
     // gooseModel default is a claude-sonnet id; the DEFAULT_MODEL_MAP *sonnet*
-    // rule maps it to the GLM slug.
+    // rule maps it to the GLM Flash slug.
     const adapter = createGooseAdapter();
     const config = configWithProfile(openrouterProfile());
     const env = adapter.buildEnv(config, openrouterFakeKeys());
-    expect(env.GOOSE_MODEL).toBe(DEFAULT_GLM_SLUG);
+    expect(env.GOOSE_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
   });
 
   it('D2: GOOSE_MODEL falls back to DEFAULT_GLM_SLUG when no perAgent and no modelMap match', () => {

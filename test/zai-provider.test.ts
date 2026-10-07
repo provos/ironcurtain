@@ -63,6 +63,24 @@ describe('Z.AI provider profiles', () => {
     expect(c.userConfig.autoApprove.enabled).toBe(false);
   });
 
+  it.each([
+    ['claude-opus-4-6', 'glm-5.3'],
+    ['claude-sonnet-4-6', 'glm-5.3-flash'],
+    ['CLAUDE-HAIKU-4-5', 'glm-5.3-flash'],
+  ])('routes the default %s tier to %s', (requested, expected) => {
+    const profile = config().activeProviderProfile as ResolvedZaiProfile;
+    expect(resolveZaiModel(profile, requested)).toBe(expected);
+  });
+
+  it('uses a custom profile model for Opus while retaining Flash for Sonnet and Haiku', () => {
+    const profile = config({ modelProviders: { profiles: { glm: { type: 'zai', model: 'custom-model' } } } })
+      .activeProviderProfile as ResolvedZaiProfile;
+    expect(resolveZaiModel(profile, 'claude-opus-4-6')).toBe('custom-model');
+    expect(resolveZaiModel(profile, 'claude-sonnet-4-6')).toBe('glm-5.3-flash');
+    expect(resolveZaiModel(profile, 'claude-haiku-4-5')).toBe('glm-5.3-flash');
+    expect(resolveZaiModel(profile)).toBe('custom-model');
+  });
+
   it('uses ZAI_API_KEY only for Z.AI profiles and preserves explicit empty maps', () => {
     vi.stubEnv('ZAI_API_KEY', 'env-zai-key');
     const c = config({
@@ -120,6 +138,14 @@ describe('Z.AI provider profiles', () => {
     if (agent === 'goose') {
       expect(env.OPENAI_HOST).toBe('https://api.z.ai');
       expect(env.OPENAI_BASE_PATH).toBe('api/paas/v4/chat/completions');
+      expect(env.GOOSE_MODEL).toBe('glm-5.3-flash');
+    } else {
+      expect(env.IRONCURTAIN_MODEL).toBe('glm-5.3-flash');
+    }
+    if (agent === 'claude-code') {
+      expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('glm-5.3');
+      expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('glm-5.3-flash');
+      expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('glm-5.3-flash');
     }
     const noKey = { ...c, activeProviderProfile: { ...c.activeProviderProfile, apiKey: '' } } as IronCurtainConfig;
     expect(adapter.detectCredential?.(noKey)).toEqual({ kind: 'none' });
@@ -256,7 +282,7 @@ describe('named profiles for host roles using the installed SDK', () => {
   it.each(HOST_MODEL_ROLES)('%s resolves independently of the Docker default', async (role) => {
     const c = config({ hostModelProfiles: { [role]: 'glm' } });
     const model = await createLanguageModel('anthropic:claude-haiku-4-5', c.userConfig, role);
-    expect(model.modelId).toBe('glm-5.3');
+    expect(model.modelId).toBe('glm-5.3-flash');
     expect(model.provider).toBe('zai.chat');
     expect(resolveHostModelApiKey('anthropic:claude-haiku-4-5', c.userConfig, role)).toBe('host-only-zai-key');
   });
@@ -278,7 +304,7 @@ describe('named profiles for host roles using the installed SDK', () => {
       hostModelProfiles: { summary: 'glm' },
     });
     const model = await createLanguageModel('anthropic:claude-haiku-4-5', c.userConfig, 'summary');
-    expect(model.modelId).toBe('z-ai/glm-5.2');
+    expect(model.modelId).toBe('z-ai/glm-5.3-flash');
     expect(model.provider).toBe('openrouter.chat');
   });
 
@@ -305,7 +331,7 @@ describe('named profiles for host roles using the installed SDK', () => {
           JSON.stringify({
             id: 'pinned-chat',
             created: 1,
-            model: 'z-ai/glm-5.2',
+            model: 'z-ai/glm-5.3-flash',
             choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
           }),
           { headers: { 'content-type': 'application/json' } },
@@ -316,7 +342,7 @@ describe('named profiles for host roles using the installed SDK', () => {
     const model = await createLanguageModel(c.userConfig.policyModelId, c.userConfig, 'policy');
     await generateText({ model, prompt: 'Reply OK', maxRetries: 0 });
     expect(body).toMatchObject({
-      model: 'z-ai/glm-5.2',
+      model: 'z-ai/glm-5.3-flash',
       provider: { only: ['approved-provider'], allow_fallbacks: false },
     });
   });
@@ -334,7 +360,7 @@ describe('named profiles for host roles using the installed SDK', () => {
           JSON.stringify({
             id: 'chat-id',
             created: 1,
-            model: 'glm-5.3',
+            model: 'glm-5.3-flash',
             choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 1, completion_tokens: 1 },
           }),
@@ -352,7 +378,7 @@ describe('named profiles for host roles using the installed SDK', () => {
     expect((await autoApprove(context, model)).decision).toBe('approve');
     expect(requests[0]).toMatchObject({
       url: 'https://api.z.ai/api/paas/v4/chat/completions',
-      body: { model: 'glm-5.3', response_format: { type: 'json_object' } },
+      body: { model: 'glm-5.3-flash', response_format: { type: 'json_object' } },
     });
     expect(JSON.stringify(requests[0].body.messages)).toContain('Return JSON matching this schema');
     content = JSON.stringify({ decision: 'invalid' });

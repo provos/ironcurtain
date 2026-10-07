@@ -12,6 +12,7 @@ import {
   USER_CONFIG_DEFAULTS,
   DEFAULT_MODEL_MAP,
   DEFAULT_GLM_SLUG,
+  DEFAULT_GLM_FLASH_SLUG,
 } from '../src/config/user-config.js';
 import type { ResolvedOpenRouterProfile } from '../src/config/user-config.js';
 
@@ -1353,10 +1354,13 @@ describe('resolveActiveProfile (pure resolver)', () => {
     );
   });
 
-  it('DEFAULT_GLM_SLUG is the default map target', () => {
-    // Guards against DEFAULT_MODEL_MAP drifting away from the GLM slug.
-    for (const rule of DEFAULT_MODEL_MAP) {
-      expect(rule.model).toBe(DEFAULT_GLM_SLUG);
-    }
+  it('defaults Opus to GLM 5.3 and Sonnet/Haiku to GLM 5.3 Flash', () => {
+    expect(DEFAULT_GLM_SLUG).toBe('z-ai/glm-5.3');
+    expect(DEFAULT_GLM_FLASH_SLUG).toBe('z-ai/glm-5.3-flash');
+    expect(DEFAULT_MODEL_MAP).toEqual([
+      { match: '*opus*', model: 'z-ai/glm-5.3' },
+      { match: '*sonnet*', model: 'z-ai/glm-5.3-flash' },
+      { match: '*haiku*', model: 'z-ai/glm-5.3-flash' },
+    ]);
   });
 });

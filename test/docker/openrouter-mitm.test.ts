@@ -60,7 +60,7 @@ interface RewriterOverrides {
   sessionAffinity?: boolean;
 }
 
-/** Default GLM model map (matches the resolved DEFAULT_MODEL_MAP shape). */
+/** Explicit legacy GLM map; configured targets remain supported. */
 const GLM_MAP = [
   { match: '*opus*', model: 'z-ai/glm-5.2' },
   { match: '*sonnet*', model: 'z-ai/glm-5.2' },

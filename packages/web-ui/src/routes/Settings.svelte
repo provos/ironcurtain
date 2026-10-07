@@ -796,7 +796,7 @@
     <div class="space-y-4 max-h-[70vh] overflow-y-auto" data-testid="profile-editor">
       <div>
         <label class="text-xs text-muted-foreground" for="pf-name">Profile name</label>
-        <Input id="pf-name" bind:value={editing.name} placeholder="e.g. glm-5.2" data-testid="profile-name" />
+        <Input id="pf-name" bind:value={editing.name} placeholder="e.g. glm-5.3" data-testid="profile-name" />
       </div>
 
       <div>
@@ -890,7 +890,7 @@
                   loading={modelsLoading}
                   error={modelsError}
                   invalid={invalidModelRows.has(i)}
-                  placeholder="z-ai/glm-5.2"
+                  placeholder="z-ai/glm-5.3-flash"
                   testid={`map-model-${i}`}
                 />
               </div>

@@ -45,4 +45,6 @@ export const OPENROUTER_FALLBACK_SLUGS: readonly string[] = [
   'z-ai/glm-4.5',
   'z-ai/glm-4.6',
   'z-ai/glm-5.2',
+  'z-ai/glm-5.3',
+  'z-ai/glm-5.3-flash',
 ];
