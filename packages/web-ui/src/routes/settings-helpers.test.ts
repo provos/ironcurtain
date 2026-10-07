@@ -3,6 +3,7 @@ import type { OpenrouterProfileDto } from '$lib/types.js';
 import {
   toEditable,
   editableToDto,
+  editableZaiToDto,
   parseList,
   blankOpenrouterProfile,
   isDuplicateProfileName,
@@ -304,5 +305,22 @@ describe('isDuplicateProfileName', () => {
 
   it('allows a rename to an unused name', () => {
     expect(isDuplicateProfileName('deepseek', 'kimi', existing)).toBe(false);
+  });
+});
+
+describe('Z.AI profile editor', () => {
+  it('preserves masks, plan, model, per-agent overrides and an explicit empty map', () => {
+    const dto = {
+      type: 'zai' as const,
+      apiKey: MASK,
+      plan: 'coding' as const,
+      model: 'glm-5.3',
+      modelMap: [],
+      perAgent: { goose: 'glm-5.3-flash' },
+    };
+    expect(editableZaiToDto(toEditable(dto))).toEqual(dto);
+  });
+  it('preserves an omitted map instead of pinning defaults', () => {
+    expect(editableZaiToDto(toEditable({ type: 'zai', apiKey: MASK })).modelMap).toBeUndefined();
   });
 });

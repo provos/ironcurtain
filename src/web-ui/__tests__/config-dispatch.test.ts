@@ -23,7 +23,7 @@ import { RpcError, type DockerWorkloadSettingsDto, type GetModelProvidersDto } f
 import { loadUserConfig } from '../../config/user-config.js';
 
 // Env vars that affect config loading; save/restore between tests.
-const ENV_VARS_TO_ISOLATE = ['IRONCURTAIN_HOME', 'OPENROUTER_API_KEY'] as const;
+const ENV_VARS_TO_ISOLATE = ['IRONCURTAIN_HOME', 'OPENROUTER_API_KEY', 'ZAI_API_KEY'] as const;
 
 let testHome: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -620,5 +620,71 @@ describe('config dispatch — routing', () => {
     await expect(configDispatch(makeCtx(false), 'config.bogus', {})).rejects.toMatchObject({
       code: 'METHOD_NOT_FOUND',
     });
+  });
+});
+
+describe('Z.AI provider configuration round trips', () => {
+  it('preserves both profile services and never persists an environment override', async () => {
+    writeConfig({
+      modelProviders: {
+        profiles: {
+          glm: { type: 'zai', apiKey: 'file-zai-key', plan: 'coding', model: 'glm-5.3', modelMap: [] },
+          router: { type: 'openrouter', apiKey: SK_GLM },
+        },
+      },
+    });
+    process.env.ZAI_API_KEY = 'env-only-zai-secret';
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    expect(JSON.stringify(dto)).not.toContain('env-only-zai-secret');
+    await set(ctx, dto as unknown as Record<string, unknown>);
+    const disk = JSON.stringify(readConfig());
+    expect(disk).toContain('file-zai-key');
+    expect(disk).toContain(SK_GLM);
+    expect(disk).not.toContain('env-only-zai-secret');
+  });
+
+  it('renames a Z.AI profile with its masked key, default and host bindings atomically', async () => {
+    writeConfig({
+      modelProviders: { default: 'glm', profiles: { glm: { type: 'zai', apiKey: 'file-zai-key' } } },
+      hostModelProfiles: { autoApprove: 'glm', summary: 'glm' },
+    });
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    await set(ctx, { default: 'glm', profiles: { renamed: dto.profiles.glm }, renameFrom: { renamed: 'glm' } });
+    const disk = readConfig();
+    expect(disk.modelProviders).toMatchObject({
+      default: 'renamed',
+      profiles: { renamed: { type: 'zai', apiKey: 'file-zai-key' } },
+    });
+    expect(disk.hostModelProfiles).toEqual({ autoApprove: 'renamed', summary: 'renamed' });
+    expect(JSON.stringify(disk)).not.toContain('fil...key');
+  });
+
+  it.each(['zai', 'openrouter'] as const)(
+    'preserves %s file keys when renaming under an environment override',
+    async (type) => {
+      writeConfig({ modelProviders: { profiles: { original: { type, apiKey: 'file-origin-key' } } } });
+      process.env[type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'] = 'environment-key';
+      const ctx = makeCtx(true);
+      const dto = await get(ctx);
+      await set(ctx, { profiles: { renamed: dto.profiles.original }, renameFrom: { renamed: 'original' } });
+      expect(JSON.stringify(readConfig())).toContain('file-origin-key');
+      expect(JSON.stringify(readConfig())).not.toContain('environment-key');
+    },
+  );
+
+  it('blocks deleting a bound profile and changing service with the old masked key', async () => {
+    writeConfig({
+      modelProviders: { profiles: { glm: { type: 'zai', apiKey: 'file-zai-key' } } },
+      hostModelProfiles: { autoApprove: 'glm' },
+    });
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    await expect(set(ctx, { profiles: {} })).rejects.toThrow(/used by host role/);
+    await expect(
+      set(ctx, { profiles: { glm: { type: 'openrouter', apiKey: (dto.profiles.glm as { apiKey: string }).apiKey } } }),
+    ).rejects.toThrow(/requires a new API key/);
+    expect(JSON.stringify(readConfig())).toContain('file-zai-key');
   });
 });

@@ -444,7 +444,7 @@ describe('OpenRouter — m5 fail-fast on missing key', () => {
         undefined,
         { providerProfileName: 'glm' },
       ),
-    ).rejects.toThrow(/is OpenRouter but no API key is configured/);
+    ).rejects.toThrow(/openrouter.*no API key configured/);
   });
 });
 

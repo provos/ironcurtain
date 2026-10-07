@@ -1,3 +1,4 @@
+import { ZAI_HOST } from '../config/zai.js';
 import { bindDockerEndpointExec } from './docker-endpoint.js';
 import { DOCKER_AGENT_VOLUME_SHADOW } from './docker-agent-volume-shadow.js';
 import { prepareDockerAgentStartup } from './agent-startup.js';
@@ -1008,10 +1009,10 @@ export async function prepareDockerInfrastructure(
   const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
   const providerProfileId = providerProfileName ?? config.userConfig.modelProviders.default;
   config.activeProviderProfile = activeProfile;
-  if (activeProfile.type === 'openrouter' && activeProfile.apiKey === '') {
+  if (activeProfile.type !== 'native' && activeProfile.apiKey === '') {
     throw new Error(
-      `Provider profile "${providerProfileId}" is OpenRouter but no API key is configured. ` +
-        "Set OPENROUTER_API_KEY or the profile's apiKey in ~/.ironcurtain/config.json.",
+      `Provider profile "${providerProfileId}" (${activeProfile.type}) has no API key configured. ` +
+        `Set ${activeProfile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile's apiKey.`,
     );
   }
 
@@ -1216,7 +1217,8 @@ export async function prepareDockerInfrastructure(
     const packageMode = dockerWorkloadConfig?.enabled === true && dockerWorkloadConfig.networkAccess === 'packages';
     let registries: import('./package-types.js').RegistryConfig[] | undefined;
     let packageValidation:
-      { validator: import('./package-types.js').PackageValidator; auditLogPath: string } | undefined;
+      | { validator: import('./package-types.js').PackageValidator; auditLogPath: string }
+      | undefined;
     let packagePolicy: import('./package-egress-proxy.js').PackageEgressPolicy | undefined;
     if (pkgConfig.enabled) {
       const { createPackageValidator } = await import('./package-validator.js');
@@ -3518,6 +3520,11 @@ export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAcc
     case 'generativelanguage.googleapis.com':
       key = config.userConfig.googleApiKey;
       break;
+    case ZAI_HOST: {
+      const profile = config.activeProviderProfile;
+      key = profile?.type === 'zai' ? profile.apiKey : '';
+      break;
+    }
     case OPENROUTER_HOST: {
       // OpenRouter uses a static bearer key from the stamped active profile
       // (§7.5). The same host serves all three agents, so this single case

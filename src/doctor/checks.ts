@@ -1,3 +1,4 @@
+import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * Diagnostic check functions for `ironcurtain doctor`.
  *
@@ -658,7 +659,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const { provider } = parseModelId(config.agentModelId);
   const label = formatProviderLabel(provider);
   const name = `${label} API round-trip`;
-  const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
+  const apiKey = resolveHostModelApiKey(config.agentModelId, config.userConfig, 'agent');
   if (apiKey.length === 0) {
     if (provider === 'anthropic' && (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth') {
       return {
@@ -677,7 +678,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
     const start = Date.now();
     // Lazy-import the AI SDK so the default doctor run doesn't pay the load cost.
     const { generateText } = await import('ai');
-    const model = await createLanguageModel(config.agentModelId, config.userConfig);
+    const model = await createLanguageModel(config.agentModelId, config.userConfig, 'agent');
     await generateText({
       model,
       prompt: 'Reply with the single word OK.',

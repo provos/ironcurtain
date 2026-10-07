@@ -670,7 +670,15 @@ export interface OpenrouterProfileDto {
 }
 
 /** A single profile DTO (discriminated on `type`). */
-export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
+export interface ZaiProfileDto {
+  readonly type: 'zai';
+  readonly apiKey?: string | null;
+  readonly plan?: 'api' | 'coding';
+  readonly model?: string;
+  readonly modelMap?: readonly ModelMapRuleDto[];
+  readonly perAgent?: Readonly<Record<string, string | undefined>>;
+}
+export type ProfileDto = NativeProfileDto | OpenrouterProfileDto | ZaiProfileDto;
 
 /**
  * Response from `config.getModelProviders`. `default` is the resolved default
@@ -691,6 +699,8 @@ export interface GetModelProvidersDto {
  * accepted-and-dropped (F7); any other value under `native` is rejected.
  */
 export interface SetModelProvidersDto {
+  /** New name to original name for an atomic rename. */
+  readonly renameFrom?: Readonly<Record<string, string>>;
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }

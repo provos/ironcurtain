@@ -226,9 +226,11 @@ Configure a web search provider so the agent can search the web via the `web_sea
 - **Tavily**: https://tavily.com/
 - **SerpAPI**: https://serpapi.com/
 
-## Model Providers (first-class OpenRouter)
+<a id="model-providers-first-class-openrouter"></a>
 
-Route Docker agents (Claude Code, Codex, Goose) through named **provider profiles** — model presets that map an agent to an OpenRouter model with a bound key, no LiteLLM sidecar. See [MODEL_ROUTING.md](MODEL_ROUTING.md#first-class-openrouter) for the quickstart and [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the design. Edit via `ironcurtain config` → **Model Providers**, or the web UI Settings view.
+## Model Providers (OpenRouter and Z.AI)
+
+Route Docker agents (Claude Code, Codex, Goose) through named **provider profiles** for OpenRouter or direct Z.AI. Each profile binds credentials and model selection. See [MODEL_ROUTING.md](MODEL_ROUTING.md) for the quickstarts. Edit via `ironcurtain config` → **Model Providers**, or the web UI Settings view.
 
 An implicit profile named `native` — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present, cannot be redefined or deleted, and is the fallback when no default is set.
 
@@ -236,7 +238,7 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 | --------------------------------------------------- | ------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | `modelProviders.default`                            | string  | `native`                             | Profile used when no per-session choice is made. Must name a configured profile or `native`.                 |
 | `modelProviders.profiles`                           | object  | `{}`                                 | User-named profiles, keyed by name. A profile named `native` is rejected (reserved).                         |
-| `modelProviders.profiles.<name>.type`               | string  | —                                    | Discriminator: `openrouter` or `native`.                                                                     |
+| `modelProviders.profiles.<name>.type`               | string  | —                                    | Discriminator: `openrouter`, `zai`, or `native`.                                                                     |
 | `modelProviders.profiles.<name>.apiKey`             | string  | —                                    | OpenRouter key (`sk-or-v1-...`). `OPENROUTER_API_KEY` env takes precedence. Sensitive; masked in the editor. |
 | `modelProviders.profiles.<name>.modelMap`           | array   | `*opus/sonnet/haiku* → z-ai/glm-5.2` | Ordered glob→slug rules (first match wins), matched case-insensitively against the requested model.          |
 | `modelProviders.profiles.<name>.perAgent`           | object  | —                                    | Per-agent model override (`claude-code`, `goose`, `codex`). Wins over `modelMap` for that agent.             |
@@ -249,7 +251,7 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 
 **`modelMap: []` (per-agent-only mode).** An explicit empty array is preserved (resolution uses `??`, not `||`): the glob never matches, so routing relies on `perAgent` only.
 
-**Reach of `default`.** The global default applies to **all** Docker Agent Mode sessions — interactive (`ironcurtain mux` PTY and batch `ironcurtain start`), daemon/cron jobs, signal-bot sessions, web-UI-spawned sessions, **and workflow orchestrator bundles** (one profile per shared-container run). A **per-session override** exists only where a surface exposes it: `ironcurtain start --provider-profile <name>` and the mux `/new` profile picker. Code Mode (builtin agent) is unaffected — profiles apply only to Docker Agent Mode.
+**Reach of `default`.** The global default applies to **all** Docker Agent Mode sessions — interactive (`ironcurtain mux` PTY and batch `ironcurtain start`), daemon/cron jobs, signal-bot sessions, web-UI-spawned sessions, **and workflow orchestrator bundles** (one profile per shared-container run). A **per-session override** exists only where a surface exposes it: `ironcurtain start --provider-profile <name>` and the mux `/new` profile picker. Builtin and other host roles select profiles separately through `hostModelProfiles`.
 
 **Hard load error on a dangling default.** A hand-edited `default` naming a profile that does not exist is a **hard error at config load** (`modelProviders.default must name a configured profile or "native".`) — it does not silently fall back to `native`. The `ironcurtain config` editor and web UI re-point `default` to `native` in the same write when you delete the profile it named, so they never persist a dangling default.
 
@@ -281,6 +283,58 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 
 Here `glm-5.2` is the default; `kimi` shares the env `OPENROUTER_API_KEY` (no per-profile `apiKey`) and uses a strict wildcard map. `native` need not be listed.
 
+### Direct Z.AI profiles
+
+A `zai` profile connects Claude Code, Codex, and Goose directly to Z.AI with host-side credential swapping. Configure it in `ironcurtain config` → Model Providers or the web Settings provider editor:
+
+```json
+{
+  "modelProviders": {
+    "profiles": {
+      "glm": { "type": "zai", "plan": "api", "model": "glm-5.3" }
+    }
+  }
+}
+```
+
+Set `ZAI_API_KEY` on the host, then select the profile with `ironcurtain start --provider-profile glm --agent claude-code "task"` (or `codex` / `goose`). The global `modelProviders.default` and mux picker also support it. Container credentials are sentinels; the real key stays on the host. Environment keys are never persisted during edits or renames.
+
+| Z.AI field | Default | Meaning |
+|---|---|---|
+| `plan` | `api` | `api` selects the standard Chat Completions endpoint; `coding` selects the Coding Plan endpoint. Messages and Responses use their dedicated Z.AI roots. Account access must match the chosen plan. |
+| `model` | `glm-5.3` | Default model for the profile. |
+| `apiKey` | absent | Host credential; `ZAI_API_KEY` overrides every Z.AI profile. |
+| `modelMap` | Claude tier globs → `model` | Ordered, case-insensitive model mappings. Explicit `[]` disables mapping. Applied once when selecting the client model; the proxy preserves that selected model. |
+| `perAgent` | absent | Overrides for `claude-code`, `codex`, or `goose`; wins over the model map. |
+
+OpenRouter-specific `providerPreference` and `sessionAffinity` fields do not apply to Z.AI. Codex receives a generated model catalog; Claude Code uses its supported gateway endpoint and tier aliases. `ANTHROPIC_CUSTOM_MODEL_OPTION` is not required.
+
+### Named profiles for host model roles
+
+Host models select profiles independently of container profiles. Omitted roles retain native provider resolution, even when a gateway is the default for containers. Model IDs remain configured through the existing model fields.
+
+```json
+{
+  "modelProviders": {
+    "profiles": { "glm": { "type": "zai", "plan": "api", "model": "glm-5.3" } }
+  },
+  "hostModelProfiles": {
+    "agent": "glm",
+    "policy": "glm",
+    "prefilter": "glm",
+    "summary": "glm",
+    "autoApprove": "glm"
+  },
+  "autoApprove": { "enabled": false, "modelId": "glm-5.3" }
+}
+```
+
+Select bindings in `ironcurtain config` → Model Providers → Host model profiles. Roles are `agent` (builtin), `policy`, `prefilter`, `summary` (conversation compaction), and `autoApprove` (both session modes). These bindings support `native`, OpenRouter, and Z.AI profiles. Host roles use the profile's model map, without Docker per-agent overrides. Auto-approval remains disabled by default; a binding alone does not enable it. Model or output failures continue to escalate to a human.
+
+A referenced profile cannot be deleted until its host roles are reassigned. Web profile renames migrate bindings and the default atomically, preserving stored keys. Existing profiles retain their service type; create a new profile to change service. Unknown host-profile references are configuration errors.
+
+See [Z.AI profile design and validation](docs/designs/zai-provider-profiles.md).
+
 ## Server Credentials
 
 Per-server environment variables injected securely at runtime. The proxy strips `SERVER_CREDENTIALS` from the environment before spawning child processes, so credentials never leak to MCP servers that don't need them.
@@ -306,13 +360,14 @@ API keys can be set via environment variables (preferred) or in the config file.
 | `ANTHROPIC_BASE_URL`           | `anthropicBaseUrl`                      | Override the Anthropic upstream endpoint (typically paired with a LiteLLM key)                                  |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`                          | Google AI API key                                                                                               |
 | `OPENAI_API_KEY`               | `openaiApiKey`                          | OpenAI API key                                                                                                  |
+| `ZAI_API_KEY`                  | `modelProviders.profiles.<name>.apiKey` | Z.AI key; fills every Z.AI profile without persisting the environment value |
 | `OPENROUTER_API_KEY`           | `modelProviders.profiles.<name>.apiKey` | OpenRouter key; fills every openrouter profile (see [Model Providers](#model-providers-first-class-openrouter)) |
 
 In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
 
 ### Routing through a non-Anthropic gateway
 
-For OpenRouter, prefer the first-class [Model Providers](#model-providers-first-class-openrouter) section above — no sidecar, prompt caching preserved, accurate cost. For any other gateway, IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth; run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
+For OpenRouter and Z.AI, use the first-class [Model Providers](#model-providers-first-class-openrouter) section above. For other gateways, IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth; run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
 
 ```bash
 export ANTHROPIC_API_KEY="<your-litellm-virtual-key>"

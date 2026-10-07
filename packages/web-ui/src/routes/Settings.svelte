@@ -41,6 +41,7 @@
     blankOpenrouterProfile,
     toEditable,
     editableToDto,
+    editableZaiToDto,
     isDuplicateProfileName,
     validateSlugs,
     blockMessage,
@@ -237,6 +238,7 @@
   function profileSummary(name: string): string {
     const p = registry?.profiles[name];
     if (!p || p.type === 'native') return 'Native providers (Anthropic / OpenAI / ChatGPT)';
+    if (p.type === 'zai') return `${p.model ?? 'glm-5.3'} (Z.AI, ${p.plan ?? 'api'})`;
     const map = p.modelMap;
     const mapPart =
       map === undefined
@@ -281,14 +283,18 @@
 
   // ── Add / edit dialog ────────────────────────────────────────────────────
   function openAdd(): void {
-    editing = { name: '', original: null, profile: blankOpenrouterProfile() };
+    editing = {
+      name: '',
+      original: null,
+      profile: { ...blankOpenrouterProfile(), type: 'openrouter', plan: 'api', model: 'glm-5.3' },
+    };
     resetEditFeedback();
     void loadModels();
   }
 
   function openEdit(name: string): void {
     const p = registry?.profiles[name];
-    if (!p || p.type !== 'openrouter') return;
+    if (!p || p.type === 'native') return;
     editing = { name, original: name, profile: toEditable(p) };
     resetEditFeedback();
     void loadModels();
@@ -333,10 +339,10 @@
     for (const name of openrouterNames) {
       if (name === edit.original) continue; // replaced below
       const existing = registry?.profiles[name];
-      if (existing && existing.type === 'openrouter') out[name] = existing;
+      if (existing && existing.type !== 'native') out[name] = existing;
     }
     // Add/replace the edited profile under its (possibly renamed) name.
-    out[edit.name.trim()] = editableToDto(edit.profile);
+    out[edit.name.trim()] = edit.profile.type === 'zai' ? editableZaiToDto(edit.profile) : editableToDto(edit.profile);
     return out;
   }
 
@@ -358,11 +364,19 @@
       return;
     }
 
+    if (editing.profile.type === 'zai' && !editing.profile.model?.trim()) {
+      saveError = { code: 'INVALID_PARAMS', message: 'Z.AI model is required.' };
+      return;
+    }
+
     // Client-side slug guardrail (a UX aid, not a security boundary — the backend
     // persists whatever it is given). Grandfather slugs already persisted for this
     // profile so a routine edit never traps an untouched, possibly-delisted slug.
     const grandfathered = persistedSlugSet(registryProfileDto(editing.original));
-    const validation = validateSlugs(editing.profile, { slugs: new Set(models), source: modelsSource }, grandfathered);
+    const validation =
+      editing.profile.type === 'zai'
+        ? { blocked: [], warnings: [] }
+        : validateSlugs(editing.profile, { slugs: new Set(models), source: modelsSource }, grandfathered);
     if (validation.blocked.length > 0) {
       saveError = { code: 'INVALID_PARAMS', message: blockMessage(validation.blocked) };
       const rows = new Set<number>();
@@ -387,7 +401,13 @@
       // A rename that drops the current default is handled by the backend (F10);
       // keep the current default selection otherwise.
       const nextDefault = defaultName;
-      applyRegistry(await setModelProviders({ default: nextDefault, profiles }));
+      applyRegistry(
+        await setModelProviders({
+          default: nextDefault,
+          profiles,
+          ...(editing.original && editing.original !== name ? { renameFrom: { [name]: editing.original } } : {}),
+        }),
+      );
       editing = null;
       savedWarning = pendingWarning;
     } catch (err) {
@@ -409,7 +429,7 @@
       for (const name of openrouterNames) {
         if (name === deleteTarget) continue;
         const existing = registry?.profiles[name];
-        if (existing && existing.type === 'openrouter') remaining[name] = existing;
+        if (existing && existing.type !== 'native') remaining[name] = existing;
       }
       // Send the current default; the backend re-points to native if we just
       // deleted the profile it named (F10).
@@ -431,7 +451,7 @@
       const profiles: Record<string, ProfileDto> = {};
       for (const n of openrouterNames) {
         const existing = registry.profiles[n];
-        if (existing && existing.type === 'openrouter') profiles[n] = existing;
+        if (existing && existing.type !== 'native') profiles[n] = existing;
       }
       applyRegistry(await setModelProviders({ default: name, profiles }));
     } catch (err) {
@@ -658,7 +678,8 @@
   <p class="text-sm text-muted-foreground">
     Route Docker agents through a model-provider profile. <span class="font-mono">native</span> keeps today's canonical
     Anthropic / OpenAI / ChatGPT routing; an <span class="font-mono">openrouter</span> profile routes an agent through
-    OpenRouter with a bound model map and key. Pick a default here, or select a profile per session at
+    OpenRouter with a bound model map and key. A Z.AI profile connects directly to Z.AI. Pick a default here, or select
+    a profile per session at
     <span class="font-mono">/new</span> or with <span class="font-mono">--provider-profile</span>.
   </p>
 
@@ -668,6 +689,7 @@
         <span class="block">
           <span class="font-mono text-xs" data-testid="settings-error-code">{saveError.code}</span>
           <span class="block mt-1">{errorAffordance(saveError.code)}</span>
+          <span class="block mt-1">{saveError.message}</span>
         </span>
       </Alert>
     </div>
@@ -778,16 +800,42 @@
       </div>
 
       <div>
+        <label class="text-xs text-muted-foreground" for="pf-type">Provider service</label>
+        <select
+          id="pf-type"
+          class="w-full rounded border bg-background p-2"
+          bind:value={editing.profile.type}
+          disabled={editing.original !== null}
+        >
+          <option value="openrouter">OpenRouter</option>
+          <option value="zai">Z.AI (direct)</option>
+        </select>
+      </div>
+      {#if editing.profile.type === 'zai'}
+        <div>
+          <label class="text-xs text-muted-foreground" for="pf-model">Default Z.AI model</label>
+          <Input id="pf-model" bind:value={editing.profile.model} placeholder="glm-5.3" />
+        </div>
+        <div>
+          <label class="text-xs text-muted-foreground" for="pf-plan">API plan</label>
+          <select id="pf-plan" class="w-full rounded border bg-background p-2" bind:value={editing.profile.plan}>
+            <option value="api">Standard API</option>
+            <option value="coding">Coding Plan</option>
+          </select>
+        </div>
+      {/if}
+      <div>
         <label class="text-xs text-muted-foreground" for="pf-key">API key</label>
         <Input
           id="pf-key"
           bind:value={editing.profile.apiKey}
-          placeholder="sk-or-v1-..."
+          placeholder={editing.profile.type === 'zai' ? 'Z.AI API key' : 'sk-or-v1-...'}
           data-testid="profile-apikey"
         />
         <p class="text-[11px] text-muted-foreground mt-1">
           Leave the masked value untouched to keep the stored key. Clear the field to remove it. Env
-          <span class="font-mono">OPENROUTER_API_KEY</span> overrides this for every profile.
+          <span class="font-mono">{editing.profile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'}</span> overrides
+          keys for profiles of this service.
         </p>
       </div>
 
@@ -837,8 +885,8 @@
               <div class="flex-1">
                 <ModelCombobox
                   bind:value={editing.profile.modelMap[i].model}
-                  {models}
-                  source={modelsSource}
+                  models={editing.profile.type === 'zai' ? [] : models}
+                  source={editing.profile.type === 'zai' ? 'bundled' : modelsSource}
                   loading={modelsLoading}
                   error={modelsError}
                   invalid={invalidModelRows.has(i)}
@@ -869,8 +917,8 @@
               <div class="flex-1">
                 <ModelCombobox
                   bind:value={editing.profile.perAgent[agent]}
-                  {models}
-                  source={modelsSource}
+                  models={editing.profile.type === 'zai' ? [] : models}
+                  source={editing.profile.type === 'zai' ? 'bundled' : modelsSource}
                   loading={modelsLoading}
                   error={modelsError}
                   invalid={invalidAgents.has(agent)}
@@ -883,41 +931,42 @@
         </div>
       </div>
 
-      <div>
-        <p class="text-xs text-muted-foreground mb-1">Provider preference (cache pinning)</p>
-        <div class="space-y-2">
-          <div class="flex items-center gap-2">
-            <span class="text-xs w-16 shrink-0">order</span>
-            <Input
-              bind:value={editing.profile.providerOrder}
-              placeholder="z-ai (comma-separated)"
-              data-testid="provider-order"
-            />
+      {#if editing.profile.type !== 'zai'}
+        <div>
+          <p class="text-xs text-muted-foreground mb-1">Provider preference (cache pinning)</p>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs w-16 shrink-0">order</span>
+              <Input
+                bind:value={editing.profile.providerOrder}
+                placeholder="z-ai (comma-separated)"
+                data-testid="provider-order"
+              />
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs w-16 shrink-0">only</span>
+              <Input
+                bind:value={editing.profile.providerOnly}
+                placeholder="z-ai (comma-separated)"
+                data-testid="provider-only"
+              />
+            </div>
+            <label class="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                bind:checked={editing.profile.allowFallbacks}
+                data-testid="provider-allow-fallbacks"
+              />
+              <span>Allow fallbacks</span>
+            </label>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="text-xs w-16 shrink-0">only</span>
-            <Input
-              bind:value={editing.profile.providerOnly}
-              placeholder="z-ai (comma-separated)"
-              data-testid="provider-only"
-            />
-          </div>
-          <label class="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              bind:checked={editing.profile.allowFallbacks}
-              data-testid="provider-allow-fallbacks"
-            />
-            <span>Allow fallbacks</span>
-          </label>
         </div>
-      </div>
 
-      <label class="flex items-center gap-3 text-sm">
-        <input type="checkbox" bind:checked={editing.profile.sessionAffinity} data-testid="session-affinity" />
-        <span>Session affinity (inject session_id for GLM cache affinity)</span>
-      </label>
-
+        <label class="flex items-center gap-3 text-sm">
+          <input type="checkbox" bind:checked={editing.profile.sessionAffinity} data-testid="session-affinity" />
+          <span>Session affinity (inject session_id for GLM cache affinity)</span>
+        </label>
+      {/if}
       {#if saveError}
         <div data-testid="editor-error">
           <Alert variant="destructive">

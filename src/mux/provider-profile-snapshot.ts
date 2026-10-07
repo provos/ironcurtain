@@ -10,6 +10,7 @@
  * See docs/designs/openrouter-integration.md §9.7 (F5).
  */
 
+import { resolveZaiModel } from '../config/zai.js';
 import { DEFAULT_GLM_SLUG, NATIVE_PROFILE_NAME } from '../config/user-config.js';
 import type { ResolvedModelProvidersConfig } from '../config/user-config.js';
 import { resolveMappedModel } from '../docker/openrouter.js';
@@ -19,7 +20,7 @@ export interface ProviderProfileSnapshot {
   /** Profile name (`'native'` or a configured profile key). */
   readonly name: string;
   /** Discriminant used to choose the render label style. */
-  readonly type: 'native' | 'openrouter';
+  readonly type: 'native' | 'openrouter' | 'zai';
   /**
    * Human-readable primary-model label (e.g. `z-ai/glm-5.2 (OpenRouter)` or
    * `Anthropic / OpenAI / ChatGPT`), computed once when the snapshot is built.
@@ -49,6 +50,15 @@ export function buildProviderProfileSnapshots(modelProviders: ResolvedModelProvi
     const isDefault = name === modelProviders.default;
     if (profile.type === 'native') {
       snapshots.push({ name, type: 'native', primaryModelLabel: NATIVE_LABEL, isDefault });
+      continue;
+    }
+    if (profile.type === 'zai') {
+      snapshots.push({
+        name,
+        type: 'zai',
+        primaryModelLabel: `${resolveZaiModel(profile, undefined, 'claude-code')} (Z.AI, ${profile.plan})`,
+        isDefault,
+      });
       continue;
     }
     const slug =

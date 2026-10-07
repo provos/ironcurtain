@@ -28,6 +28,8 @@ import type { ResolvedUserConfig } from '../../config/user-config.js';
 import { OPENROUTER_BASE_URL, OPENROUTER_HOST } from '../../config/user-config.js';
 import { parseModelId } from '../../config/model-provider.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { makeZaiProvider, zaiCredential } from '../zai.js';
+import { ZAI_HOST, resolveZaiModel, zaiBaseUrls } from '../../config/zai.js';
 import { CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import {
   anthropicProvider,
@@ -211,6 +213,7 @@ exit $STATUS
         readonly sessionId: string;
         readonly firstTurn: boolean;
         readonly modelOverride?: string;
+        readonly providerProfile?: import('../../config/user-config.js').ResolvedProviderProfile;
       },
     ): readonly string[] {
       // `claude -p --continue` in non-interactive print mode does NOT update
@@ -230,7 +233,11 @@ exit $STATUS
         '--append-system-prompt',
         systemPrompt,
       ];
-      const effectiveModelId = options.modelOverride ? parseModelId(options.modelOverride).modelId : modelId;
+      const selected = options.modelOverride ? parseModelId(options.modelOverride).modelId : modelId;
+      const effectiveModelId =
+        options.providerProfile?.type === 'zai'
+          ? resolveZaiModel(options.providerProfile, selected, 'claude-code')
+          : selected;
       if (effectiveModelId) {
         cmd.push('--model', effectiveModelId);
       }
@@ -250,6 +257,7 @@ exit $STATUS
 
     getProviders(config: IronCurtainConfig, authKind?: DockerAuthKind): readonly ProviderConfig[] {
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') return [makeZaiProvider(profile, 'claude-code')];
       if (profile?.type === 'openrouter') {
         // OpenRouter routing: the single bearer-auth provider replaces both
         // the Anthropic API and telemetry providers (and the OAuth pair). No
@@ -270,7 +278,7 @@ exit $STATUS
       // { kind: 'none' } for an empty-key profile (feeds m5), and `undefined`
       // for a native profile — DEFERRING to detectAuthMethod() and preserving
       // today's OAuth+API-key detection byte-for-byte.
-      return openRouterCredential(config);
+      return zaiCredential(config) ?? openRouterCredential(config);
     },
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
@@ -300,6 +308,22 @@ exit $STATUS
       }
 
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') {
+        const fakeKey = fakeKeys.get(ZAI_HOST);
+        if (!fakeKey) throw new Error('No fake key generated for Z.AI');
+        env.ANTHROPIC_BASE_URL = zaiBaseUrls(profile.plan).messages;
+        env.ANTHROPIC_AUTH_TOKEN = fakeKey;
+        env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1';
+        env.IRONCURTAIN_MODEL = resolveZaiModel(profile, config.agentModelId, 'claude-code');
+        for (const tier of ['SONNET', 'OPUS', 'HAIKU']) {
+          env[`ANTHROPIC_DEFAULT_${tier}_MODEL`] = resolveZaiModel(
+            profile,
+            `claude-${tier.toLowerCase()}`,
+            'claude-code',
+          );
+        }
+        return env;
+      }
       if (profile?.type === 'openrouter') {
         // B2c: OpenRouter mode auth-var exclusivity. Claude Code sends its
         // credential as `Authorization: Bearer` ONLY when it comes from

@@ -1,3 +1,4 @@
+import { HOST_MODEL_ROLES } from './user-config.js';
 /**
  * Interactive configuration editor for IronCurtain.
  *
@@ -112,6 +113,7 @@ type PendingModelProviders = NonNullable<UserConfig['modelProviders']>;
 type PendingProfile = NonNullable<PendingModelProviders['profiles']>[string];
 /** The openrouter variant of a pending profile. */
 type PendingOpenrouterProfile = Extract<PendingProfile, { type: 'openrouter' }>;
+type PendingZaiProfile = Extract<PendingProfile, { type: 'zai' }>;
 
 /**
  * The current editor view of the `profiles` record, in input shape (openrouter
@@ -136,6 +138,15 @@ function currentProfiles(resolved: ResolvedUserConfig, pending: UserConfig): Rec
 /** Converts a resolved profile back to its input shape (drops resolution-only defaults where empty). */
 function resolvedProfileToInput(profile: ResolvedProviderProfile): PendingProfile {
   if (profile.type === 'native') return { type: 'native' };
+  if (profile.type === 'zai')
+    return {
+      type: 'zai',
+      ...(profile.apiKey ? { apiKey: profile.apiKey } : {}),
+      plan: profile.plan,
+      model: profile.model,
+      modelMap: profile.usesDefaultMap ? undefined : profile.modelMap.map((r) => ({ ...r })),
+      perAgent: { ...profile.perAgent },
+    };
   const input: PendingOpenrouterProfile = { type: 'openrouter' };
   if (profile.apiKey) input.apiKey = profile.apiKey;
   // A default-tracking profile OMITS `modelMap` so an edit round-trip re-persists
@@ -235,11 +246,12 @@ export function computeDiff(
     'dockerResources',
     'snapshot',
     'statistics',
+    'hostModelProfiles',
   ] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;
-    const resolvedSection = resolved[section] as Record<string, unknown>;
+    const resolvedSection = (resolved[section] ?? {}) as Record<string, unknown>;
     for (const [subKey, subValue] of Object.entries(pendingSection)) {
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: runtime data from spread objects
       if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
@@ -383,6 +395,12 @@ function diffOneProfile(
   if (JSON.stringify(before.perAgent) !== JSON.stringify(after.perAgent)) {
     diffs.push([`${prefix}.perAgent`, { from: before.perAgent ?? {}, to: after.perAgent ?? {} }]);
   }
+  if (before.type === 'zai' && after.type === 'zai') {
+    for (const key of ['model', 'plan'] as const)
+      if (before[key] !== after[key]) diffs.push([`${prefix}.${key}`, { from: before[key], to: after[key] }]);
+    return;
+  }
+  if (before.type !== 'openrouter' || after.type !== 'openrouter') return;
   if (JSON.stringify(before.providerPreference) !== JSON.stringify(after.providerPreference)) {
     diffs.push([
       `${prefix}.providerPreference`,
@@ -974,13 +992,23 @@ async function handleModelProviders(resolved: ResolvedUserConfig, pending: UserC
       },
     ];
     for (const [name, profile] of Object.entries(profiles)) {
-      const summary = profile.type === 'openrouter' ? summarizeOpenrouterProfile(profile) : 'native';
+      const summary =
+        profile.type === 'openrouter'
+          ? summarizeOpenrouterProfile(profile)
+          : profile.type === 'zai'
+            ? `${profile.model ?? 'glm-5.3'} (${profile.plan ?? 'api'}), key: ${maskApiKey(profile.apiKey)}`
+            : 'native';
       options.push({
         value: `profile:${name}`,
         label: name,
         hint: `${profile.type}, ${summary}${name === defaultName ? ' (default)' : ''}`,
       });
     }
+    options.push({
+      value: 'hostModels',
+      label: 'Host model profiles',
+      hint: 'Agent, policy, pre-filter, summary, auto-approver',
+    });
     options.push({ value: 'add', label: 'Add profile...' });
     options.push({ value: 'default', label: 'Set default', hint: defaultName });
     options.push({ value: 'back', label: 'Back' });
@@ -988,7 +1016,9 @@ async function handleModelProviders(resolved: ResolvedUserConfig, pending: UserC
     const action = await p.select({ message: 'Model Providers', options });
     if (isCancelled(action) || action === 'back') return;
 
-    if (action === 'add') {
+    if (action === 'hostModels') {
+      await editHostModelProfiles(resolved, pending);
+    } else if (action === 'add') {
       await addProfile(resolved, pending);
     } else if (action === 'default') {
       await setDefaultProfile(resolved, pending);
@@ -1017,7 +1047,21 @@ async function addProfile(resolved: ResolvedUserConfig, pending: UserConfig): Pr
   });
   if (isCancelled(name)) return;
 
-  // v1 supports only the 'openrouter' type; native is implicit and never user-defined.
+  const type = await p.select({
+    message: 'Provider service:',
+    options: [
+      { value: 'openrouter', label: 'OpenRouter' },
+      { value: 'zai', label: 'Z.AI (direct)' },
+    ],
+  });
+  if (isCancelled(type)) return;
+  if (type === 'zai') {
+    profiles[name as string] = { type: 'zai' };
+    commitModelProviders(pending, profiles, currentDefault(resolved, pending));
+    await editProfile(resolved, pending, name as string);
+    return;
+  }
+  // Native is implicit and never user-defined.
   p.note(
     'OpenRouter routes Docker agents through openrouter.ai with a bound model map + key.\n' +
       'Paste an sk-or-v1-... key; defaults map *sonnet*/*opus*/*haiku* -> ' +
@@ -1072,6 +1116,10 @@ async function editProfile(resolved: ResolvedUserConfig, pending: UserConfig, na
     const profiles = currentProfiles(resolved, pending);
     if (!(name in profiles)) return;
     const profile = profiles[name];
+    if (profile.type === 'zai') {
+      await editZaiProfile(resolved, pending, name, profile);
+      return;
+    }
     if (profile.type !== 'openrouter') return;
 
     const field = await p.select({
@@ -1097,6 +1145,15 @@ async function editProfile(resolved: ResolvedUserConfig, pending: UserConfig, na
     if (isCancelled(field) || field === 'back') return;
 
     if (field === 'delete') {
+      const bound = Object.entries({ ...resolved.hostModelProfiles, ...pending.hostModelProfiles })
+        .filter(([, profile]) => profile === name)
+        .map(([role]) => role);
+      if (bound.length) {
+        p.note(
+          `Profile is used by host roles: ${bound.join(', ')}. Select another profile under Host model profiles before deleting it.`,
+        );
+        continue;
+      }
       const confirmed = await p.confirm({ message: `Delete profile "${name}"?`, initialValue: false });
       if (isCancelled(confirmed) || !confirmed) continue;
       const remaining = omitKey(profiles, name);
@@ -1143,6 +1200,104 @@ async function editProfileField(
     return { ...profile, sessionAffinity: enabled as boolean };
   }
   return undefined;
+}
+
+async function promptZaiModel(message: string, current: string, clearable: boolean): Promise<string | undefined> {
+  const value = await p.text({
+    message,
+    initialValue: current,
+    validate: (value) => (!clearable && !value?.trim() ? 'Model is required' : undefined),
+  });
+  return isCancelled(value) ? undefined : (value as string).trim();
+}
+
+async function editZaiProfile(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  name: string,
+  initial: PendingZaiProfile,
+): Promise<void> {
+  let profile = initial;
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop
+  while (true) {
+    const field = await p.select({
+      message: `Z.AI profile: ${name}`,
+      options: [
+        { value: 'model', label: 'Default model', hint: profile.model ?? 'glm-5.3' },
+        { value: 'plan', label: 'API plan', hint: profile.plan ?? 'api' },
+        { value: 'apiKey', label: 'API key', hint: maskApiKey(profile.apiKey) },
+        { value: 'modelMap', label: 'Model map', hint: formatModelMap(profile.modelMap) },
+        { value: 'perAgent', label: 'Per-agent model overrides' },
+        { value: 'delete', label: 'Delete profile' },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+    if (field === 'delete') {
+      const bound = Object.entries({ ...resolved.hostModelProfiles, ...pending.hostModelProfiles })
+        .filter(([, profile]) => profile === name)
+        .map(([role]) => role);
+      if (bound.length) {
+        p.note(
+          `Profile is used by host roles: ${bound.join(', ')}. Select another profile under Host model profiles before deleting it.`,
+        );
+        continue;
+      }
+      const confirmed = await p.confirm({ message: `Delete profile "${name}"?`, initialValue: false });
+      if (isCancelled(confirmed) || !confirmed) continue;
+      const remaining = omitKey(currentProfiles(resolved, pending), name);
+      commitModelProviders(
+        pending,
+        remaining,
+        repointDefaultAfterDelete(currentDefault(resolved, pending), Object.keys(remaining)),
+      );
+      return;
+    }
+    if (field === 'model') {
+      const model = await promptZaiModel('Z.AI model:', profile.model ?? 'glm-5.3', false);
+      if (model !== undefined) profile = { ...profile, model };
+    } else if (field === 'plan') {
+      const plan = await p.select({
+        message: 'Z.AI API plan:',
+        initialValue: profile.plan ?? 'api',
+        options: [
+          { value: 'api', label: 'Standard API' },
+          { value: 'coding', label: 'Coding Plan' },
+        ],
+      });
+      if (!isCancelled(plan)) profile = { ...profile, plan: plan as 'api' | 'coding' };
+    } else if (field === 'apiKey') {
+      const apiKey = await p.text({ message: 'Z.AI API key (blank to use ZAI_API_KEY):' });
+      if (!isCancelled(apiKey)) profile = { ...profile, apiKey: (apiKey as string).trim() || undefined };
+    } else if (field === 'modelMap') profile = (await editModelMap(profile)) ?? profile;
+    else if (field === 'perAgent') profile = (await editPerAgent(profile)) ?? profile;
+    const profiles = currentProfiles(resolved, pending);
+    profiles[name] = profile;
+    commitModelProviders(pending, profiles, currentDefault(resolved, pending));
+  }
+}
+
+async function editHostModelProfiles(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop
+  while (true) {
+    const bindings = { ...resolved.hostModelProfiles, ...pending.hostModelProfiles };
+    const role = await p.select({
+      message: 'Host model profiles (independent of Docker agents):',
+      options: [
+        ...HOST_MODEL_ROLES.map((role) => ({ value: role, label: role, hint: bindings[role] ?? 'native' })),
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(role) || role === 'back') return;
+    const selected = await p.select({
+      message: `Provider for ${String(role)}:`,
+      options: [
+        { value: 'native', label: 'native' },
+        ...Object.keys(currentProfiles(resolved, pending)).map((name) => ({ value: name, label: name })),
+      ],
+    });
+    if (!isCancelled(selected)) pending.hostModelProfiles = { ...bindings, [role as string]: selected as string };
+  }
 }
 
 // ─── Slug autocomplete (OpenRouter model catalog) ────────────
@@ -1232,7 +1387,9 @@ async function promptSlug(message: string, opts: { current: string; allowNone: b
   return (typed as string).trim();
 }
 
-async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
+async function editModelMap<T extends PendingOpenrouterProfile | PendingZaiProfile>(
+  profile: T,
+): Promise<T | undefined> {
   const rows = [...(profile.modelMap ?? [])];
   p.note(
     'Ordered glob -> slug rules; first match wins (matched against the requested model id).\n' +
@@ -1261,10 +1418,10 @@ async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingO
         validate: (val) => (!val ? 'Match glob is required' : undefined),
       });
       if (isCancelled(match)) continue;
-      const model = await promptSlug('Target OpenRouter slug (e.g. z-ai/glm-5.2):', {
-        current: '',
-        allowNone: false,
-      });
+      const model =
+        profile.type === 'zai'
+          ? await promptZaiModel('Target Z.AI model:', 'glm-5.3', false)
+          : await promptSlug('Target OpenRouter slug (e.g. z-ai/glm-5.2):', { current: '', allowNone: false });
       if (model === undefined) continue;
       rows.push({ match: match as string, model });
     } else if (typeof action === 'string' && action.startsWith('row:')) {
@@ -1276,7 +1433,9 @@ async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingO
   return { ...profile, modelMap: rows };
 }
 
-async function editPerAgent(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
+async function editPerAgent<T extends PendingOpenrouterProfile | PendingZaiProfile>(
+  profile: T,
+): Promise<T | undefined> {
   let perAgent: Record<string, string> = { ...(profile.perAgent ?? {}) };
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
@@ -1294,16 +1453,19 @@ async function editPerAgent(profile: PendingOpenrouterProfile): Promise<PendingO
     if (isCancelled(selected) || selected === 'back') break;
 
     const agent = selected as DockerAgent;
-    const slug = await promptSlug(`${DOCKER_AGENT_LABELS[agent]} model slug (blank to clear):`, {
-      current: perAgent[agent] ?? '',
-      allowNone: true,
-    });
+    const slug =
+      profile.type === 'zai'
+        ? await promptZaiModel(`${DOCKER_AGENT_LABELS[agent]} model (blank to clear):`, perAgent[agent] ?? '', true)
+        : await promptSlug(`${DOCKER_AGENT_LABELS[agent]} model slug (blank to clear):`, {
+            current: perAgent[agent] ?? '',
+            allowNone: true,
+          });
     if (slug === undefined) continue;
     if (slug) perAgent[agent] = slug;
     else perAgent = omitKey(perAgent, agent);
   }
 
-  const next: PendingOpenrouterProfile = { ...profile };
+  const next = { ...profile };
   if (Object.keys(perAgent).length > 0) next.perAgent = perAgent;
   else delete next.perAgent;
   return next;

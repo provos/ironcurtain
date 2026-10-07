@@ -1,3 +1,4 @@
+import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * src/persona/persona-compile-orchestrator.ts
  *
@@ -39,7 +40,7 @@ import { policyMutationAuditLog } from './policy-mutation-audit.js';
 // static VALUE import of it does not violate the import boundary (the boundary
 // forbids reaching pipeline-runner.ts / pipeline-shared.ts VALUES).
 import { loadUserConfig } from '../config/user-config.js';
-import { parseModelId, PROVIDER_ENV_VARS, resolveApiKeyForProvider } from '../config/model-provider.js';
+import { parseModelId, PROVIDER_ENV_VARS } from '../config/model-provider.js';
 import type { ErrorCode, PersonaCompileOperationDto, PersonaCompileResultDto } from '../web-ui/web-ui-types.js';
 import type { WebEventBus } from '../web-ui/web-event-bus.js';
 // Type-only pipeline imports — no runtime edge. The VALUE edge to the pipeline
@@ -424,10 +425,13 @@ export class PersonaCompileOrchestrator {
   private credentialPreflight(): void {
     const config = loadUserConfig({ readOnly: true });
     const missing = new Set<string>();
-    for (const modelId of [config.policyModelId, config.prefilterModelId]) {
+    for (const [role, modelId] of [
+      ['policy', config.policyModelId],
+      ['prefilter', config.prefilterModelId],
+    ] as const) {
       const { provider } = parseModelId(modelId);
-      const key = resolveApiKeyForProvider(provider, config);
-      if (!key) missing.add(PROVIDER_ENV_VARS[provider]);
+      const key = resolveHostModelApiKey(modelId, config, role);
+      if (!key) missing.add(config.hostModelProfiles?.[role] ?? PROVIDER_ENV_VARS[provider]);
     }
     if (missing.size > 0) {
       throw new CompileOrchestratorError(

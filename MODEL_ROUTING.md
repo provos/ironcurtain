@@ -2,6 +2,12 @@
 
 IronCurtain supports redirecting LLM API traffic to a custom upstream — an OpenAI-compatible gateway like [LiteLLM](https://docs.litellm.ai/) fronting [OpenRouter](https://openrouter.ai/), a regional Anthropic endpoint, or a corporate proxy. The same configuration works in both Code Mode and Docker Agent Mode.
 
+## First-class Z.AI
+
+Named `zai` profiles route directly to the protocol supported by each harness: Anthropic Messages for Claude Code, OpenAI Responses for Codex, and Chat Completions for Goose. Profiles define the API plan, default model, optional ordered model map, and per-agent overrides. Credentials remain host-side. [Configuration and host model roles](CONFIG.md#direct-zai-profiles) describes setup; [design and validation](docs/designs/zai-provider-profiles.md) records the compatibility contract.
+
+Host roles can select named Z.AI or OpenRouter profiles through `hostModelProfiles` independently of the container's active profile. Auto-approval remains optional and disabled by default.
+
 ## First-class OpenRouter
 
 For OpenRouter specifically there is a dedicated, no-external-proxy path: **named provider profiles**. A profile is a _model preset_ — "run this session on GLM", "on Kimi" — that routes a Docker agent (Claude Code, Codex, Goose) straight through `openrouter.ai` with a bound model map and key, **no LiteLLM sidecar**. See [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the full design.

@@ -337,6 +337,7 @@ export class DockerAgentSession implements Session {
         sessionId: this.agentConversationId,
         firstTurn: !this.firstTurnComplete,
         modelOverride: this.agentModelOverride,
+        providerProfile: this.config.activeProviderProfile,
       });
       // Gated on `skillsMount` so adapters don't pass flags pointing at
       // a path that isn't bind-mounted into this session.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parseModelId, createLanguageModel } from '../src/config/model-provider.js';
+import { parseModelId, createLanguageModel, createLanguageModelFromEnv } from '../src/config/model-provider.js';
 import type { ResolvedUserConfig } from '../src/config/user-config.js';
 
 // Mock all provider packages so tests don't need real API keys
@@ -165,12 +165,40 @@ describe('createLanguageModel', () => {
     expect(model).toHaveProperty('modelId', 'mistral:model');
   });
 
-  it('passes baseURL to Anthropic provider when configured', async () => {
+  it('derives the SDK v1 base from an Anthropic API root override', async () => {
     const config = createTestUserConfig({ anthropicBaseUrl: 'https://gateway.example.com' });
     await createLanguageModel('anthropic:claude-sonnet-4-6', config);
 
     const { createAnthropic } = await import('@ai-sdk/anthropic');
-    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: 'https://gateway.example.com' }));
+    expect(createAnthropic).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://gateway.example.com/v1' }),
+    );
+  });
+
+  it.each([
+    ['https://gateway.example.com/api/anthropic', 'https://gateway.example.com/api/anthropic/v1'],
+    ['https://gateway.example.com/api/anthropic/', 'https://gateway.example.com/api/anthropic/v1'],
+    ['https://gateway.example.com/api/anthropic/v1', 'https://gateway.example.com/api/anthropic/v1'],
+    ['https://gateway.example.com/api/anthropic/v1/', 'https://gateway.example.com/api/anthropic/v1'],
+  ])('normalizes Anthropic gateway base %s without duplicating v1', async (input, expected) => {
+    await createLanguageModel('anthropic:glm-5.3', createTestUserConfig({ anthropicBaseUrl: input }));
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: expected }));
+  });
+
+  it('normalizes the environment-only Anthropic base for the exported helper', async () => {
+    const previous = process.env.ANTHROPIC_BASE_URL;
+    process.env.ANTHROPIC_BASE_URL = 'https://gateway.example.com/api/anthropic';
+    try {
+      await createLanguageModelFromEnv('anthropic:glm-5.3', 'test-key');
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
+      expect(createAnthropic).toHaveBeenCalledWith(
+        expect.objectContaining({ baseURL: 'https://gateway.example.com/api/anthropic/v1' }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ANTHROPIC_BASE_URL;
+      else process.env.ANTHROPIC_BASE_URL = previous;
+    }
   });
 
   it('passes baseURL to Google provider when configured', async () => {

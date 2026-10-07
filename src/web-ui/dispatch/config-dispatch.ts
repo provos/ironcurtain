@@ -87,10 +87,25 @@ const openrouterProfileDtoSchema = z
   })
   .strict();
 
-const profileDtoSchema = z.discriminatedUnion('type', [nativeProfileDtoSchema, openrouterProfileDtoSchema]);
+const zaiProfileDtoSchema = z
+  .object({
+    type: z.literal('zai'),
+    apiKey: z.string().nullable().optional(),
+    plan: z.enum(['api', 'coding']).optional(),
+    model: z.string().min(1).optional(),
+    modelMap: z.array(modelMapRuleDtoSchema).optional(),
+    perAgent: openrouterProfileDtoSchema.shape.perAgent,
+  })
+  .strict();
+const profileDtoSchema = z.discriminatedUnion('type', [
+  nativeProfileDtoSchema,
+  openrouterProfileDtoSchema,
+  zaiProfileDtoSchema,
+]);
 
 const setModelProvidersSchema = z.object({
   default: z.string().min(1).optional(),
+  renameFrom: z.record(z.string().min(1), z.string().min(1)).optional(),
   profiles: z.record(z.string().min(1), profileDtoSchema),
 });
 
@@ -234,7 +249,19 @@ function getDockerWorkload(): DockerWorkloadSettingsDto {
 function toGetDto(resolved: ResolvedModelProvidersConfig): GetModelProvidersDto {
   const profiles: Record<string, ProfileDto> = {};
   for (const [name, profile] of Object.entries(resolved.profiles)) {
-    profiles[name] = profile.type === 'native' ? { type: 'native' } : toOpenrouterDto(profile);
+    profiles[name] =
+      profile.type === 'native'
+        ? { type: 'native' }
+        : profile.type === 'zai'
+          ? {
+              type: 'zai',
+              apiKey: maskApiKey(profile.apiKey),
+              plan: profile.plan,
+              model: profile.model,
+              modelMap: profile.usesDefaultMap ? undefined : profile.modelMap.map((r) => ({ ...r })),
+              perAgent: profile.perAgent,
+            }
+          : toOpenrouterDto(profile);
   }
   return { default: resolved.default, profiles };
 }
@@ -278,9 +305,44 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // Snapshot the currently-resolved registry so M5 can compare against the
   // stored key (preserve when the wire value equals its mask) and F10 can see
   // the stored default when the write omits one.
-  const current = loadUserConfig({ readOnly: true }).modelProviders;
-  const currentProfiles = current.profiles;
+  const currentUserConfig = loadUserConfig({ readOnly: true });
+  const current = currentUserConfig.modelProviders;
+  const currentProfiles: Partial<typeof current.profiles> = current.profiles;
+  const requestedProfiles: Partial<SetInput['profiles']> = input.profiles;
 
+  const renames = input.renameFrom ?? {};
+  const originals = new Set<string>();
+  for (const [name, original] of Object.entries(renames)) {
+    const prior = currentProfiles[original];
+    const renamed = requestedProfiles[name];
+    if (
+      original === NATIVE_PROFILE_NAME ||
+      name === NATIVE_PROFILE_NAME ||
+      originals.has(original) ||
+      !prior ||
+      !renamed ||
+      requestedProfiles[original] ||
+      currentProfiles[name] ||
+      renamed.type !== prior.type
+    ) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        'Profile rename must preserve its service and move one existing profile to a new name.',
+      );
+    }
+    originals.add(original);
+  }
+  const hostModelProfiles = { ...currentUserConfig.hostModelProfiles };
+  for (const [role, name] of Object.entries(hostModelProfiles)) {
+    const renamed = Object.keys(renames).find((key) => renames[key] === name);
+    if (renamed) hostModelProfiles[role as keyof typeof hostModelProfiles] = renamed;
+    else if (name !== NATIVE_PROFILE_NAME && !requestedProfiles[name]) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        `Profile "${name}" is used by host role "${role}". Select another host profile in ironcurtain config before deleting it.`,
+      );
+    }
+  }
   const profiles: Record<string, NonNullable<NonNullable<UserConfig['modelProviders']>['profiles']>[string]> = {};
   for (const [name, dto] of Object.entries(input.profiles)) {
     if (name === NATIVE_PROFILE_NAME) {
@@ -296,7 +358,24 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
       profiles[name] = { type: 'native' };
       continue;
     }
-    profiles[name] = buildOpenrouterInput(name, dto, currentProfiles[name]);
+    const prior = currentProfiles[renames[name] ?? name];
+    if (prior && prior.type !== 'native' && prior.type !== dto.type && dto.apiKey === maskApiKey(prior.apiKey)) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        'Changing provider service requires a new API key; a displayed key mask cannot be reused.',
+      );
+    }
+    if (dto.type === 'zai') {
+      const apiKey = resolveApiKey(dto.apiKey, prior?.type === 'zai' ? prior.apiKey : '');
+      profiles[name] = {
+        type: 'zai',
+        ...(apiKey ? { apiKey } : {}),
+        plan: dto.plan,
+        model: dto.model,
+        modelMap: dto.modelMap?.map((r) => ({ ...r })),
+        perAgent: buildPerAgent(dto.perAgent),
+      };
+    } else profiles[name] = buildOpenrouterInput(name, dto, prior);
   }
 
   // F10: re-point a `default` that names a profile DROPPED in this write (one
@@ -305,7 +384,9 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // it falls through to the Zod `.refine` in saveUserConfig and is rejected
   // (validation-passthrough: the request itself set a bad default).
   const priorNames = Object.keys(currentProfiles);
-  let resolvedDefault = repointDefault(input.default, profiles, priorNames);
+  const requestedDefault = input.default ?? current.default;
+  const renamedDefault = Object.keys(renames).find((key) => renames[key] === requestedDefault);
+  let resolvedDefault = renamedDefault ?? repointDefault(input.default, profiles, priorNames);
   if (input.default === undefined) {
     // The client omitted `default`; the shallow config merge would preserve the
     // stored default. If THIS write deletes the profile that default names, that
@@ -313,6 +394,7 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
     // reject the whole write with a confusing INVALID_PARAMS. Auto-repoint to
     // native for that case — the same F10 outcome as sending it explicitly.
     if (
+      renamedDefault === undefined &&
       current.default !== NATIVE_PROFILE_NAME &&
       !(current.default in profiles) &&
       priorNames.includes(current.default)
@@ -328,7 +410,7 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // and default-must-exist `.refine`s), so a request that names a genuinely
   // missing profile in `default` (not the F10 delete case) throws here.
   try {
-    saveUserConfig({ modelProviders });
+    saveUserConfig({ modelProviders, ...(currentUserConfig.hostModelProfiles ? { hostModelProfiles } : {}) }, renames);
   } catch (err) {
     throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
   }

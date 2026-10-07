@@ -22,6 +22,8 @@ import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../conf
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { makeZaiProvider, zaiCodexCatalog, zaiCredential } from '../zai.js';
+import { ZAI_HOST, resolveZaiModel, zaiBaseUrls } from '../../config/zai.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE, CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-provider.js';
@@ -162,9 +164,30 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
       const profile = config.activeProviderProfile;
       const openrouterProfile = profile?.type === 'openrouter' ? profile : undefined;
-      const toml = buildCodexToml(connectTarget, openrouterProfile);
+      const baseToml = buildCodexToml(connectTarget, openrouterProfile);
+      const toml =
+        profile?.type === 'zai'
+          ? [
+              `model = ${tomlString(resolveZaiModel(profile, config.agentModelId, 'codex'))}`,
+              'model_provider = "zai"',
+              'model_catalog_json = "/etc/ironcurtain/zai-models.json"',
+              baseToml,
+              '[model_providers.zai]',
+              'name = "Z.AI"',
+              `base_url = ${tomlString(zaiBaseUrls(profile.plan).responses)}`,
+              'env_key = "ZAI_API_KEY"',
+              'wire_api = "responses"',
+              'supports_websockets = false',
+              '',
+            ].join('\n')
+          : baseToml;
 
-      return [{ path: 'codex-config.toml', content: toml }];
+      return [
+        { path: 'codex-config.toml', content: toml },
+        ...(profile?.type === 'zai'
+          ? [{ path: 'zai-models.json', content: zaiCodexCatalog(profile, config.agentModelId) }]
+          : []),
+      ];
     },
 
     generateOrientationFiles(): AgentConfigFile[] {
@@ -182,12 +205,19 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         readonly sessionId: string;
         readonly firstTurn: boolean;
         readonly modelOverride?: string;
+        readonly providerProfile?: import('../../config/user-config.js').ResolvedProviderProfile;
       },
     ): readonly string[] {
       const prompt = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const cmd = ['codex', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access'];
       if (options.modelOverride) {
-        cmd.push('--model', parseModelId(options.modelOverride).modelId);
+        const selected = parseModelId(options.modelOverride).modelId;
+        cmd.push(
+          '--model',
+          options.providerProfile?.type === 'zai'
+            ? resolveZaiModel(options.providerProfile, selected, 'codex')
+            : selected,
+        );
       }
       cmd.push('exec', '--json', '--skip-git-repo-check', '--cd', '/workspace', prompt);
       return cmd;
@@ -202,6 +232,7 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- authKind kept for adapter interface symmetry
     getProviders(config: IronCurtainConfig, _authKind?: DockerAuthKind): readonly ProviderConfig[] {
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') return [makeZaiProvider(profile, 'codex')];
       if (profile?.type === 'openrouter') {
         // Codex speaks the Responses wire format; the bearer OpenRouter provider
         // replaces the ChatGPT OAuth providers entirely.
@@ -212,6 +243,18 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') {
+        const fakeKey = fakeKeys.get(ZAI_HOST);
+        if (!fakeKey) throw new Error('No fake key generated for Z.AI');
+        return {
+          CODEX_HOME: '/home/codespace/.codex',
+          ZAI_API_KEY: fakeKey,
+          CODEX_CA_CERTIFICATE: CONTAINER_RUNTIME_CA_CERT,
+          SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
+          IRONCURTAIN_MODEL: resolveZaiModel(profile, config.agentModelId, 'codex'),
+          RUST_LOG: 'error',
+        };
+      }
       if (profile?.type === 'openrouter') {
         // OpenRouter mode: Codex reads OPENROUTER_API_KEY (referenced by the
         // generated config.toml's env_key). Drop the Codex OAuth token env
@@ -317,7 +360,7 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       // OpenRouter mode: credential presence is the profile's non-empty apiKey
       // (no `codex login` needed); empty ⇒ 'none' (feeds m5). Native ⇒ undefined,
       // so fall through to Codex ChatGPT OAuth detection.
-      const openRouter = openRouterCredential(config);
+      const openRouter = zaiCredential(config) ?? openRouterCredential(config);
       if (openRouter) return openRouter;
       const credentials = loadCodexOAuthCredentials();
       if (!credentials) return { kind: 'none' };

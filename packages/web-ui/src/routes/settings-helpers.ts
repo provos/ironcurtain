@@ -7,7 +7,7 @@
  * (incl. the M5 masked-key preservation) is unit-testable without the DOM.
  */
 
-import type { ModelMapRuleDto, OpenrouterProfileDto } from '$lib/types.js';
+import type { ModelMapRuleDto, OpenrouterProfileDto, ZaiProfileDto } from '$lib/types.js';
 
 /** The reserved, always-present implicit profile name. */
 export const NATIVE_NAME = 'native';
@@ -25,6 +25,9 @@ export type DockerAgent = (typeof DOCKER_AGENTS)[number];
  * uses '' for "unset" so the inputs are always bindable.
  */
 export interface EditableProfile {
+  type?: 'openrouter' | 'zai';
+  plan?: 'api' | 'coding';
+  model?: string;
   apiKey: string;
   modelMap: ModelMapRuleDto[];
   perAgent: Record<DockerAgent, string>;
@@ -54,9 +57,26 @@ export function blankOpenrouterProfile(): EditableProfile {
 }
 
 /** Converts a fetched masked DTO into the form's editable shape. */
-export function toEditable(dto: OpenrouterProfileDto): EditableProfile {
+export function toEditable(dto: OpenrouterProfileDto | ZaiProfileDto): EditableProfile {
+  if (dto.type === 'zai')
+    return {
+      ...blankOpenrouterProfile(),
+      type: 'zai',
+      plan: dto.plan ?? 'api',
+      model: dto.model ?? 'glm-5.3',
+      apiKey: dto.apiKey ?? '',
+      modelMap: (dto.modelMap ?? []).map((rule) => ({ ...rule })),
+      usesDefaultMap: dto.modelMap === undefined,
+      perAgent: {
+        'claude-code': dto.perAgent?.['claude-code'] ?? '',
+        goose: dto.perAgent?.goose ?? '',
+        codex: dto.perAgent?.codex ?? '',
+      },
+    };
+
   const pp = dto.providerPreference;
   return {
+    type: 'openrouter',
     apiKey: dto.apiKey ?? '',
     modelMap: (dto.modelMap ?? []).map((r) => ({ match: r.match, model: r.model })),
     perAgent: {
@@ -147,6 +167,18 @@ export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
 
   dto.sessionAffinity = p.sessionAffinity;
   return dto;
+}
+
+export function editableZaiToDto(p: EditableProfile): ZaiProfileDto {
+  const common = editableToDto(p);
+  return {
+    type: 'zai',
+    apiKey: common.apiKey,
+    modelMap: common.modelMap,
+    perAgent: common.perAgent,
+    plan: p.plan ?? 'api',
+    model: p.model?.trim() || 'glm-5.3',
+  };
 }
 
 // ---------------------------------------------------------------------------

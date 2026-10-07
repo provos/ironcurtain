@@ -1,3 +1,4 @@
+import { ZAI_HOST } from '../config/zai.js';
 /**
  * TLS-terminating MITM proxy for Docker agent sessions.
  *
@@ -327,7 +328,8 @@ export interface ProviderKeyMapping {
  *   TLS-terminates every host and authorizes decrypted pulls via `guard`.
  */
 type ListenerMode =
-  { readonly kind: 'standard' } | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
+  | { readonly kind: 'standard' }
+  | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
 
 /**
  * Resolve the single listener mode from the proxy options. A proxy without the
@@ -368,6 +370,11 @@ function normalizeMetricsHost(host: string): string {
 
 function officialProviderForOrigin(protocol: LlmProtocolId, host: string): string | null {
   const normalized = normalizeMetricsHost(host);
+  if (
+    normalized === ZAI_HOST &&
+    ['anthropic-messages', 'openai-chat-completions', 'openai-responses'].includes(protocol)
+  )
+    return 'zai';
   if (protocol === 'anthropic-messages' && normalized === 'api.anthropic.com') return 'anthropic';
   if (protocol === 'openai-responses' && (normalized === 'api.openai.com' || normalized === 'chatgpt.com')) {
     return 'openai';
@@ -389,6 +396,8 @@ function selectMetricsGateway(
   if (config.gatewayAdapterId === 'openrouter' && normalizeMetricsHost(clientHost) === OPENROUTER_HOST) {
     return { adapter: new OpenRouterGatewayAdapter(), kind: 'openrouter' };
   }
+  if (config.gatewayAdapterId === 'zai' && normalizeMetricsHost(clientHost) === ZAI_HOST)
+    return { adapter: new DirectGatewayAdapter({ providerId: 'zai', officialOrigin: true }), kind: 'direct' };
   if (config.gatewayAdapterId === 'ironcurtain') {
     return { adapter: new IronCurtainGatewayAdapter(), kind: 'ironcurtain' };
   }
@@ -506,6 +515,7 @@ export function resolveSseProvider(hostname: string, path?: string): SseProvider
   if (hostname === 'api.openai.com') {
     return 'openai';
   }
+  if (hostname === ZAI_HOST) return path?.split('?')[0].endsWith('/v1/messages') ? 'anthropic' : 'openai';
   if (hostname === OPENROUTER_HOST) {
     return openRouterWireForPath(path) === 'anthropic' ? 'anthropic' : 'openai';
   }
@@ -558,6 +568,9 @@ function truncateToolResult(text: string): string {
 function isLlmMessagesEndpoint(path: string): boolean {
   const p = path.split('?')[0];
   return (
+    p === '/api/anthropic/v1/messages' ||
+    p === '/api/paas/v4/chat/completions' ||
+    p === '/api/coding/paas/v4/chat/completions' ||
     p === '/v1/messages' ||
     p === '/v1/chat/completions' ||
     // OpenRouter paths (one host, three wire formats — §11.3).
@@ -2706,6 +2719,12 @@ function validateAndSwapApiKey(
       if (currentValue === undefined) return { hadKey: false, swapped: false };
       if (currentValue === provider.fakeKey) {
         headers[headerName] = provider.realKey;
+        // API-key helpers can send the same sentinel in both auth headers.
+        // Keep the configured header authoritative: a leftover bearer sentinel
+        // makes gateways that prefer Authorization reject the real API key.
+        if (headers.authorization === `Bearer ${provider.fakeKey}`) {
+          delete headers.authorization;
+        }
         return { hadKey: true, swapped: true };
       }
       // Non-sentinel key present -- agent's own credential, pass through

@@ -279,7 +279,8 @@ describe('config-command', () => {
     // Script: Model Providers -> Add profile -> (name) -> (key) -> Back -> Save -> confirm
     mocks.select
       .mockResolvedValueOnce('modelProviders') // main menu
-      .mockResolvedValueOnce('add') // Model Providers: Add profile
+      .mockResolvedValueOnce('add')
+      .mockResolvedValueOnce('openrouter') // Model Providers: Add profile
       .mockResolvedValueOnce('back') // Model Providers: Back
       .mockResolvedValueOnce('save'); // main menu: Save
     mocks.text

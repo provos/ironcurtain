@@ -377,7 +377,7 @@ export class AgentSession implements Session {
   }
 
   private async buildModel(): Promise<LanguageModel> {
-    const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig);
+    const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig, 'agent');
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };

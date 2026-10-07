@@ -27,6 +27,8 @@ import { DEFAULT_GLM_SLUG, OPENROUTER_HOST } from '../../config/user-config.js';
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { makeZaiProvider, zaiCredential } from '../zai.js';
+import { ZAI_HOST, resolveZaiModel, zaiBaseUrls } from '../../config/zai.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE } from '../runtime-trust.js';
 import { resolveApiKeyForProvider } from '../../config/model-provider.js';
 import {
@@ -228,17 +230,16 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       ];
     },
 
-    // Goose reads GOOSE_MODEL from container env at startup, so a per-turn
-    // override cannot switch models inside a running container. Goose batch
-    // mode also doesn't use session resume options.
+    // Z.AI batch calls select their effective override via --model. Other
+    // routes retain the GOOSE_MODEL startup selection. Batch calls don't resume.
     buildCommand(
       message: string,
       systemPrompt: string,
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      _options: {
+      options: {
         readonly sessionId: string;
         readonly firstTurn: boolean;
         readonly modelOverride?: string;
+        readonly providerProfile?: import('../../config/user-config.js').ResolvedProviderProfile;
       },
     ): readonly string[] {
       const instructions = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
@@ -250,7 +251,11 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         `PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md) && ` +
           `trap 'rm -f "$PROMPT_FILE"' EXIT && ` +
           `cat > "$PROMPT_FILE" << '${delimiter}'\n${instructions}\n${delimiter}\n` +
-          `goose run --no-session --quiet --output-format json -i "$PROMPT_FILE"`,
+          `goose run --no-session --quiet --output-format json -i "$PROMPT_FILE" "$@"`,
+        'ironcurtain-goose',
+        ...(options.providerProfile?.type === 'zai' && options.modelOverride
+          ? ['--model', resolveZaiModel(options.providerProfile, options.modelOverride, 'goose')]
+          : []),
       ];
     },
 
@@ -263,6 +268,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- interface requires authKind parameter
     getProviders(config: IronCurtainConfig, _authKind?: DockerAuthKind): readonly ProviderConfig[] {
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') return [makeZaiProvider(profile, 'goose')];
       if (profile?.type === 'openrouter') {
         // OpenRouter routing replaces the single native provider. Goose speaks
         // the OpenAI chat wire format.
@@ -275,6 +281,21 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
       const profile = config.activeProviderProfile;
+      if (profile?.type === 'zai') {
+        const fakeKey = fakeKeys.get(ZAI_HOST);
+        if (!fakeKey) throw new Error('No fake key generated for Z.AI');
+        return {
+          GOOSE_PROVIDER: 'openai',
+          GOOSE_MODEL: resolveZaiModel(profile, gooseModel, 'goose'),
+          OPENAI_HOST: `https://${ZAI_HOST}`,
+          OPENAI_BASE_PATH: `${new URL(zaiBaseUrls(profile.plan).chat).pathname.slice(1)}/chat/completions`,
+          OPENAI_API_KEY: fakeKey,
+          GOOSE_MODE: 'auto',
+          GOOSE_MAX_TURNS: '200',
+          SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
+          SSL_CERT_DIR: '/etc/ssl/certs',
+        };
+      }
       if (profile?.type === 'openrouter') {
         // OpenRouter mode: Goose's native OpenRouter provider. The provider
         // union used inside the adapter widens to 'openrouter' (the config-level
@@ -385,7 +406,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       // OpenRouter mode: credential presence is the profile's non-empty apiKey;
       // empty ⇒ 'none' (feeds m5). Native ⇒ undefined, so fall through to the
       // goose provider's API-key detection.
-      const openRouter = openRouterCredential(config);
+      const openRouter = zaiCredential(config) ?? openRouterCredential(config);
       if (openRouter) return openRouter;
       const key = resolveApiKeyForProvider(gooseProvider, config.userConfig);
       if (key) return { kind: 'apikey', key };

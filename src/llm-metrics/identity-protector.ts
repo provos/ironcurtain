@@ -25,7 +25,15 @@ const HMAC_BYTES = 16;
 const IDENTITY_KEY_FILENAME = 'identity.key';
 
 export type StatisticsIdentityNamespace =
-  'agent' | 'correlation' | 'conversation' | 'model' | 'persona' | 'profile' | 'provider' | 'route' | 'state';
+  | 'agent'
+  | 'correlation'
+  | 'conversation'
+  | 'model'
+  | 'persona'
+  | 'profile'
+  | 'provider'
+  | 'route'
+  | 'state';
 
 export interface PersistenceIdentityProtector {
   /** Stable local pseudonym. Raw input and the key are never exposed. */
@@ -40,6 +48,7 @@ const OFFICIAL_PUBLIC_ORIGINS = new Set([
   'chatgpt.com',
   'generativelanguage.googleapis.com',
   'openrouter.ai',
+  'api.z.ai',
 ]);
 
 function ensureStatisticsDirectory(statisticsDirectory: string): void {

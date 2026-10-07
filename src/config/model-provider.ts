@@ -15,7 +15,15 @@
  */
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
-import type { ResolvedUserConfig } from './user-config.js';
+import type { ResolvedUserConfig, HostModelRole } from './user-config.js';
+import { resolveActiveProfile } from './user-config.js';
+import { resolveMappedModel } from './model-mapping.js';
+import { resolveZaiModel, zaiBaseUrls } from './zai.js';
+import { parseModelId } from './model-id.js';
+import type { ProviderId } from './model-id.js';
+
+export { parseModelId, PROVIDER_ENV_VARS } from './model-id.js';
+export type { ProviderId, ParsedModelId } from './model-id.js';
 
 /**
  * Returns a proxy-aware fetch function if HTTPS_PROXY or HTTP_PROXY is set.
@@ -43,70 +51,6 @@ async function getProxyFetch(): Promise<typeof globalThis.fetch | undefined> {
   return cachedProxyFetch;
 }
 
-/** Supported LLM provider identifiers. */
-export type ProviderId = 'anthropic' | 'google' | 'openai';
-
-/** Default provider when no prefix is specified. */
-const DEFAULT_PROVIDER: ProviderId = 'anthropic';
-
-/** Known provider identifiers for validation. */
-const KNOWN_PROVIDERS = new Set<string>(['anthropic', 'google', 'openai']);
-
-/**
- * Environment variable that supplies each provider's API key.
- *
- * Single source of truth for the provider→env-var mapping. Declared as an
- * exhaustive `Record<ProviderId, string>` so adding a provider to
- * {@link ProviderId} forces a matching entry here at compile time. Must stay
- * in sync with the env-var overrides applied in `resolveUserConfig()`.
- */
-export const PROVIDER_ENV_VARS: Record<ProviderId, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
-  openai: 'OPENAI_API_KEY',
-};
-
-/**
- * Parsed model specifier. A "qualified model ID" has the form
- * "provider:model-name". A bare model ID defaults to Anthropic.
- */
-export interface ParsedModelId {
-  readonly provider: ProviderId;
-  readonly modelId: string;
-}
-
-/**
- * Parses a qualified model ID string into provider and model components.
- *
- * Format: "provider:model-id" or just "model-id" (defaults to anthropic).
- *
- * @throws Error if the model ID is empty after a recognized provider prefix (e.g. "anthropic:").
- * Unknown prefixes are treated as part of the model ID and default to the anthropic provider.
- */
-export function parseModelId(qualifiedId: string): ParsedModelId {
-  const colonIndex = qualifiedId.indexOf(':');
-
-  if (colonIndex === -1) {
-    return { provider: DEFAULT_PROVIDER, modelId: qualifiedId };
-  }
-
-  const prefix = qualifiedId.substring(0, colonIndex);
-
-  // Only treat the prefix as a provider if it's a known provider name.
-  // Otherwise the entire string is a model ID (e.g. Ollama tags like
-  // "qwen3.5-uncensored:35b" where the colon separates name from tag).
-  if (!KNOWN_PROVIDERS.has(prefix)) {
-    return { provider: DEFAULT_PROVIDER, modelId: qualifiedId };
-  }
-
-  const modelId = qualifiedId.substring(colonIndex + 1);
-  if (!modelId) {
-    throw new Error(`Empty model ID in "${qualifiedId}". ` + `Expected format: "provider:model-id"`);
-  }
-
-  return { provider: prefix as ProviderId, modelId };
-}
-
 /**
  * Creates a LanguageModel from a qualified model ID and user config.
  *
@@ -117,7 +61,57 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
  * @param config - Resolved user config for API key lookup
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
-export async function createLanguageModel(qualifiedId: string, config: ResolvedUserConfig): Promise<LanguageModelV3> {
+export async function createLanguageModel(
+  qualifiedId: string,
+  config: ResolvedUserConfig,
+  role?: HostModelRole,
+): Promise<LanguageModelV3> {
+  const profileName = role === undefined ? undefined : config.hostModelProfiles?.[role];
+  if (profileName !== undefined) {
+    const profile = resolveActiveProfile(config.modelProviders, profileName);
+    if (profile.type !== 'native') {
+      if (!profile.apiKey) throw new Error(`No API key configured for host model profile "${profileName}".`);
+      const requested = parseModelId(qualifiedId).modelId;
+      const model =
+        profile.type === 'zai'
+          ? resolveZaiModel(profile, requested)
+          : (resolveMappedModel(requested, profile.modelMap) ?? requested);
+      const { createOpenAI } = await import('@ai-sdk/openai');
+      const provider = createOpenAI({
+        name: profile.type,
+        apiKey: profile.apiKey,
+        baseURL: profile.type === 'zai' ? zaiBaseUrls(profile.plan).chat : 'https://openrouter.ai/api/v1',
+        fetch: await getProxyFetch(),
+      });
+      // Gateways implement Chat Completions; the SDK's default is Responses.
+      const chat = provider.chat(model);
+      if (profile.type !== 'zai') return chat;
+      const { wrapLanguageModel } = await import('ai');
+      return wrapLanguageModel({
+        model: chat,
+        middleware: {
+          specificationVersion: 'v3',
+          // eslint-disable-next-line @typescript-eslint/require-await -- middleware requires a Promise
+          async transformParams({ params }) {
+            if (params.responseFormat?.type !== 'json' || params.responseFormat.schema === undefined) return params;
+            // Z.AI documents JSON mode with client-side schema validation.
+            // Keep the AI SDK's output validation, supplying the schema in the prompt.
+            return {
+              ...params,
+              responseFormat: { type: 'json' },
+              prompt: [
+                {
+                  role: 'system',
+                  content: `Return JSON matching this schema: ${JSON.stringify(params.responseFormat.schema)}`,
+                },
+                ...params.prompt,
+              ],
+            };
+          },
+        },
+      });
+    }
+  }
   const { provider } = parseModelId(qualifiedId);
   return createLanguageModelFromEnv(
     qualifiedId,
@@ -150,7 +144,12 @@ export async function createLanguageModelFromEnv(
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      return createAnthropic({ apiKey: key, baseURL: url, fetch })(modelId);
+      // The shared override is an API root (as consumed by Claude Code and
+      // Docker's MITM). The SDK appends /messages, rather than /v1/messages.
+      // Preserve explicit SDK /v1 bases while deriving it for root overrides.
+      const root = (url ?? (process.env.ANTHROPIC_BASE_URL || undefined))?.replace(/\/+$/, '');
+      const sdkBaseURL = root === undefined || root.endsWith('/v1') ? root : `${root}/v1`;
+      return createAnthropic({ apiKey: key, baseURL: sdkBaseURL, fetch })(modelId);
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
@@ -176,6 +175,14 @@ export function resolveApiKeyForProvider(provider: ProviderId, config: ResolvedU
     case 'openai':
       return config.openaiApiKey;
   }
+}
+
+export function resolveHostModelApiKey(qualifiedId: string, config: ResolvedUserConfig, role: HostModelRole): string {
+  const name = config.hostModelProfiles?.[role];
+  const profile = name === undefined ? undefined : resolveActiveProfile(config.modelProviders, name);
+  return profile && profile.type !== 'native'
+    ? profile.apiKey
+    : resolveApiKeyForProvider(parseModelId(qualifiedId).provider, config);
 }
 
 /**

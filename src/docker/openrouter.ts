@@ -16,52 +16,8 @@ import type { EndpointPattern, ProviderConfig, RequestBodyRewriter, RewriteResul
 import type { AuthMethod } from './oauth-credentials.js';
 import type { IronCurtainConfig } from '../config/types.js';
 
-// --- 7.1 Glob resolution ---
-
-/** Regex metacharacters that must be escaped in a glob literal (all but `*`). */
-const REGEX_METACHARS = /[.+?^${}()|[\]\\]/g;
-
-/**
- * Memoized compiled globs. `resolveMappedModel` runs on every rewritten request
- * (and in env-hint paths), so compiling the same handful of `modelMap` patterns
- * on each lookup is wasted work. Patterns originate from config (finite, small),
- * so the cache is effectively bounded.
- */
-const GLOB_REGEX_CACHE = new Map<string, RegExp>();
-
-/**
- * Compiles a `modelMap` glob to a RegExp anchored full-string,
- * case-insensitive. `*` becomes `.*`; every other regex metacharacter is
- * escaped so a literal `.` in e.g. `gpt-4.1` is not treated as a wildcard.
- * Results are memoized since this runs on every rewritten request.
- */
-export function globToRegExp(glob: string): RegExp {
-  const cached = GLOB_REGEX_CACHE.get(glob);
-  if (cached) return cached;
-  const escaped = glob.replace(REGEX_METACHARS, '\\$&').replace(/\*/g, '.*');
-  const compiled = new RegExp(`^${escaped}$`, 'i');
-  GLOB_REGEX_CACHE.set(glob, compiled);
-  return compiled;
-}
-
-/**
- * Resolves the OpenRouter slug for a requested model id under an ordered map.
- * First matching rule wins. Returns `undefined` when nothing matches.
- *
- * Per D1, the CALLER resolves the final slug as
- * `perAgentDefault ?? resolveMappedModel(...) ?? <passthrough>` — an
- * agent-specific perAgent default takes precedence over a glob match; this
- * function performs only the glob lookup.
- */
-export function resolveMappedModel(
-  requestedModelId: string,
-  modelMap: readonly { match: string; model: string }[],
-): string | undefined {
-  for (const rule of modelMap) {
-    if (globToRegExp(rule.match).test(requestedModelId)) return rule.model;
-  }
-  return undefined;
-}
+import { resolveMappedModel } from '../config/model-mapping.js';
+export { globToRegExp, resolveMappedModel } from '../config/model-mapping.js';
 
 // --- 7.3 The OpenRouter rewriter ---
 
@@ -75,7 +31,8 @@ export interface OpenRouterRewriterConfig {
   readonly modelMap: readonly { match: string; model: string }[];
   readonly perAgentDefault: string | undefined;
   readonly providerPreference:
-    { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean } | undefined;
+    | { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean }
+    | undefined;
   readonly sessionAffinity: boolean;
 }
 

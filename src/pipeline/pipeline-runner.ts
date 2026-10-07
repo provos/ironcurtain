@@ -208,7 +208,7 @@ export async function createPipelineModels(logDir?: string, logFileName?: string
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown', logFileName);
   const userConfig = loadUserConfig();
-  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig);
+  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig, 'prefilter');
   const { model: prefilterModel } = createPerServerModel(haikuBaseLlm, llm.logPath, 'prefilter');
   return {
     baseLlm: llm.baseLlm,
@@ -1564,7 +1564,8 @@ export class PipelineRunner {
     // applied — no post-loop catch-up needed.
     for (let attempt = 0; attempt <= MAX_REPAIRS; attempt++) {
       const lastRound = state.verificationResult.rounds[state.verificationResult.rounds.length - 1] as
-        (typeof state.verificationResult.rounds)[number] | undefined;
+        | (typeof state.verificationResult.rounds)[number]
+        | undefined;
       const judgeAnalysis = lastRound?.llmAnalysis ?? state.verificationResult.summary;
       const attributedFailures = lastRound?.attributedFailures ?? [];
 

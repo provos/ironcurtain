@@ -750,7 +750,11 @@ export interface AgentReceivedEntry extends MessageLogBaseEntry {
 }
 
 export type AgentRetryReason =
-  'missing_status_block' | 'malformed_status_block' | 'missing_artifacts' | 'invalid_verdict' | 'upstream_stall';
+  | 'missing_status_block'
+  | 'malformed_status_block'
+  | 'missing_artifacts'
+  | 'invalid_verdict'
+  | 'upstream_stall';
 
 export interface AgentRetryEntry extends MessageLogBaseEntry {
   readonly type: 'agent_retry';
@@ -939,7 +943,15 @@ export interface OpenrouterProfileDto {
 }
 
 /** A single profile DTO (discriminated on `type`). */
-export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
+export interface ZaiProfileDto {
+  readonly type: 'zai';
+  readonly apiKey?: string | null;
+  readonly plan?: 'api' | 'coding';
+  readonly model?: string;
+  readonly modelMap?: readonly ModelMapRuleDto[];
+  readonly perAgent?: Readonly<Record<string, string | undefined>>;
+}
+export type ProfileDto = NativeProfileDto | OpenrouterProfileDto | ZaiProfileDto;
 
 /** Response from `config.getModelProviders`. */
 export interface GetModelProvidersDto {
@@ -949,6 +961,8 @@ export interface GetModelProvidersDto {
 
 /** Request for `config.setModelProviders` (whole profiles record). */
 export interface SetModelProvidersDto {
+  /** New name to original name for an atomic rename. */
+  readonly renameFrom?: Readonly<Record<string, string>>;
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }

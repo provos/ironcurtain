@@ -55,7 +55,14 @@ import { createWsClient, type PreflightResult, type WsClient } from './ws-client
 import { handleEvent as handleEventPure, SESSION_MUTATION_EVENTS } from './event-handler.js';
 
 export type ViewId =
-  'dashboard' | 'statistics' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
+  | 'dashboard'
+  | 'statistics'
+  | 'sessions'
+  | 'escalations'
+  | 'jobs'
+  | 'workflows'
+  | 'personas'
+  | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -927,6 +934,7 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
   return getWsClient().request<GetModelProvidersDto>('config.setModelProviders', {
     ...(input.default !== undefined ? { default: input.default } : {}),
     profiles: input.profiles,
+    ...(input.renameFrom ? { renameFrom: input.renameFrom } : {}),
   });
 }
 
