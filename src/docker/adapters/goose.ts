@@ -244,6 +244,10 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     ): readonly string[] {
       const instructions = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const { delimiter } = escapeHeredoc(instructions);
+      const modelOverride =
+        options.providerProfile?.type === 'zai' && options.modelOverride
+          ? resolveZaiModel(options.providerProfile, options.modelOverride, 'goose')
+          : undefined;
 
       return [
         '/bin/sh',
@@ -251,11 +255,9 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         `PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md) && ` +
           `trap 'rm -f "$PROMPT_FILE"' EXIT && ` +
           `cat > "$PROMPT_FILE" << '${delimiter}'\n${instructions}\n${delimiter}\n` +
-          `goose run --no-session --quiet --output-format json -i "$PROMPT_FILE" "$@"`,
-        'ironcurtain-goose',
-        ...(options.providerProfile?.type === 'zai' && options.modelOverride
-          ? ['--model', resolveZaiModel(options.providerProfile, options.modelOverride, 'goose')]
-          : []),
+          `goose run --no-session --quiet --output-format json -i "$PROMPT_FILE"` +
+          (modelOverride ? ' "$@"' : ''),
+        ...(modelOverride ? ['ironcurtain-goose', '--model', modelOverride] : []),
       ];
     },
 

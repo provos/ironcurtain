@@ -1011,8 +1011,8 @@ export async function prepareDockerInfrastructure(
   config.activeProviderProfile = activeProfile;
   if (activeProfile.type !== 'native' && activeProfile.apiKey === '') {
     throw new Error(
-      `Provider profile "${providerProfileId}" (${activeProfile.type}) has no API key configured. ` +
-        `Set ${activeProfile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile's apiKey.`,
+      `Provider profile "${providerProfileId}" is ${activeProfile.type === 'zai' ? 'Z.AI' : 'OpenRouter'} but no API key is configured. ` +
+        `Set ${activeProfile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile's apiKey in ~/.ironcurtain/config.json.`,
     );
   }
 
