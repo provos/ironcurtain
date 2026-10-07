@@ -237,22 +237,35 @@ describe('Z.AI provider profiles', () => {
     expect(JSON.stringify(files)).not.toContain('host-only-zai-key');
   });
 
-  it.each(['claude-code', 'codex', 'goose'] as const)('%s honors the effective per-command model override', (agent) => {
-    const c = config();
-    const adapter =
-      agent === 'claude-code'
-        ? createClaudeCodeAdapter(c.userConfig)
-        : agent === 'codex'
-          ? createCodexAdapter()
-          : createGooseAdapter(c.userConfig);
-    const cmd = adapter.buildCommand('hello', '', {
-      sessionId: 'id',
-      firstTurn: true,
-      modelOverride: 'anthropic:glm-5.3-flash',
-      providerProfile: c.activeProviderProfile,
-    });
-    expect(cmd[cmd.indexOf('--model') + 1]).toBe('glm-5.3-flash');
-  });
+  it.each(['claude-code', 'codex', 'goose'] as const)(
+    '%s preserves raw model requests and per-agent overrides',
+    (agent) => {
+      const c = config();
+      const adapter =
+        agent === 'claude-code'
+          ? createClaudeCodeAdapter(c.userConfig)
+          : agent === 'codex'
+            ? createCodexAdapter()
+            : createGooseAdapter(c.userConfig);
+      const profile = c.activeProviderProfile as ResolvedZaiProfile;
+      for (const requested of ['glm-5.3', 'glm-5.3-flash']) {
+        const cmd = adapter.buildCommand('hello', '', {
+          sessionId: 'id',
+          firstTurn: true,
+          modelOverride: `anthropic:${requested}`,
+          providerProfile: profile,
+        });
+        expect(cmd[cmd.indexOf('--model') + 1]).toBe(requested);
+      }
+      const cmd = adapter.buildCommand('hello', '', {
+        sessionId: 'id',
+        firstTurn: true,
+        modelOverride: 'anthropic:glm-5.3',
+        providerProfile: { ...profile, perAgent: { ...profile.perAgent, [agent]: 'chosen-model' } },
+      });
+      expect(cmd[cmd.indexOf('--model') + 1]).toBe('chosen-model');
+    },
+  );
 
   it('keeps per-agent overrides ahead of the model map and keeps protocol classifiers distinct', () => {
     const c = config({
