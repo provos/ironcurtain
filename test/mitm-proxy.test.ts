@@ -1262,6 +1262,60 @@ describe('MitmProxy', () => {
     expect(response.statusCode).toBe(502);
   });
 
+  it.each([
+    [fakeKey, `Bearer ${fakeKey}`, realKey, undefined],
+    [fakeKey, 'Bearer agent-own-token', realKey, 'Bearer agent-own-token'],
+    ['agent-own-key', `Bearer ${fakeKey}`, 'agent-own-key', `Bearer ${fakeKey}`],
+    [undefined, `Bearer ${fakeKey}`, undefined, `Bearer ${fakeKey}`],
+  ])(
+    'removes only a duplicate managed bearer after swapping header key (%s, %s)',
+    async (primaryKey, bearer, expectedKey, expectedBearer) => {
+      let seenHeaders: http.IncomingHttpHeaders | undefined;
+      const upstream = http.createServer((req, res) => {
+        seenHeaders = req.headers;
+        res.writeHead(200);
+        res.end('ok');
+      });
+      const upstreamPort = await new Promise<number>((resolve) => {
+        upstream.listen(0, '127.0.0.1', () => {
+          resolve((upstream.address() as import('node:net').AddressInfo).port);
+        });
+      });
+      try {
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [
+            {
+              config: {
+                ...testProvider,
+                upstreamTarget: { hostname: '127.0.0.1', port: upstreamPort, pathPrefix: '', useTls: false },
+              },
+              fakeKey,
+              realKey,
+            },
+          ],
+          dnsLookup: localhostDnsLookup,
+        });
+        await proxy.start();
+        const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+        expect(socket).not.toBeNull();
+        const response = await makeHttpsRequest(socket!, ca, 'api.test.com', {
+          method: 'GET',
+          path: '/v1/models',
+          headers: { ...(primaryKey === undefined ? {} : { 'x-api-key': primaryKey }), authorization: bearer },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(seenHeaders?.['x-api-key']).toBe(expectedKey);
+        expect(seenHeaders?.authorization).toBe(expectedBearer);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          upstream.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    },
+  );
+
   it('refreshes OAuth tokens and retries bodyless authenticated requests after upstream 401', async () => {
     const seenKeys: string[] = [];
     const upstream = http.createServer((req, res) => {

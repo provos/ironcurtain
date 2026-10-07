@@ -11,7 +11,16 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
-import { parseModelId } from './model-provider.js';
+import { parseModelId } from './model-id.js';
+import {
+  GLM_DEFAULT_MODEL,
+  getGatewayDefinition,
+  getProviderEditorDescriptors,
+  OPENROUTER_DEFAULT_MODEL,
+  OPENROUTER_FLASH_MODEL,
+  OPENROUTER_DEFAULT_MAP,
+  providerDefaultMap,
+} from './provider-definitions.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 import {
   dockerWorkloadRequestedSchema,
@@ -290,13 +299,14 @@ export type ContainerRuntimeSetting = (typeof CONTAINER_RUNTIMES)[number];
 // --- OpenRouter provider-profile registry (see docs/designs/openrouter-integration.md §6) ---
 
 /** OpenRouter host (single host serving all three agent wire formats). */
-export const OPENROUTER_HOST = 'openrouter.ai';
+export const OPENROUTER_HOST = getGatewayDefinition('openrouter').host;
 /** Claude Code `ANTHROPIC_BASE_URL` when routing through OpenRouter. */
-export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
+export const OPENROUTER_BASE_URL = getGatewayDefinition('openrouter').baseUrls({ type: 'openrouter' }).messages;
 /** Codex/Goose `base_url` when routing through OpenRouter. */
-export const OPENROUTER_API_V1 = 'https://openrouter.ai/api/v1';
+export const OPENROUTER_API_V1 = getGatewayDefinition('openrouter').baseUrls({ type: 'openrouter' }).responses;
 /** Default GLM slug used when no per-agent / glob mapping resolves (D2). */
-export const DEFAULT_GLM_SLUG = 'z-ai/glm-5.2';
+export const DEFAULT_GLM_SLUG = OPENROUTER_DEFAULT_MODEL;
+export const DEFAULT_GLM_FLASH_SLUG = OPENROUTER_FLASH_MODEL;
 
 /** The implicit, always-present profile name. Reserved: users may not define it. */
 export const NATIVE_PROFILE_NAME = 'native';
@@ -307,17 +317,13 @@ export const NATIVE_PROFILE_NAME = 'native';
  * explicit `modelMap: []` is preserved and disables glob mapping (per-agent
  * only mode).
  */
-export const DEFAULT_MODEL_MAP: readonly { readonly match: string; readonly model: string }[] = [
-  { match: '*opus*', model: DEFAULT_GLM_SLUG },
-  { match: '*sonnet*', model: DEFAULT_GLM_SLUG },
-  { match: '*haiku*', model: DEFAULT_GLM_SLUG },
-];
+export const DEFAULT_MODEL_MAP = OPENROUTER_DEFAULT_MAP;
 
 /** A single ordered glob→slug mapping rule. First match wins. */
 const modelMapRuleSchema = z.object({
   /** Glob matched (case-insensitively) against the REQUESTED model id. `*` = any run of chars. */
   match: z.string().min(1),
-  /** OpenRouter slug to route to, e.g. "z-ai/glm-5.2". */
+  /** Provider model ID to route to, e.g. "z-ai/glm-5.3-flash". */
   model: z.string().min(1),
 });
 
@@ -354,11 +360,28 @@ const openrouterProfileSchema = z.object({
   sessionAffinity: z.boolean().optional(),
 });
 
+const zaiProfileSchema = z.object({
+  type: z.literal('zai'),
+  apiKey: z.string().min(1).optional(),
+  plan: z.enum(['api', 'coding']).optional(),
+  model: z.string().min(1).optional(),
+  modelMap: z.array(modelMapRuleSchema).optional(),
+  perAgent: openrouterProfileSchema.shape.perAgent,
+});
+
+export const HOST_MODEL_ROLES = ['agent', 'policy', 'prefilter', 'summary', 'autoApprove'] as const;
+export type HostModelRole = (typeof HOST_MODEL_ROLES)[number];
+const hostModelProfilesSchema = z.partialRecord(z.enum(HOST_MODEL_ROLES), z.string().min(1));
+
 /** A native-type profile: today's canonical Anthropic/OpenAI/ChatGPT routing. No fields. */
 const nativeProfileSchema = z.object({ type: z.literal('native') });
 
 /** v1 profile union. New provider types extend this discriminator (§16). */
-const providerProfileSchema = z.discriminatedUnion('type', [nativeProfileSchema, openrouterProfileSchema]);
+export const providerProfileSchema = z.discriminatedUnion('type', [
+  nativeProfileSchema,
+  openrouterProfileSchema,
+  zaiProfileSchema,
+]);
 
 const modelProvidersSchema = z
   .object({
@@ -382,43 +405,59 @@ const modelProvidersSchema = z
   })
   .optional();
 
-export const userConfigSchema = z.object({
-  agentModelId: qualifiedModelId.optional(),
-  policyModelId: qualifiedModelId.optional(),
-  prefilterModelId: qualifiedModelId.optional(),
-  anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
-  googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
-  openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
-  anthropicBaseUrl: z.url().optional(),
-  openaiBaseUrl: z.url().optional(),
-  googleBaseUrl: z.url().optional(),
-  escalationTimeoutSeconds: z
-    .number()
-    .int('escalationTimeoutSeconds must be an integer')
-    .min(ESCALATION_TIMEOUT_MIN, `escalationTimeoutSeconds must be at least ${ESCALATION_TIMEOUT_MIN}`)
-    .max(ESCALATION_TIMEOUT_MAX, `escalationTimeoutSeconds must be at most ${ESCALATION_TIMEOUT_MAX}`)
-    .optional(),
-  resourceBudget: resourceBudgetSchema,
-  autoCompact: autoCompactSchema,
-  autoApprove: autoApproveSchema,
-  auditRedaction: auditRedactionSchema,
-  webSearch: webSearchSchema,
-  modelProviders: modelProvidersSchema,
-  serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
-  signal: signalSchema,
-  memory: memorySchema,
-  gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
-  gooseModel: z.string().min(1).optional(),
-  preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
-  preferredMode: preferredModeSchema.optional(),
-  containerRuntime: z.enum(CONTAINER_RUNTIMES).optional(),
-  packageInstall: packageInstallSchema,
-  dockerResources: dockerResourcesSchema,
-  capture: captureSchema,
-  statistics: statisticsSchema,
-  snapshot: snapshotSchema,
-  dockerWorkload: dockerWorkloadRequestedSchema.optional(),
-});
+export const userConfigSchema = z
+  .object({
+    agentModelId: qualifiedModelId.optional(),
+    policyModelId: qualifiedModelId.optional(),
+    prefilterModelId: qualifiedModelId.optional(),
+    anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
+    googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
+    openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
+    anthropicBaseUrl: z.url().optional(),
+    openaiBaseUrl: z.url().optional(),
+    googleBaseUrl: z.url().optional(),
+    escalationTimeoutSeconds: z
+      .number()
+      .int('escalationTimeoutSeconds must be an integer')
+      .min(ESCALATION_TIMEOUT_MIN, `escalationTimeoutSeconds must be at least ${ESCALATION_TIMEOUT_MIN}`)
+      .max(ESCALATION_TIMEOUT_MAX, `escalationTimeoutSeconds must be at most ${ESCALATION_TIMEOUT_MAX}`)
+      .optional(),
+    resourceBudget: resourceBudgetSchema,
+    autoCompact: autoCompactSchema,
+    autoApprove: autoApproveSchema,
+    auditRedaction: auditRedactionSchema,
+    webSearch: webSearchSchema,
+    modelProviders: modelProvidersSchema,
+    hostModelProfiles: hostModelProfilesSchema.optional(),
+    serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
+    signal: signalSchema,
+    memory: memorySchema,
+    gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
+    gooseModel: z.string().min(1).optional(),
+    preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
+    preferredMode: preferredModeSchema.optional(),
+    containerRuntime: z.enum(CONTAINER_RUNTIMES).optional(),
+    packageInstall: packageInstallSchema,
+    dockerResources: dockerResourcesSchema,
+    capture: captureSchema,
+    statistics: statisticsSchema,
+    snapshot: snapshotSchema,
+    dockerWorkload: dockerWorkloadRequestedSchema.optional(),
+  })
+  .superRefine((config, ctx) => {
+    for (const [role, name] of Object.entries(config.hostModelProfiles ?? {})) {
+      if (
+        name !== NATIVE_PROFILE_NAME &&
+        !Object.prototype.hasOwnProperty.call(config.modelProviders?.profiles ?? {}, name)
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['hostModelProfiles', role],
+          message: `Unknown host model provider profile "${name}".`,
+        });
+      }
+    }
+  });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
 export type UserConfig = z.infer<typeof userConfigSchema>;
@@ -536,7 +575,17 @@ export interface ResolvedNativeProfile {
 }
 
 /** The resolved active profile the whole OpenRouter feature reads (§7–§11). */
-export type ResolvedProviderProfile = ResolvedNativeProfile | ResolvedOpenRouterProfile;
+export interface ResolvedZaiProfile {
+  readonly type: 'zai';
+  readonly apiKey: string;
+  readonly plan: 'api' | 'coding';
+  readonly model: string;
+  readonly modelMap: readonly { readonly match: string; readonly model: string }[];
+  readonly usesDefaultMap: boolean;
+  readonly perAgent: Readonly<Record<DockerAgent, string | undefined>>;
+}
+
+export type ResolvedProviderProfile = ResolvedNativeProfile | ResolvedOpenRouterProfile | ResolvedZaiProfile;
 
 /**
  * Resolved provider-profile registry. `profiles` ALWAYS includes the implicit
@@ -571,6 +620,7 @@ export interface ResolvedUserConfig {
    * See docs/designs/openrouter-integration.md §6.
    */
   readonly modelProviders: ResolvedModelProvidersConfig;
+  readonly hostModelProfiles?: Readonly<Partial<Record<HostModelRole, string>>>;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Signal transport config. Null when Signal is not set up. */
   readonly signal: import('../signal/signal-config.js').ResolvedSignalConfig | null;
@@ -973,6 +1023,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       serpapi: config.webSearch?.serpapi ?? null,
     },
     modelProviders: resolveModelProviders(config.modelProviders),
+    hostModelProfiles: config.hostModelProfiles,
     serverCredentials: config.serverCredentials ?? {},
     signal: resolveSignalFromUserConfig(config),
     gooseProvider: config.gooseProvider ?? 'anthropic',
@@ -1050,7 +1101,22 @@ function resolveOpenrouterProfile(profile: OpenrouterProfileInput): ResolvedOpen
 function resolveModelProviders(config: UserConfig['modelProviders']): ResolvedModelProvidersConfig {
   const profiles: Record<string, ResolvedProviderProfile> = { [NATIVE_PROFILE_NAME]: { type: 'native' } };
   for (const [name, profile] of Object.entries(config?.profiles ?? {})) {
-    profiles[name] = profile.type === 'openrouter' ? resolveOpenrouterProfile(profile) : { type: 'native' };
+    if (profile.type === 'openrouter') profiles[name] = resolveOpenrouterProfile(profile);
+    else if (profile.type === 'zai') {
+      const model = profile.model ?? GLM_DEFAULT_MODEL;
+      profiles[name] = {
+        type: 'zai',
+        apiKey: profile.apiKey ?? '',
+        plan: profile.plan ?? 'api',
+        model,
+        modelMap: profile.modelMap ?? providerDefaultMap(profile.type, model),
+        usesDefaultMap: profile.modelMap === undefined,
+        perAgent: Object.fromEntries(DOCKER_AGENTS.map((agent) => [agent, profile.perAgent?.[agent]])) as Record<
+          DockerAgent,
+          string | undefined
+        >,
+      };
+    } else profiles[name] = { type: 'native' };
   }
   return {
     default: config?.default ?? NATIVE_PROFILE_NAME,
@@ -1093,23 +1159,7 @@ export function maskApiKey(key: string | undefined | null): string {
   return key.slice(0, 3) + '...' + key.slice(-3);
 }
 
-/**
- * Deep-clones a provider preference into a fresh mutable object, copying the
- * `order`/`only` arrays so callers can't alias the source. Shared by the config
- * editor and the web-ui dispatch, which convert between the resolved, DTO, and
- * input shapes with an identical field copy.
- */
-export function cloneProviderPreference(pref: {
-  readonly order?: readonly string[];
-  readonly only?: readonly string[];
-  readonly allowFallbacks?: boolean;
-}): { order?: string[]; only?: string[]; allowFallbacks?: boolean } {
-  return {
-    order: pref.order ? [...pref.order] : undefined,
-    only: pref.only ? [...pref.only] : undefined,
-    allowFallbacks: pref.allowFallbacks,
-  };
-}
+export { cloneProviderPreference } from './provider-preference.js';
 
 /**
  * Resolves Signal config inline to avoid circular imports.
@@ -1152,7 +1202,7 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     anthropicBaseUrl: validateBaseUrlEnv('ANTHROPIC_BASE_URL') ?? config.anthropicBaseUrl,
     openaiBaseUrl: validateBaseUrlEnv('OPENAI_BASE_URL') ?? config.openaiBaseUrl,
     googleBaseUrl: validateBaseUrlEnv('GOOGLE_API_BASE_URL') ?? config.googleBaseUrl,
-    modelProviders: applyOpenrouterKeyEnv(config.modelProviders),
+    modelProviders: applyProviderKeyEnv(config.modelProviders),
   };
 }
 
@@ -1161,12 +1211,17 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
  * resolved apiKey (env fills/overrides). Resolution: `env || profile.apiKey`.
  * When the env var is unset, the config-resolved key is left unchanged.
  */
-function applyOpenrouterKeyEnv(config: ResolvedModelProvidersConfig): ResolvedModelProvidersConfig {
-  const envKey = process.env.OPENROUTER_API_KEY;
-  if (!envKey) return config;
+function providerKeyOverrides(): ReadonlyMap<string, string | undefined> {
+  return new Map(getProviderEditorDescriptors().map(({ id, credentialEnv }) => [id, process.env[credentialEnv]]));
+}
+
+function applyProviderKeyEnv(config: ResolvedModelProvidersConfig): ResolvedModelProvidersConfig {
+  const overrides = providerKeyOverrides();
+  if (![...overrides.values()].some(Boolean)) return config;
   const profiles: Record<string, ResolvedProviderProfile> = {};
   for (const [name, profile] of Object.entries(config.profiles)) {
-    profiles[name] = profile.type === 'openrouter' ? { ...profile, apiKey: envKey } : profile;
+    const key = overrides.get(profile.type);
+    profiles[name] = profile.type !== 'native' && key ? { ...profile, apiKey: key } : profile;
   }
   return { default: config.default, profiles };
 }
@@ -1226,27 +1281,28 @@ function deepMergeConfig(existing: Record<string, unknown>, changes: Record<stri
 }
 
 /**
- * Prevents the `OPENROUTER_API_KEY` env value from being persisted to disk.
+ * Prevents provider environment API keys from being persisted to disk.
  *
- * `applyOpenrouterKeyEnv` layers the env key onto EVERY openrouter profile's
+ * `applyProviderKeyEnv` layers each service env key onto its profiles'
  * resolved `apiKey` at load time, so the editor and web-UI dispatch — which read
  * resolved config — would otherwise bake that env secret into config.json on any
  * `modelProviders` edit (silently, since the masked apiKey diff shows no change).
  * That defeats the point of the env var and contradicts the editor's "API keys
  * are excluded (use env vars)" design.
  *
- * At the single write chokepoint, any openrouter `apiKey` in the outgoing config
+ * At the single write chokepoint, any provider `apiKey` in the outgoing config
  * that equals the env value is replaced with the profile's ON-DISK key (so a
  * genuine file-origin key survives) or omitted entirely (env-only profiles). A
  * user-typed key that differs from the env value is untouched. No-op when the
  * env var is unset.
  */
-function stripEnvOpenrouterKeys(
+function stripEnvProviderKeys(
   merged: Record<string, unknown>,
   existing: Record<string, unknown>,
+  profileRenames: Readonly<Record<string, string>> = {},
 ): Record<string, unknown> {
-  const envKey = process.env.OPENROUTER_API_KEY;
-  if (!envKey) return merged;
+  const overrides = providerKeyOverrides();
+  if (![...overrides.values()].some(Boolean)) return merged;
   const mp = merged['modelProviders'];
   if (!isPlainObject(mp) || !isPlainObject(mp['profiles'])) return merged;
 
@@ -1255,11 +1311,15 @@ function stripEnvOpenrouterKeys(
     isPlainObject(existingMp) && isPlainObject(existingMp['profiles']) ? existingMp['profiles'] : {};
 
   for (const [name, profile] of Object.entries(mp['profiles'])) {
-    if (!isPlainObject(profile) || profile['type'] !== 'openrouter' || profile['apiKey'] !== envKey) continue;
-    const fileProfile = existingProfiles[name];
+    if (!isPlainObject(profile)) continue;
+    const envKey = typeof profile['type'] === 'string' ? overrides.get(profile['type']) : undefined;
+    if (!envKey || profile['apiKey'] !== envKey) continue;
+    const fileProfile = existingProfiles[profileRenames[name] ?? name];
     const fileKey =
-      isPlainObject(fileProfile) && typeof fileProfile['apiKey'] === 'string' ? fileProfile['apiKey'] : undefined;
-    if (fileKey && fileKey !== envKey) profile['apiKey'] = fileKey;
+      isPlainObject(fileProfile) && fileProfile['type'] === profile['type'] && typeof fileProfile['apiKey'] === 'string'
+        ? fileProfile['apiKey']
+        : undefined;
+    if (fileKey) profile['apiKey'] = fileKey;
     else delete profile['apiKey'];
   }
   return merged;
@@ -1273,7 +1333,7 @@ function stripEnvOpenrouterKeys(
  *
  * @throws Error if the merged config fails Zod validation
  */
-export function saveUserConfig(changes: UserConfig): void {
+export function saveUserConfig(changes: UserConfig, profileRenames: Readonly<Record<string, string>> = {}): void {
   const configPath = getUserConfigPath();
   let existing: Record<string, unknown> = {};
 
@@ -1288,7 +1348,9 @@ export function saveUserConfig(changes: UserConfig): void {
     mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
   }
 
-  const merged = normalizeLegacyPreferredMode(stripEnvOpenrouterKeys(deepMergeConfig(existing, changes), existing));
+  const merged = normalizeLegacyPreferredMode(
+    stripEnvProviderKeys(deepMergeConfig(existing, changes), existing, profileRenames),
+  );
 
   // Validate the merged result (only known fields)
   const result = userConfigSchema.safeParse(merged);

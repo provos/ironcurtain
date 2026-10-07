@@ -1,3 +1,6 @@
+import { buildCodexModelCatalog } from './codex-model-catalog.js';
+import { gatewayProfile, resolveResponsesClient, resolveGatewayCommandModel } from '../../config/gateway-client.js';
+import { gatewayProviders, gatewayCredential, gatewaySentinel } from '../gateway-runtime.js';
 /**
  * Codex CLI adapter for Docker Agent Mode.
  *
@@ -17,14 +20,12 @@ import type {
 import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import type { AuthMethod } from '../oauth-credentials.js';
-import type { ResolvedOpenRouterProfile, ResolvedUserConfig } from '../../config/user-config.js';
-import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../config/user-config.js';
+import type { ResolvedUserConfig } from '../../config/user-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
-import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE, CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
-import { parseModelId } from '../../config/model-provider.js';
+import { parseModelId } from '../../config/model-id.js';
 import {
   buildAttributionSection,
   buildCheckPtySizeScript,
@@ -81,49 +82,36 @@ exec codex --ask-for-approval never --sandbox danger-full-access -c "developer_i
 `;
 }
 
-/**
- * Codex slug under an openrouter-type profile (D2). Codex has NO native model
- * field in IronCurtain config, so the slug is `perAgent.codex`, else the
- * `DEFAULT_GLM_SLUG` run through the profile's `modelMap` — never an unmapped
- * passthrough (a non-matching map falls back to `DEFAULT_GLM_SLUG`).
- *
- * Applying the map here is what keeps `config.toml`'s `model` consistent with
- * the model the MITM rewriter actually serves: the rewriter (D1) re-globs
- * whatever Codex sends, so without the same map the container would budget its
- * context window for one model while being routed to another.
- */
-function codexSlugFor(profile: ResolvedOpenRouterProfile): string {
-  return profile.perAgent.codex ?? resolveMappedModel(DEFAULT_GLM_SLUG, profile.modelMap) ?? DEFAULT_GLM_SLUG;
-}
-
-/**
- * Builds the Codex `config.toml` string. Under an openrouter-type profile the
- * two root keys (`model`, `model_provider`) are PREPENDED before the first
- * `[table]` (TOML is order-sensitive — root keys must precede any table header,
- * §4.6/B1), and the `[model_providers.openrouter]` table is APPENDED.
- */
-function buildCodexToml(connectTarget: string, profile: ResolvedOpenRouterProfile | undefined): string {
+/** Root model keys precede TOML tables; gateway provider/capability data arrives through client bindings. */
+function buildCodexToml(connectTarget: string, client: ReturnType<typeof resolveResponsesClient> | undefined): string {
   const rootKeys = ['cli_auth_credentials_store = "file"', 'project_doc_fallback_filenames = ["CLAUDE.md"]'];
-  const openrouterRootKeys = profile
-    ? [`model = ${tomlString(codexSlugFor(profile))}`, 'model_provider = "openrouter"']
-    : [];
-  const openrouterProviderTable = profile
+  const gatewayRootKeys = client
     ? [
-        '',
-        '[model_providers.openrouter]',
-        `base_url = ${tomlString(OPENROUTER_API_V1)}`,
-        'env_key = "OPENROUTER_API_KEY"',
-        'wire_api = "responses"',
+        `model = ${tomlString(client.model)}`,
+        `model_provider = ${tomlString(client.route.id)}`,
+        ...(client.catalogModels
+          ? [`model_catalog_json = ${tomlString(`/etc/ironcurtain/${client.route.id}-models.json`)}`]
+          : []),
       ]
     : [];
-
+  const gatewayProviderTable = client
+    ? [
+        '',
+        `[model_providers.${client.route.id}]`,
+        `name = ${tomlString(client.route.label)}`,
+        `base_url = ${tomlString(client.route.baseUrl)}`,
+        `env_key = ${tomlString(client.credentialEnv)}`,
+        'wire_api = "responses"',
+        ...(client.webSockets === undefined ? [] : [`supports_websockets = ${String(client.webSockets)}`]),
+      ]
+    : [];
   return [
-    ...openrouterRootKeys,
+    ...gatewayRootKeys,
     ...rootKeys,
     '',
     '[projects."/workspace"]',
     'trust_level = "trusted"',
-    ...openrouterProviderTable,
+    ...gatewayProviderTable,
     '',
     '[mcp_servers.ironcurtain]',
     'command = "socat"',
@@ -160,11 +148,19 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       const isTcp = socketPath.includes(':');
       const connectTarget = isTcp ? `TCP:${socketPath}` : `UNIX-CONNECT:${socketPath}`;
 
-      const profile = config.activeProviderProfile;
-      const openrouterProfile = profile?.type === 'openrouter' ? profile : undefined;
-      const toml = buildCodexToml(connectTarget, openrouterProfile);
-
-      return [{ path: 'codex-config.toml', content: toml }];
+      const profile = gatewayProfile(config.activeProviderProfile);
+      const client = profile ? resolveResponsesClient(profile, config.agentModelId) : undefined;
+      return [
+        { path: 'codex-config.toml', content: buildCodexToml(connectTarget, client) },
+        ...(client?.catalogModels
+          ? [
+              {
+                path: `${client.route.id}-models.json`,
+                content: buildCodexModelCatalog(client.catalogModels, client.route.label),
+              },
+            ]
+          : []),
+      ];
     },
 
     generateOrientationFiles(): AgentConfigFile[] {
@@ -182,12 +178,14 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         readonly sessionId: string;
         readonly firstTurn: boolean;
         readonly modelOverride?: string;
+        readonly providerProfile?: import('../../config/user-config.js').ResolvedProviderProfile;
       },
     ): readonly string[] {
       const prompt = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const cmd = ['codex', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access'];
       if (options.modelOverride) {
-        cmd.push('--model', parseModelId(options.modelOverride).modelId);
+        const selected = parseModelId(options.modelOverride).modelId;
+        cmd.push('--model', resolveGatewayCommandModel(options.providerProfile, selected, 'codex') ?? selected);
       }
       cmd.push('exec', '--json', '--skip-git-repo-check', '--cd', '/workspace', prompt);
       return cmd;
@@ -201,32 +199,21 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- authKind kept for adapter interface symmetry
     getProviders(config: IronCurtainConfig, _authKind?: DockerAuthKind): readonly ProviderConfig[] {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'openrouter') {
-        // Codex speaks the Responses wire format; the bearer OpenRouter provider
-        // replaces the ChatGPT OAuth providers entirely.
-        return [makeOpenRouterProviderForProfile('responses', profile, 'codex')];
-      }
+      const gateway = gatewayProviders(config, 'responses', 'codex');
+      if (gateway) return gateway;
       return [codexChatGptProvider, codexAuthProvider];
     },
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'openrouter') {
-        // OpenRouter mode: Codex reads OPENROUTER_API_KEY (referenced by the
-        // generated config.toml's env_key). Drop the Codex OAuth token env
-        // entirely — the ChatGPT auth flow is not used here.
-        const fakeKey = fakeKeys.get(OPENROUTER_HOST);
-        if (!fakeKey) {
-          throw new Error(
-            `No fake key generated for ${OPENROUTER_HOST} — cannot configure Codex OpenRouter authentication`,
-          );
-        }
+      const profile = gatewayProfile(config.activeProviderProfile);
+      if (profile) {
+        const client = resolveResponsesClient(profile, config.agentModelId);
         return {
           CODEX_HOME: '/home/codespace/.codex',
-          OPENROUTER_API_KEY: fakeKey,
+          [client.credentialEnv]: gatewaySentinel(fakeKeys, client.route.host),
           CODEX_CA_CERTIFICATE: CONTAINER_RUNTIME_CA_CERT,
           SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
+          ...(client.environmentModel ? { IRONCURTAIN_MODEL: client.environmentModel } : {}),
           RUST_LOG: 'error',
         };
       }
@@ -314,10 +301,10 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod {
-      // OpenRouter mode: credential presence is the profile's non-empty apiKey
+      // Gateway profiles: credential presence is the profile's non-empty apiKey
       // (no `codex login` needed); empty ⇒ 'none' (feeds m5). Native ⇒ undefined,
       // so fall through to Codex ChatGPT OAuth detection.
-      const openRouter = openRouterCredential(config);
+      const openRouter = gatewayCredential(config);
       if (openRouter) return openRouter;
       const credentials = loadCodexOAuthCredentials();
       if (!credentials) return { kind: 'none' };

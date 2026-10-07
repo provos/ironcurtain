@@ -23,7 +23,7 @@ import { RpcError, type DockerWorkloadSettingsDto, type GetModelProvidersDto } f
 import { loadUserConfig } from '../../config/user-config.js';
 
 // Env vars that affect config loading; save/restore between tests.
-const ENV_VARS_TO_ISOLATE = ['IRONCURTAIN_HOME', 'OPENROUTER_API_KEY'] as const;
+const ENV_VARS_TO_ISOLATE = ['IRONCURTAIN_HOME', 'OPENROUTER_API_KEY', 'ZAI_API_KEY'] as const;
 
 let testHome: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -246,6 +246,35 @@ describe('config.getModelProviders', () => {
     expect(dto.default).toBe('native');
     expect(dto.profiles.native).toEqual({ type: 'native' });
     expect(Object.keys(dto.profiles)).toEqual(['native']);
+  });
+
+  it('returns safe built-in descriptors and backend-computed routing summaries', async () => {
+    writeConfig({
+      modelProviders: { profiles: { direct: { type: 'zai', apiKey: 'host-only-secret', model: 'custom-full' } } },
+    });
+    const dto = await get(makeCtx(false));
+    expect(dto.providers.map((provider) => provider.id)).toEqual(['openrouter', 'zai']);
+    expect(dto.providers.find((provider) => provider.id === 'zai')).toMatchObject({
+      credentialEnv: 'ZAI_API_KEY',
+      catalog: 'manual',
+      model: { defaultValue: 'glm-5.3' },
+      providerRouting: false,
+    });
+    expect(dto.summaries.direct).toContain('glm-5.3-flash (Z.AI, api)');
+    expect(JSON.stringify(dto)).not.toContain('host-only-secret');
+  });
+
+  it('serves manual provider catalogs without credentials and rejects unknown providers/endpoints', async () => {
+    expect(await configDispatch(makeCtx(false), 'config.listProviderModels', { service: 'zai' })).toEqual({
+      models: [],
+      source: 'bundled',
+    });
+    await expect(
+      configDispatch(makeCtx(false), 'config.listProviderModels', { service: 'custom' }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      set(makeCtx(true), { profiles: { custom: { type: 'zai', baseURL: 'https://models.example.test' } } }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });
 
   it('masks every openrouter profile key; native present and key-less', async () => {
@@ -620,5 +649,86 @@ describe('config dispatch — routing', () => {
     await expect(configDispatch(makeCtx(false), 'config.bogus', {})).rejects.toMatchObject({
       code: 'METHOD_NOT_FOUND',
     });
+  });
+});
+
+describe('Z.AI provider configuration round trips', () => {
+  it('preserves both profile services and never persists an environment override', async () => {
+    writeConfig({
+      modelProviders: {
+        profiles: {
+          glm: { type: 'zai', apiKey: 'file-zai-key', plan: 'coding', model: 'glm-5.3', modelMap: [] },
+          router: { type: 'openrouter', apiKey: SK_GLM },
+        },
+      },
+    });
+    process.env.ZAI_API_KEY = 'env-only-zai-secret';
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    expect(JSON.stringify(dto)).not.toContain('env-only-zai-secret');
+    await set(ctx, dto as unknown as Record<string, unknown>);
+    const disk = JSON.stringify(readConfig());
+    expect(disk).toContain('file-zai-key');
+    expect(disk).toContain(SK_GLM);
+    expect(disk).not.toContain('env-only-zai-secret');
+  });
+
+  it('renames a Z.AI profile with its masked key, default and host bindings atomically', async () => {
+    writeConfig({
+      modelProviders: { default: 'glm', profiles: { glm: { type: 'zai', apiKey: 'file-zai-key' } } },
+      hostModelProfiles: { autoApprove: 'glm', summary: 'glm' },
+    });
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    await set(ctx, { default: 'glm', profiles: { renamed: dto.profiles.glm }, renameFrom: { renamed: 'glm' } });
+    const disk = readConfig();
+    expect(disk.modelProviders).toMatchObject({
+      default: 'renamed',
+      profiles: { renamed: { type: 'zai', apiKey: 'file-zai-key' } },
+    });
+    expect(disk.hostModelProfiles).toEqual({ autoApprove: 'renamed', summary: 'renamed' });
+    expect(JSON.stringify(disk)).not.toContain('fil...key');
+  });
+
+  it.each(['zai', 'openrouter'] as const)(
+    'preserves %s file keys when renaming under an environment override',
+    async (type) => {
+      writeConfig({ modelProviders: { profiles: { original: { type, apiKey: 'file-origin-key' } } } });
+      process.env[type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'] = 'environment-key';
+      const ctx = makeCtx(true);
+      const dto = await get(ctx);
+      await set(ctx, { profiles: { renamed: dto.profiles.original }, renameFrom: { renamed: 'original' } });
+      expect(JSON.stringify(readConfig())).toContain('file-origin-key');
+      expect(JSON.stringify(readConfig())).not.toContain('environment-key');
+    },
+  );
+
+  it.each(['zai', 'openrouter'] as const)(
+    'preserves %s file keys that equal the environment key on rename',
+    async (type) => {
+      writeConfig({ modelProviders: { profiles: { original: { type, apiKey: 'shared-file-env-key' } } } });
+      const envName = type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY';
+      process.env[envName] = 'shared-file-env-key';
+      const ctx = makeCtx(true);
+      const dto = await get(ctx);
+      await set(ctx, { profiles: { renamed: dto.profiles.original }, renameFrom: { renamed: 'original' } });
+      if (type === 'zai') delete process.env.ZAI_API_KEY;
+      else delete process.env.OPENROUTER_API_KEY;
+      expect(readConfig().modelProviders).toMatchObject({ profiles: { renamed: { apiKey: 'shared-file-env-key' } } });
+    },
+  );
+
+  it('blocks deleting a bound profile and changing service with the old masked key', async () => {
+    writeConfig({
+      modelProviders: { profiles: { glm: { type: 'zai', apiKey: 'file-zai-key' } } },
+      hostModelProfiles: { autoApprove: 'glm' },
+    });
+    const ctx = makeCtx(true);
+    const dto = await get(ctx);
+    await expect(set(ctx, { profiles: {} })).rejects.toThrow(/used by host role/);
+    await expect(
+      set(ctx, { profiles: { glm: { type: 'openrouter', apiKey: (dto.profiles.glm as { apiKey: string }).apiKey } } }),
+    ).rejects.toThrow(/requires a new API key/);
+    expect(JSON.stringify(readConfig())).toContain('file-zai-key');
   });
 });

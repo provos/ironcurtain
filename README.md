@@ -316,7 +316,7 @@ snapshots, or backups. The identity key is not rotated or deleted by these comma
 
 To route LLM traffic through a gateway like LiteLLM or OpenRouter (in both Code Mode and Docker Agent Mode), see [MODEL_ROUTING.md](MODEL_ROUTING.md).
 
-Route Docker agents through model-provider profiles (e.g. GLM-5.2 via OpenRouter, no sidecar) with `ironcurtain config` → Model Providers, then pick a profile at `/new` or with `--provider-profile` — see [MODEL_ROUTING.md](MODEL_ROUTING.md#first-class-openrouter).
+Route Docker agents through model-provider profiles (e.g. GLM-5.3 / GLM-5.3-Flash via OpenRouter, no sidecar) with `ironcurtain config` → Model Providers, then pick a profile at `/new` or with `--provider-profile` — see [MODEL_ROUTING.md](MODEL_ROUTING.md#first-class-openrouter).
 
 ## Built-in Capabilities
 

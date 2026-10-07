@@ -35,14 +35,15 @@ import {
   loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   maskApiKey,
-  cloneProviderPreference,
   DOCKER_AGENTS,
   NATIVE_PROFILE_NAME,
   type UserConfig,
   type ResolvedModelProvidersConfig,
-  type ResolvedOpenRouterProfile,
 } from '../../config/user-config.js';
-import { listOpenrouterModels } from '../../config/openrouter-catalog.js';
+import { listProviderModels } from '../../config/provider-catalog.js';
+import { getProviderEditorDescriptors, providerProfileSummary } from '../../config/provider-definitions.js';
+import { resolvedGatewayToInput } from '../../config/provider-editor.js';
+import { providerProfileSchema } from '../../config/user-config.js';
 import { DOCKER_WORKLOAD_NETWORK_ACCESS } from '../../docker-workload/config.js';
 
 // The mask FORMAT that `maskApiKey` produces is the DTO contract (§12.6): the
@@ -56,46 +57,30 @@ import { DOCKER_WORKLOAD_NETWORK_ACCESS } from '../../docker-workload/config.js'
 // Param schemas
 // ---------------------------------------------------------------------------
 
-const modelMapRuleDtoSchema = z.object({
-  match: z.string().min(1),
-  model: z.string().min(1),
-});
-
-const providerPreferenceDtoSchema = z.object({
-  order: z.array(z.string().min(1)).optional(),
-  only: z.array(z.string().min(1)).optional(),
-  allowFallbacks: z.boolean().optional(),
-});
-
-const nativeProfileDtoSchema = z.object({ type: z.literal('native') }).strict();
-
-/**
- * The openrouter profile DTO on the write path. `apiKey` is intentionally
- * permissive (string | null | absent) because the M5 mask-unchanged contract
- * distinguishes absent/null/mask-equal ("keep") from '' ("clear") from any
- * other string ("set") — the empty string is a MEANINGFUL sentinel here, so it
- * must not be rejected by a `.min(1)`.
- */
-const openrouterProfileDtoSchema = z
-  .object({
-    type: z.literal('openrouter'),
-    apiKey: z.string().nullable().optional(),
-    modelMap: z.array(modelMapRuleDtoSchema).optional(),
-    perAgent: z.record(z.string(), z.string().min(1).optional()).optional(),
-    providerPreference: providerPreferenceDtoSchema.optional(),
-    sessionAffinity: z.boolean().optional(),
-  })
-  .strict();
-
-const profileDtoSchema = z.discriminatedUnion('type', [nativeProfileDtoSchema, openrouterProfileDtoSchema]);
+/** Reuse authoritative built-in schemas; masked keys and the legacy per-agent write projection differ from persistence. */
+const profileDtoSchema = z.discriminatedUnion('type', [
+  providerProfileSchema.options[0].strict(),
+  ...providerProfileSchema.options.slice(1).map((schema) =>
+    schema
+      .extend({
+        apiKey: z.string().nullable().optional(),
+        perAgent: z.record(z.string(), z.string().min(1).optional()).optional(),
+      })
+      .strict(),
+  ),
+]);
 
 const setModelProvidersSchema = z.object({
   default: z.string().min(1).optional(),
+  renameFrom: z.record(z.string().min(1), z.string().min(1)).optional(),
   profiles: z.record(z.string().min(1), profileDtoSchema),
 });
 
 const getModelProvidersSchema = z.object({});
 
+const listProviderModelsSchema = z
+  .object({ service: z.string().min(1), forceRefresh: z.boolean().optional() })
+  .strict();
 const listOpenrouterModelsSchema = z.object({ forceRefresh: z.boolean().optional() });
 const statisticsConfigSchema = z
   .object({ enabled: z.boolean(), retentionDays: z.number().int().positive().nullable() })
@@ -175,7 +160,16 @@ export async function configDispatch(
     // Ungated read of the PUBLIC OpenRouter catalog (mirrors getModelProviders).
     case 'config.listOpenrouterModels': {
       const input = validateParams(listOpenrouterModelsSchema, params);
-      const result = await listOpenrouterModels({ forceRefresh: input.forceRefresh });
+      const result = await listProviderModels('openrouter', { forceRefresh: input.forceRefresh });
+      return { models: result.models, source: result.source } satisfies OpenrouterModelsDto;
+    }
+
+    case 'config.listProviderModels': {
+      const input = validateParams(listProviderModelsSchema, params);
+      if (!getProviderEditorDescriptors().some((provider) => provider.id === input.service)) {
+        throw new RpcError('INVALID_PARAMS', `Unknown built-in model provider "${input.service}".`);
+      }
+      const result = await listProviderModels(input.service, { forceRefresh: input.forceRefresh });
       return { models: result.models, source: result.source } satisfies OpenrouterModelsDto;
     }
 
@@ -233,26 +227,21 @@ function getDockerWorkload(): DockerWorkloadSettingsDto {
 /** Maps a resolved registry to the masked wire DTO. */
 function toGetDto(resolved: ResolvedModelProvidersConfig): GetModelProvidersDto {
   const profiles: Record<string, ProfileDto> = {};
+  const summaries: Record<string, string> = {};
   for (const [name, profile] of Object.entries(resolved.profiles)) {
-    profiles[name] = profile.type === 'native' ? { type: 'native' } : toOpenrouterDto(profile);
+    if (profile.type === 'native') {
+      profiles[name] = { type: 'native' };
+      summaries[name] = 'Native providers (Anthropic / OpenAI / ChatGPT)';
+    } else {
+      profiles[name] = {
+        ...resolvedGatewayToInput(profile),
+        perAgent: { ...profile.perAgent },
+        apiKey: maskApiKey(profile.apiKey),
+      };
+      summaries[name] = `${providerProfileSummary(profile)} · key: ${maskApiKey(profile.apiKey)}`;
+    }
   }
-  return { default: resolved.default, profiles };
-}
-
-function toOpenrouterDto(profile: ResolvedOpenRouterProfile): ProfileDto {
-  const perAgent: Record<string, string | undefined> = {};
-  for (const agent of DOCKER_AGENTS) perAgent[agent] = profile.perAgent[agent];
-  return {
-    type: 'openrouter',
-    apiKey: maskApiKey(profile.apiKey),
-    // A default-tracking profile OMITS `modelMap` so a set-back round-trip
-    // re-persists the omission (not today's materialized DEFAULT_MODEL_MAP).
-    // An explicit map (including `[]`) is serialized verbatim.
-    modelMap: profile.usesDefaultMap ? undefined : profile.modelMap.map((r) => ({ match: r.match, model: r.model })),
-    perAgent,
-    providerPreference: profile.providerPreference ? cloneProviderPreference(profile.providerPreference) : undefined,
-    sessionAffinity: profile.sessionAffinity,
-  };
+  return { default: resolved.default, profiles, providers: getProviderEditorDescriptors(), summaries };
 }
 
 // ---------------------------------------------------------------------------
@@ -278,9 +267,44 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // Snapshot the currently-resolved registry so M5 can compare against the
   // stored key (preserve when the wire value equals its mask) and F10 can see
   // the stored default when the write omits one.
-  const current = loadUserConfig({ readOnly: true }).modelProviders;
-  const currentProfiles = current.profiles;
+  const currentUserConfig = loadUserConfig({ readOnly: true });
+  const current = currentUserConfig.modelProviders;
+  const currentProfiles: Partial<typeof current.profiles> = current.profiles;
+  const requestedProfiles: Partial<SetInput['profiles']> = input.profiles;
 
+  const renames = input.renameFrom ?? {};
+  const originals = new Set<string>();
+  for (const [name, original] of Object.entries(renames)) {
+    const prior = currentProfiles[original];
+    const renamed = requestedProfiles[name];
+    if (
+      original === NATIVE_PROFILE_NAME ||
+      name === NATIVE_PROFILE_NAME ||
+      originals.has(original) ||
+      !prior ||
+      !renamed ||
+      requestedProfiles[original] ||
+      currentProfiles[name] ||
+      renamed.type !== prior.type
+    ) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        'Profile rename must preserve its service and move one existing profile to a new name.',
+      );
+    }
+    originals.add(original);
+  }
+  const hostModelProfiles = { ...currentUserConfig.hostModelProfiles };
+  for (const [role, name] of Object.entries(hostModelProfiles)) {
+    const renamed = Object.keys(renames).find((key) => renames[key] === name);
+    if (renamed) hostModelProfiles[role as keyof typeof hostModelProfiles] = renamed;
+    else if (name !== NATIVE_PROFILE_NAME && !requestedProfiles[name]) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        `Profile "${name}" is used by host role "${role}". Select another host profile in ironcurtain config before deleting it.`,
+      );
+    }
+  }
   const profiles: Record<string, NonNullable<NonNullable<UserConfig['modelProviders']>['profiles']>[string]> = {};
   for (const [name, dto] of Object.entries(input.profiles)) {
     if (name === NATIVE_PROFILE_NAME) {
@@ -296,7 +320,20 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
       profiles[name] = { type: 'native' };
       continue;
     }
-    profiles[name] = buildOpenrouterInput(name, dto, currentProfiles[name]);
+    const prior = currentProfiles[renames[name] ?? name];
+    if (prior && prior.type !== 'native' && prior.type !== dto.type && dto.apiKey === maskApiKey(prior.apiKey)) {
+      throw new RpcError(
+        'INVALID_PARAMS',
+        'Changing provider service requires a new API key; a displayed key mask cannot be reused.',
+      );
+    }
+    const apiKey = resolveApiKey(dto.apiKey, prior?.type === dto.type ? prior.apiKey : '');
+    profiles[name] = providerProfileSchema.parse({
+      ...dto,
+      apiKey: apiKey || undefined,
+      modelMap: dto.modelMap?.map((rule) => ({ ...rule })),
+      perAgent: buildPerAgent(dto.perAgent),
+    });
   }
 
   // F10: re-point a `default` that names a profile DROPPED in this write (one
@@ -305,7 +342,9 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // it falls through to the Zod `.refine` in saveUserConfig and is rejected
   // (validation-passthrough: the request itself set a bad default).
   const priorNames = Object.keys(currentProfiles);
-  let resolvedDefault = repointDefault(input.default, profiles, priorNames);
+  const requestedDefault = input.default ?? current.default;
+  const renamedDefault = Object.keys(renames).find((key) => renames[key] === requestedDefault);
+  let resolvedDefault = renamedDefault ?? repointDefault(input.default, profiles, priorNames);
   if (input.default === undefined) {
     // The client omitted `default`; the shallow config merge would preserve the
     // stored default. If THIS write deletes the profile that default names, that
@@ -313,6 +352,7 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
     // reject the whole write with a confusing INVALID_PARAMS. Auto-repoint to
     // native for that case — the same F10 outcome as sending it explicitly.
     if (
+      renamedDefault === undefined &&
       current.default !== NATIVE_PROFILE_NAME &&
       !(current.default in profiles) &&
       priorNames.includes(current.default)
@@ -328,7 +368,7 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // and default-must-exist `.refine`s), so a request that names a genuinely
   // missing profile in `default` (not the F10 delete case) throws here.
   try {
-    saveUserConfig({ modelProviders });
+    saveUserConfig({ modelProviders, ...(currentUserConfig.hostModelProfiles ? { hostModelProfiles } : {}) }, renames);
   } catch (err) {
     throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
   }
@@ -357,34 +397,6 @@ function setDockerWorkload(ctx: WorkflowDispatchContext, input: DockerWorkloadSe
 
   ctx.eventBus.emit('config.changed', {});
   return getDockerWorkload();
-}
-
-type OpenrouterInput = NonNullable<NonNullable<UserConfig['modelProviders']>['profiles']>[string];
-
-/**
- * Builds one openrouter profile's persisted input shape from its DTO, resolving
- * the M5 apiKey contract against the currently-stored profile.
- */
-function buildOpenrouterInput(
-  name: string,
-  dto: Extract<ProfileDto, { type: 'openrouter' }>,
-  current: ResolvedModelProvidersConfig['profiles'][string] | undefined,
-): OpenrouterInput {
-  const currentKey = current?.type === 'openrouter' ? current.apiKey : '';
-  const resolvedKey = resolveApiKey(dto.apiKey, currentKey);
-
-  const out: Extract<OpenrouterInput, { type: 'openrouter' }> = { type: 'openrouter' };
-  // The persisted schema requires apiKey.min(1); an empty resolved key means
-  // "no key" and is written by OMITTING the field entirely.
-  if (resolvedKey) out.apiKey = resolvedKey;
-  if (dto.modelMap !== undefined) out.modelMap = dto.modelMap.map((r) => ({ match: r.match, model: r.model }));
-  const perAgent = buildPerAgent(dto.perAgent);
-  if (perAgent) out.perAgent = perAgent;
-  if (dto.providerPreference) {
-    out.providerPreference = cloneProviderPreference(dto.providerPreference);
-  }
-  if (dto.sessionAffinity !== undefined) out.sessionAffinity = dto.sessionAffinity;
-  return out;
 }
 
 /**

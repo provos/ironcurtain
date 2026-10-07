@@ -1,3 +1,5 @@
+import { getGatewayDefinition } from '../config/provider-definitions.js';
+import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * Pre-flight checks and explicit session mode selection.
  *
@@ -100,7 +102,7 @@ async function detectCredentialState(
   // credential detection, identically whether or not the default has creds
   // (rather than masking it behind a generic "no credentials" error).
   const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
-  if (activeProfile.type === 'openrouter') {
+  if (activeProfile.type !== 'native') {
     return { credKind: activeProfile.apiKey ? 'apikey' : null, anthropicOAuthOnly: false };
   }
 
@@ -333,6 +335,14 @@ async function resolveDockerAgent(
   }
 
   if (credState.credKind === null) {
+    const profile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
+    if (profile.type !== 'native') {
+      const definition = getGatewayDefinition(profile.type);
+      if (!definition.nativeCredentialHelp)
+        throw new PreflightError(
+          `${definition.label} profile requires an API key. Set ${definition.editor.credentialEnv} or the profile apiKey.`,
+        );
+    }
     throw new PreflightError(messages.credentialsMissing(credState.anthropicOAuthOnly));
   }
 
@@ -412,8 +422,11 @@ async function resolveDefaultMode(
     // Fail before the Docker probe — fast feedback for missing keys.
     const agentModelId = config.userConfig.agentModelId;
     const { provider } = parseModelId(agentModelId);
-    const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
+    const apiKey = resolveHostModelApiKey(agentModelId, config.userConfig, 'agent');
     if (apiKey.length === 0) {
+      const profileName = config.userConfig.hostModelProfiles?.agent;
+      if (profileName && profileName !== 'native')
+        throw new PreflightError(`Host agent profile "${profileName}" requires an API key.`);
       throw new PreflightError(builtinNeedsApiKeyMessage(provider, agentModelId));
     }
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };

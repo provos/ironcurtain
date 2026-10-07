@@ -107,6 +107,7 @@ export type MethodName =
   // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
   // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
   | 'config.listOpenrouterModels'
+  | 'config.listProviderModels'
   | 'statistics.capabilities'
   | 'statistics.summary'
   | 'statistics.series'
@@ -659,18 +660,26 @@ export interface NativeProfileDto {
  *   - '' (empty string) → clear the stored key
  *   - any other string → set it
  */
-export interface OpenrouterProfileDto {
-  readonly type: 'openrouter';
-  /** Masked on read; M5-interpreted on write. May be absent/null on write. */
+export interface GatewayProfileDto {
+  readonly type: string;
   readonly apiKey?: string | null;
+  readonly plan?: string;
+  readonly model?: string;
   readonly modelMap?: readonly ModelMapRuleDto[];
   readonly perAgent?: Readonly<Record<string, string | undefined>>;
   readonly providerPreference?: ProviderPreferenceDto;
   readonly sessionAffinity?: boolean;
 }
-
-/** A single profile DTO (discriminated on `type`). */
-export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
+export interface OpenrouterProfileDto extends GatewayProfileDto {
+  readonly type: 'openrouter';
+}
+export interface ZaiProfileDto extends GatewayProfileDto {
+  readonly type: 'zai';
+  readonly plan?: 'api' | 'coding';
+}
+/** Descriptors do not permit new services; the backend validates the built-in profile union. */
+export type ProfileDto = GatewayProfileDto;
+export type { ProviderEditorDescriptor } from '../config/provider-definitions.js';
 
 /**
  * Response from `config.getModelProviders`. `default` is the resolved default
@@ -678,6 +687,8 @@ export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
  * entry and every openrouter profile with its `apiKey` masked.
  */
 export interface GetModelProvidersDto {
+  readonly providers: readonly import('../config/provider-definitions.js').ProviderEditorDescriptor[];
+  readonly summaries: Readonly<Record<string, string>>;
   readonly default: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }
@@ -691,6 +702,8 @@ export interface GetModelProvidersDto {
  * accepted-and-dropped (F7); any other value under `native` is rejected.
  */
 export interface SetModelProvidersDto {
+  /** New name to original name for an atomic rename. */
+  readonly renameFrom?: Readonly<Record<string, string>>;
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }

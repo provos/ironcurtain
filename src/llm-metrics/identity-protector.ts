@@ -40,6 +40,7 @@ const OFFICIAL_PUBLIC_ORIGINS = new Set([
   'chatgpt.com',
   'generativelanguage.googleapis.com',
   'openrouter.ai',
+  'api.z.ai',
 ]);
 
 function ensureStatisticsDirectory(statisticsDirectory: string): void {

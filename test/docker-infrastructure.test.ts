@@ -348,56 +348,70 @@ describe('OpenRouter ProviderKeyMapping assembly (G4 / §7.5, §9.5)', () => {
     );
   });
 
-  it('fails fast before container launch when an openrouter profile has an empty resolved apiKey (§9.5)', async () => {
-    // The bundle-level belt-and-suspenders guard in prepareDockerInfrastructure
-    // resolves + stamps the active profile FIRST, then throws when the active
-    // profile is openrouter-type with an empty apiKey — before any container is
-    // launched. Reaching the guard in-process requires only that the container-
-    // runtime probe is short-circuited (env override) and the requested agent
-    // registers; the guard runs before any Docker/CA/proxy work.
-    const prev = process.env.IRONCURTAIN_CONTAINER_RUNTIME;
-    process.env.IRONCURTAIN_CONTAINER_RUNTIME = 'docker';
-    try {
-      const config = {
-        // Minimal userConfig: only the fields the pre-guard path reads. The
-        // adapter factories read agentModelId/gooseProvider/gooseModel (all
-        // optional); resolveRuntimeKind is short-circuited by the env override.
-        userConfig: {
-          modelProviders: {
-            default: 'glm',
-            profiles: {
-              native: { type: 'native' },
-              glm: openrouterProfile(''),
+  it.each(['openrouter', 'zai'] as const)(
+    'fails fast before container launch when a %s profile has an empty resolved apiKey',
+    async (type) => {
+      // The bundle-level belt-and-suspenders guard in prepareDockerInfrastructure
+      // resolves + stamps the active profile FIRST, then throws when the active
+      // profile has an empty apiKey — before any container is
+      // launched. Reaching the guard in-process requires only that the container-
+      // runtime probe is short-circuited (env override) and the requested agent
+      // registers; the guard runs before any Docker/CA/proxy work.
+      const prev = process.env.IRONCURTAIN_CONTAINER_RUNTIME;
+      process.env.IRONCURTAIN_CONTAINER_RUNTIME = 'docker';
+      try {
+        const config = {
+          // Minimal userConfig: only the fields the pre-guard path reads. The
+          // adapter factories read agentModelId/gooseProvider/gooseModel (all
+          // optional); resolveRuntimeKind is short-circuited by the env override.
+          userConfig: {
+            modelProviders: {
+              default: 'glm',
+              profiles: {
+                native: { type: 'native' },
+                glm:
+                  type === 'openrouter'
+                    ? openrouterProfile('')
+                    : {
+                        type: 'zai',
+                        apiKey: '',
+                        plan: 'api',
+                        model: 'glm-5.3',
+                        modelMap: [],
+                        usesDefaultMap: false,
+                        perAgent: { 'claude-code': undefined, codex: undefined, goose: undefined },
+                      },
+              },
             },
           },
-        },
-        auditLogPath: join(tmpdir(), 'audit.jsonl'),
-      } as unknown as IronCurtainConfig;
+          auditLogPath: join(tmpdir(), 'audit.jsonl'),
+        } as unknown as IronCurtainConfig;
 
-      await expect(
-        prepareDockerInfrastructure(
-          config,
-          { kind: 'docker', agent: 'claude-code' as AgentId },
-          mkdtempSync(join(tmpdir(), 'or-bundle-')),
-          mkdtempSync(join(tmpdir(), 'or-ws-')),
-          mkdtempSync(join(tmpdir(), 'or-esc-')),
-          'or-fail-fast' as BundleId,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          { providerProfileName: 'glm' },
-        ),
-      ).rejects.toThrow(
-        'Provider profile "glm" is OpenRouter but no API key is configured. ' +
-          "Set OPENROUTER_API_KEY or the profile's apiKey in ~/.ironcurtain/config.json.",
-      );
-    } finally {
-      if (prev === undefined) delete process.env.IRONCURTAIN_CONTAINER_RUNTIME;
-      else process.env.IRONCURTAIN_CONTAINER_RUNTIME = prev;
-    }
-  });
+        await expect(
+          prepareDockerInfrastructure(
+            config,
+            { kind: 'docker', agent: 'claude-code' as AgentId },
+            mkdtempSync(join(tmpdir(), 'or-bundle-')),
+            mkdtempSync(join(tmpdir(), 'or-ws-')),
+            mkdtempSync(join(tmpdir(), 'or-esc-')),
+            'or-fail-fast' as BundleId,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { providerProfileName: 'glm' },
+          ),
+        ).rejects.toThrow(
+          `Provider profile "glm" is ${type === 'zai' ? 'Z.AI' : 'OpenRouter'} but no API key is configured. ` +
+            `Set ${type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile's apiKey in ~/.ironcurtain/config.json.`,
+        );
+      } finally {
+        if (prev === undefined) delete process.env.IRONCURTAIN_CONTAINER_RUNTIME;
+        else process.env.IRONCURTAIN_CONTAINER_RUNTIME = prev;
+      }
+    },
+  );
 });
 
 describe('prepareConversationStateDir', () => {
