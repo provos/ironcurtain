@@ -57,6 +57,7 @@ export interface GatewayDefinition {
   readonly structuredOutput: 'schema' | 'json-object';
   /** Preserve the existing native credential diagnostic for this legacy gateway. */
   readonly nativeCredentialHelp?: boolean;
+  readonly preferProxyCost?: boolean;
   readonly models?: Readonly<Record<string, ProviderModelMetadata>>;
   readonly defaultModelMetadata?: ProviderModelMetadata;
   readonly sessionAffinityModelPrefix?: string;
@@ -115,6 +116,7 @@ const DEFINITIONS: readonly GatewayDefinition[] = [
   {
     id: 'openrouter',
     nativeCredentialHelp: true,
+    preferProxyCost: true,
     label: 'OpenRouter',
     host: 'openrouter.ai',
     modelSelection: 'proxy',

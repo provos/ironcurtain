@@ -9,6 +9,7 @@ import { resolveMessagesClient, resolveResponsesClient, resolveChatClient } from
 import { buildProviderEditorOptions } from '../src/config/config-command.js';
 import { resolvedGatewayToInput } from '../src/config/provider-editor.js';
 import { makeGatewayProvider } from '../src/docker/gateway-runtime.js';
+import { resolveRealKey } from '../src/docker/docker-infrastructure.js';
 import { isEndpointAllowed } from '../src/docker/provider-config.js';
 import { createClaudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { createCodexAdapter } from '../src/docker/adapters/codex.js';
@@ -80,6 +81,8 @@ afterEach(() => vi.restoreAllMocks());
 it('generates all three harness configurations from one compatible definition', () => {
   registerFixture();
   const c = config();
+  expect(resolveRealKey(compatible.host, c, 'unrelated-oauth')).toBe('host-only-real-key');
+  expect(resolveRealKey('unconfigured.example.test', c, undefined)).toBe('');
   const sentinel = new Map([[compatible.host, 'fixture-sentinel-token']]);
   const claude = createClaudeCodeAdapter();
   const codex = createCodexAdapter();

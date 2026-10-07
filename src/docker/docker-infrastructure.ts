@@ -1,4 +1,4 @@
-import { ZAI_HOST } from '../config/zai.js';
+import { getGatewayDefinition } from '../config/provider-definitions.js';
 import { bindDockerEndpointExec } from './docker-endpoint.js';
 import { DOCKER_AGENT_VOLUME_SHADOW } from './docker-agent-volume-shadow.js';
 import { prepareDockerAgentStartup } from './agent-startup.js';
@@ -48,7 +48,7 @@ import {
 } from './agent-adapter.js';
 import { buildContainerWorkspaceMount, CONTAINER_WORKSPACE_DIR } from './container-workspace.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
-import { OPENROUTER_HOST, resolveActiveProfile } from '../config/user-config.js';
+import { resolveActiveProfile } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import { defaultExecFile, IRONCURTAIN_LABEL_BUNDLE } from './docker-manager.js';
 import type { MitmProxy } from './mitm-proxy.js';
@@ -1011,8 +1011,8 @@ export async function prepareDockerInfrastructure(
   config.activeProviderProfile = activeProfile;
   if (activeProfile.type !== 'native' && activeProfile.apiKey === '') {
     throw new Error(
-      `Provider profile "${providerProfileId}" is ${activeProfile.type === 'zai' ? 'Z.AI' : 'OpenRouter'} but no API key is configured. ` +
-        `Set ${activeProfile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile's apiKey in ~/.ironcurtain/config.json.`,
+      `Provider profile "${providerProfileId}" is ${getGatewayDefinition(activeProfile.type).label} but no API key is configured. ` +
+        `Set ${getGatewayDefinition(activeProfile.type).editor.credentialEnv} or the profile's apiKey in ~/.ironcurtain/config.json.`,
     );
   }
 
@@ -3496,6 +3496,11 @@ export function canRefreshOAuth(refreshToken: string): boolean {
  * For all other cases, falls back to the API key from config.
  */
 export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
+  const profile = config.activeProviderProfile;
+  if (profile && profile.type !== 'native' && getGatewayDefinition(profile.type).host === host) {
+    if (!profile.apiKey) logger.warn(`No API key configured for provider host: ${host}`);
+    return profile.apiKey;
+  }
   if (oauthAccessToken && ANTHROPIC_HOSTS.has(host)) {
     return oauthAccessToken;
   }
@@ -3519,20 +3524,6 @@ export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAcc
     case 'generativelanguage.googleapis.com':
       key = config.userConfig.googleApiKey;
       break;
-    case ZAI_HOST: {
-      const profile = config.activeProviderProfile;
-      key = profile?.type === 'zai' ? profile.apiKey : '';
-      break;
-    }
-    case OPENROUTER_HOST: {
-      // OpenRouter uses a static bearer key from the stamped active profile
-      // (§7.5). The same host serves all three agents, so this single case
-      // covers them. `isManagedOAuthHost` never matches openrouter.ai, so no
-      // OAuth token is involved here.
-      const profile = config.activeProviderProfile;
-      key = profile?.type === 'openrouter' ? profile.apiKey : '';
-      break;
-    }
     default:
       logger.warn(`No API key mapping for unknown provider host: ${host}`);
       return '';

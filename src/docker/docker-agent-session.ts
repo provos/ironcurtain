@@ -1,3 +1,4 @@
+import { getGatewayDefinition } from '../config/provider-definitions.js';
 /**
  * DockerAgentSession -- Session implementation that runs an external
  * agent inside a Docker container.
@@ -585,7 +586,7 @@ export class DockerAgentSession implements Session {
    *
    * The authoritative sum (from OpenRouter `usage.cost` on the token-stream
    * bus) is ground truth and is preferred ONLY when the active profile is
-   * openrouter-type AND the sum is > 0 — Claude Code's `total_cost_usd` is
+   * configured to prefer proxy cost AND the sum is > 0 — Claude Code's `total_cost_usd` is
    * wrong when routed to a non-Anthropic model. For native profiles, or when
    * no authoritative cost was observed, the CLI self-report is used. When
    * neither is available, the prior cumulative value is retained (the Docker
@@ -596,8 +597,9 @@ export class DockerAgentSession implements Session {
    * `cumulativeCostUsd`.
    */
   private resolveCostUsd(cliCostUsd: number | undefined): number {
-    const isOpenRouter = this.config.activeProviderProfile?.type === 'openrouter';
-    if (isOpenRouter && this.authoritativeCostUsd > 0) {
+    const profile = this.config.activeProviderProfile;
+    const preferProxyCost = profile && profile.type !== 'native' && getGatewayDefinition(profile.type).preferProxyCost;
+    if (preferProxyCost && this.authoritativeCostUsd > 0) {
       return this.authoritativeCostUsd;
     }
     if (cliCostUsd !== undefined) {
