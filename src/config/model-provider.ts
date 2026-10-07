@@ -17,11 +17,9 @@
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { ResolvedUserConfig, HostModelRole } from './user-config.js';
 import { resolveActiveProfile } from './user-config.js';
-import { resolveMappedModel } from './model-mapping.js';
-import { resolveZaiModel, zaiBaseUrls } from './zai.js';
+import { getGatewayDefinition, resolveGatewayModel } from './provider-definitions.js';
 import { parseModelId } from './model-id.js';
 import type { ProviderId } from './model-id.js';
-import { providerPreferenceToWire } from './openrouter.js';
 
 export { parseModelId, PROVIDER_ENV_VARS } from './model-id.js';
 export type { ProviderId, ParsedModelId } from './model-id.js';
@@ -72,42 +70,33 @@ export async function createLanguageModel(
     const profile = resolveActiveProfile(config.modelProviders, profileName);
     if (profile.type !== 'native') {
       if (!profile.apiKey) throw new Error(`No API key configured for host model profile "${profileName}".`);
-      const requested = parseModelId(qualifiedId).modelId;
-      const model =
-        profile.type === 'zai'
-          ? resolveZaiModel(profile, requested)
-          : (resolveMappedModel(requested, profile.modelMap) ?? requested);
+      const definition = getGatewayDefinition(profile.type);
+      // Host roles do not inherit Docker per-agent selections.
+      const model = resolveGatewayModel(profile, qualifiedId).selected;
       const { createOpenAI } = await import('@ai-sdk/openai');
       const proxyFetch = await getProxyFetch();
-      const preference =
-        profile.type === 'openrouter'
-          ? profile.providerPreference !== undefined
-            ? providerPreferenceToWire(profile.providerPreference)
-            : model.startsWith('z-ai/')
-              ? { order: ['z-ai'] }
-              : undefined
-          : undefined;
+      const requestFields = definition.requestFields?.(profile, model)?.body;
       const fetch: typeof globalThis.fetch | undefined =
-        preference === undefined
+        requestFields === undefined
           ? proxyFetch
           : (input, init) => {
               if (typeof init?.body !== 'string')
-                throw new Error('OpenRouter host model requests require a JSON body.');
+                throw new Error(`${definition.label} host model requests require a JSON body.`);
               const body = JSON.parse(init.body) as Record<string, unknown>;
               return (proxyFetch ?? globalThis.fetch)(input, {
                 ...init,
-                body: JSON.stringify({ ...body, provider: preference }),
+                body: JSON.stringify({ ...body, ...requestFields }),
               });
             };
       const provider = createOpenAI({
         name: profile.type,
         apiKey: profile.apiKey,
-        baseURL: profile.type === 'zai' ? zaiBaseUrls(profile.plan).chat : 'https://openrouter.ai/api/v1',
+        baseURL: definition.baseUrls(profile).chat,
         fetch,
       });
       // Gateways implement Chat Completions; the SDK's default is Responses.
       const chat = provider.chat(model);
-      if (profile.type !== 'zai') return chat;
+      if (definition.structuredOutput === 'schema') return chat;
       const { wrapLanguageModel } = await import('ai');
       return wrapLanguageModel({
         model: chat,
@@ -116,7 +105,7 @@ export async function createLanguageModel(
           // eslint-disable-next-line @typescript-eslint/require-await -- middleware requires a Promise
           async transformParams({ params }) {
             if (params.responseFormat?.type !== 'json' || params.responseFormat.schema === undefined) return params;
-            // Z.AI documents JSON mode with client-side schema validation.
+            // Providers with JSON-object support use client-side schema validation.
             // Keep the AI SDK's output validation, supplying the schema in the prompt.
             return {
               ...params,

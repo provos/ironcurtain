@@ -945,6 +945,13 @@ export async function setStatisticsConfig(input: StatisticsConfigDto): Promise<S
  * unknown slugs) or the offline floor (`bundled` → warn-only). Ungated read.
  * Pass `forceRefresh` to bypass the daemon's 6h cache (the editor's Refresh button).
  */
+export async function listProviderModels(service: string, forceRefresh = false): Promise<OpenrouterModelsDto> {
+  return getWsClient().request<OpenrouterModelsDto>('config.listProviderModels', {
+    service,
+    ...(forceRefresh ? { forceRefresh } : {}),
+  });
+}
+
 export async function listOpenrouterModels(forceRefresh = false): Promise<OpenrouterModelsDto> {
   return getWsClient().request<OpenrouterModelsDto>(
     'config.listOpenrouterModels',

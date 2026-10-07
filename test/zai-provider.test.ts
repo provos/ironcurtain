@@ -375,6 +375,49 @@ describe('named profiles for host roles using the installed SDK', () => {
     });
   });
 
+  it('maps a host OpenRouter request once, ignores Docker overrides, and retains provider pins', async () => {
+    const c = config({
+      modelProviders: {
+        profiles: {
+          glm: {
+            type: 'openrouter',
+            apiKey: 'router-key',
+            modelMap: [
+              { match: 'A', model: 'B' },
+              { match: 'B', model: 'C' },
+            ],
+            perAgent: { 'claude-code': 'docker-only', codex: 'docker-only', goose: 'docker-only' },
+            providerPreference: { only: ['approved'], allowFallbacks: false },
+          },
+        },
+      },
+      hostModelProfiles: { policy: 'glm' },
+    });
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        body = JSON.parse(init.body as string) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            id: 'chain',
+            created: 1,
+            model: 'B',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    const { generateText } = await import('ai');
+    await generateText({
+      model: await createLanguageModel('anthropic:A', c.userConfig, 'policy'),
+      prompt: 'Reply OK',
+      maxRetries: 0,
+    });
+    expect(body).toMatchObject({ model: 'B', provider: { only: ['approved'], allow_fallbacks: false } });
+  });
+
   it('sends JSON mode to Z.AI and still validates auto-approver output', async () => {
     const c = config({ hostModelProfiles: { autoApprove: 'glm' }, autoApprove: { enabled: true } });
     const requests: { url: string; body: Record<string, unknown> }[] = [];

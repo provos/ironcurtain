@@ -1,3 +1,4 @@
+import { getGatewayDefinition } from '../config/provider-definitions.js';
 import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * Pre-flight checks and explicit session mode selection.
@@ -335,8 +336,13 @@ async function resolveDockerAgent(
 
   if (credState.credKind === null) {
     const profile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
-    if (profile.type === 'zai')
-      throw new PreflightError('Z.AI profile requires an API key. Set ZAI_API_KEY or the profile apiKey.');
+    if (profile.type !== 'native') {
+      const definition = getGatewayDefinition(profile.type);
+      if (!definition.nativeCredentialHelp)
+        throw new PreflightError(
+          `${definition.label} profile requires an API key. Set ${definition.editor.credentialEnv} or the profile apiKey.`,
+        );
+    }
     throw new PreflightError(messages.credentialsMissing(credState.anthropicOAuthOnly));
   }
 

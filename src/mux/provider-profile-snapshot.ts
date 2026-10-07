@@ -10,10 +10,9 @@
  * See docs/designs/openrouter-integration.md §9.7 (F5).
  */
 
-import { resolveZaiModel } from '../config/zai.js';
-import { DEFAULT_GLM_SLUG, NATIVE_PROFILE_NAME } from '../config/user-config.js';
+import { providerProfileSummary } from '../config/provider-definitions.js';
+import { NATIVE_PROFILE_NAME } from '../config/user-config.js';
 import type { ResolvedModelProvidersConfig } from '../config/user-config.js';
-import { resolveMappedModel } from '../docker/openrouter.js';
 
 /** A single provider profile as rendered in the `/new` picker. */
 export interface ProviderProfileSnapshot {
@@ -53,18 +52,7 @@ export function buildProviderProfileSnapshots(modelProviders: ResolvedModelProvi
       snapshots.push({ name, type: 'native', primaryModelLabel: NATIVE_LABEL, isDefault });
       continue;
     }
-    if (profile.type === 'zai') {
-      snapshots.push({
-        name,
-        type: 'zai',
-        primaryModelLabel: `${resolveZaiModel(profile, 'claude-sonnet', 'claude-code')} (Z.AI, ${profile.plan})`,
-        isDefault,
-      });
-      continue;
-    }
-    const slug =
-      profile.perAgent['claude-code'] ?? resolveMappedModel('claude-sonnet', profile.modelMap) ?? DEFAULT_GLM_SLUG;
-    snapshots.push({ name, type: 'openrouter', primaryModelLabel: `${slug} (OpenRouter)`, isDefault });
+    snapshots.push({ name, type: profile.type, primaryModelLabel: providerProfileSummary(profile), isDefault });
   }
 
   // Ensure `native` renders first regardless of record iteration order.

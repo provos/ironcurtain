@@ -12,7 +12,15 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-id.js';
-import { ZAI_DEFAULT_MODEL, ZAI_DEFAULT_FLASH_MODEL } from './zai.js';
+import {
+  GLM_DEFAULT_MODEL,
+  getGatewayDefinition,
+  getProviderEditorDescriptors,
+  OPENROUTER_DEFAULT_MODEL,
+  OPENROUTER_FLASH_MODEL,
+  OPENROUTER_DEFAULT_MAP,
+  providerDefaultMap,
+} from './provider-definitions.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 import {
   dockerWorkloadRequestedSchema,
@@ -291,14 +299,14 @@ export type ContainerRuntimeSetting = (typeof CONTAINER_RUNTIMES)[number];
 // --- OpenRouter provider-profile registry (see docs/designs/openrouter-integration.md §6) ---
 
 /** OpenRouter host (single host serving all three agent wire formats). */
-export const OPENROUTER_HOST = 'openrouter.ai';
+export const OPENROUTER_HOST = getGatewayDefinition('openrouter').host;
 /** Claude Code `ANTHROPIC_BASE_URL` when routing through OpenRouter. */
-export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
+export const OPENROUTER_BASE_URL = getGatewayDefinition('openrouter').baseUrls({ type: 'openrouter' }).messages;
 /** Codex/Goose `base_url` when routing through OpenRouter. */
-export const OPENROUTER_API_V1 = 'https://openrouter.ai/api/v1';
+export const OPENROUTER_API_V1 = getGatewayDefinition('openrouter').baseUrls({ type: 'openrouter' }).responses;
 /** Default GLM slug used when no per-agent / glob mapping resolves (D2). */
-export const DEFAULT_GLM_SLUG = `z-ai/${ZAI_DEFAULT_MODEL}`;
-export const DEFAULT_GLM_FLASH_SLUG = `z-ai/${ZAI_DEFAULT_FLASH_MODEL}`;
+export const DEFAULT_GLM_SLUG = OPENROUTER_DEFAULT_MODEL;
+export const DEFAULT_GLM_FLASH_SLUG = OPENROUTER_FLASH_MODEL;
 
 /** The implicit, always-present profile name. Reserved: users may not define it. */
 export const NATIVE_PROFILE_NAME = 'native';
@@ -309,11 +317,7 @@ export const NATIVE_PROFILE_NAME = 'native';
  * explicit `modelMap: []` is preserved and disables glob mapping (per-agent
  * only mode).
  */
-export const DEFAULT_MODEL_MAP: readonly { readonly match: string; readonly model: string }[] = [
-  { match: '*opus*', model: DEFAULT_GLM_SLUG },
-  { match: '*sonnet*', model: DEFAULT_GLM_FLASH_SLUG },
-  { match: '*haiku*', model: DEFAULT_GLM_FLASH_SLUG },
-];
+export const DEFAULT_MODEL_MAP = OPENROUTER_DEFAULT_MAP;
 
 /** A single ordered glob→slug mapping rule. First match wins. */
 const modelMapRuleSchema = z.object({
@@ -373,7 +377,7 @@ const hostModelProfilesSchema = z.partialRecord(z.enum(HOST_MODEL_ROLES), z.stri
 const nativeProfileSchema = z.object({ type: z.literal('native') });
 
 /** v1 profile union. New provider types extend this discriminator (§16). */
-const providerProfileSchema = z.discriminatedUnion('type', [
+export const providerProfileSchema = z.discriminatedUnion('type', [
   nativeProfileSchema,
   openrouterProfileSchema,
   zaiProfileSchema,
@@ -1099,17 +1103,13 @@ function resolveModelProviders(config: UserConfig['modelProviders']): ResolvedMo
   for (const [name, profile] of Object.entries(config?.profiles ?? {})) {
     if (profile.type === 'openrouter') profiles[name] = resolveOpenrouterProfile(profile);
     else if (profile.type === 'zai') {
-      const model = profile.model ?? ZAI_DEFAULT_MODEL;
+      const model = profile.model ?? GLM_DEFAULT_MODEL;
       profiles[name] = {
         type: 'zai',
         apiKey: profile.apiKey ?? '',
         plan: profile.plan ?? 'api',
         model,
-        modelMap: profile.modelMap ?? [
-          { match: '*opus*', model },
-          { match: '*sonnet*', model: ZAI_DEFAULT_FLASH_MODEL },
-          { match: '*haiku*', model: ZAI_DEFAULT_FLASH_MODEL },
-        ],
+        modelMap: profile.modelMap ?? providerDefaultMap(profile.type, model),
         usesDefaultMap: profile.modelMap === undefined,
         perAgent: Object.fromEntries(DOCKER_AGENTS.map((agent) => [agent, profile.perAgent?.[agent]])) as Record<
           DockerAgent,
@@ -1159,23 +1159,7 @@ export function maskApiKey(key: string | undefined | null): string {
   return key.slice(0, 3) + '...' + key.slice(-3);
 }
 
-/**
- * Deep-clones a provider preference into a fresh mutable object, copying the
- * `order`/`only` arrays so callers can't alias the source. Shared by the config
- * editor and the web-ui dispatch, which convert between the resolved, DTO, and
- * input shapes with an identical field copy.
- */
-export function cloneProviderPreference(pref: {
-  readonly order?: readonly string[];
-  readonly only?: readonly string[];
-  readonly allowFallbacks?: boolean;
-}): { order?: string[]; only?: string[]; allowFallbacks?: boolean } {
-  return {
-    order: pref.order ? [...pref.order] : undefined,
-    only: pref.only ? [...pref.only] : undefined,
-    allowFallbacks: pref.allowFallbacks,
-  };
-}
+export { cloneProviderPreference } from './provider-preference.js';
 
 /**
  * Resolves Signal config inline to avoid circular imports.
@@ -1227,18 +1211,17 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
  * resolved apiKey (env fills/overrides). Resolution: `env || profile.apiKey`.
  * When the env var is unset, the config-resolved key is left unchanged.
  */
+function providerKeyOverrides(): ReadonlyMap<string, string | undefined> {
+  return new Map(getProviderEditorDescriptors().map(({ id, credentialEnv }) => [id, process.env[credentialEnv]]));
+}
+
 function applyProviderKeyEnv(config: ResolvedModelProvidersConfig): ResolvedModelProvidersConfig {
-  const envKey = process.env.OPENROUTER_API_KEY;
-  const zaiKey = process.env.ZAI_API_KEY;
-  if (!envKey && !zaiKey) return config;
+  const overrides = providerKeyOverrides();
+  if (![...overrides.values()].some(Boolean)) return config;
   const profiles: Record<string, ResolvedProviderProfile> = {};
   for (const [name, profile] of Object.entries(config.profiles)) {
-    profiles[name] =
-      profile.type === 'openrouter' && envKey
-        ? { ...profile, apiKey: envKey }
-        : profile.type === 'zai' && zaiKey
-          ? { ...profile, apiKey: zaiKey }
-          : profile;
+    const key = overrides.get(profile.type);
+    profiles[name] = profile.type !== 'native' && key ? { ...profile, apiKey: key } : profile;
   }
   return { default: config.default, profiles };
 }
@@ -1318,7 +1301,8 @@ function stripEnvProviderKeys(
   existing: Record<string, unknown>,
   profileRenames: Readonly<Record<string, string>> = {},
 ): Record<string, unknown> {
-  if (!process.env.OPENROUTER_API_KEY && !process.env.ZAI_API_KEY) return merged;
+  const overrides = providerKeyOverrides();
+  if (![...overrides.values()].some(Boolean)) return merged;
   const mp = merged['modelProviders'];
   if (!isPlainObject(mp) || !isPlainObject(mp['profiles'])) return merged;
 
@@ -1328,12 +1312,7 @@ function stripEnvProviderKeys(
 
   for (const [name, profile] of Object.entries(mp['profiles'])) {
     if (!isPlainObject(profile)) continue;
-    const envKey =
-      profile['type'] === 'openrouter'
-        ? process.env.OPENROUTER_API_KEY
-        : profile['type'] === 'zai'
-          ? process.env.ZAI_API_KEY
-          : undefined;
+    const envKey = typeof profile['type'] === 'string' ? overrides.get(profile['type']) : undefined;
     if (!envKey || profile['apiKey'] !== envKey) continue;
     const fileProfile = existingProfiles[profileRenames[name] ?? name];
     const fileKey =

@@ -4,7 +4,7 @@
     DockerWorkloadNetworkAccess,
     GetModelProvidersDto,
     ProfileDto,
-    OpenrouterProfileDto,
+    GatewayProfileDto,
     ModelMapRuleDto,
     StatisticsConfigDto,
   } from '$lib/types.js';
@@ -13,7 +13,7 @@
     getModelProviders,
     setDockerWorkloadSettings,
     setModelProviders,
-    listOpenrouterModels,
+    listProviderModels,
     getStatisticsConfig,
     setStatisticsConfig,
     appState,
@@ -38,10 +38,10 @@
     DOCKER_AGENTS,
     type DockerAgent,
     type EditableProfile,
-    blankOpenrouterProfile,
+    blankProfile,
     toEditable,
     editableToDto,
-    editableZaiToDto,
+    defaultMapSummary,
     isDuplicateProfileName,
     validateSlugs,
     blockMessage,
@@ -81,21 +81,23 @@
   let statisticsSaving = $state(false);
   let statisticsError = $state('');
 
-  // Editable working copy of openrouter profiles keyed by name (native excluded —
+  // Editable working copy of provider profiles keyed by name (native excluded —
   // it is implicit and non-editable). The masked apiKey is the placeholder; an
   // unedited field is sent back as-is (mask) so the backend preserves the key.
   let editing = $state<{ name: string; original: string | null; profile: EditableProfile } | null>(null);
   let saving = $state(false);
   let saveError = $state<{ code: string; message: string } | null>(null);
 
-  // OpenRouter model catalog for slug autocomplete + save-time validation.
+  // Provider model catalog for slug autocomplete + save-time validation.
   // `modelsSource` defaults to 'bundled' (warn-only) until loadModels() resolves,
   // so an in-flight save can never spuriously hard-block.
   let models = $state<string[]>([]);
   let modelsSource = $state<'live' | 'cache' | 'bundled'>('bundled');
   let modelsLoading = $state(false);
   let modelsError = $state(false);
-  let modelsLoaded = $state(false);
+  let modelsService = $state<string | null>(null);
+  let modelsRequest = 0;
+  let modelsPendingService = $state<string | null>(null);
 
   // Fields the last blocked save flagged (drives each combobox's `invalid` ring).
   let invalidModelRows = $state<ReadonlySet<number>>(new Set());
@@ -229,47 +231,68 @@
     statisticsSaving = false;
   }
 
-  // List of openrouter profile names (native rendered separately, non-editable).
-  const openrouterNames = $derived<string[]>(
+  // List of provider profile names (native rendered separately, non-editable).
+  const profileNames = $derived<string[]>(
     registry ? Object.keys(registry.profiles).filter((n) => n !== NATIVE_NAME) : [],
   );
-  const allNames = $derived<string[]>(registry ? [NATIVE_NAME, ...openrouterNames] : [NATIVE_NAME]);
+  const allNames = $derived<string[]>(registry ? [NATIVE_NAME, ...profileNames] : [NATIVE_NAME]);
+
+  const providers = $derived(registry?.providers ?? []);
+  const editDescriptor = $derived(providers.find((provider) => provider.id === editing?.profile.type));
 
   function profileSummary(name: string): string {
-    const p = registry?.profiles[name];
-    if (!p || p.type === 'native') return 'Native providers (Anthropic / OpenAI / ChatGPT)';
-    if (p.type === 'zai') return `${p.model ?? 'glm-5.3'} (Z.AI, ${p.plan ?? 'api'})`;
-    const map = p.modelMap;
-    const mapPart =
-      map === undefined
-        ? 'default map'
-        : map.length === 0
-          ? 'per-agent only'
-          : map.length === 1
-            ? `→ ${map[0].model}`
-            : `${map.length} map rules`;
-    return `${mapPart} · key: ${p.apiKey ?? 'none'}`;
+    return registry?.summaries[name] ?? '';
   }
 
-  // Fetch the OpenRouter catalog lazily when the editor opens. Best-effort: a
+  // Fetch the selected provider’s catalog lazily when the editor opens. Best-effort: a
   // failure degrades to the bundled (warn-only) mode, never throws. Loads once
   // per page session (the daemon caches with a 6h TTL); a prior failure retries,
   // and the editor's Refresh button forces a re-fetch (`opts.force`).
   async function loadModels(opts?: { force?: boolean }): Promise<void> {
-    const force = opts?.force ?? false;
-    if (modelsLoading) return;
-    if (modelsLoaded && !modelsError && !force) return;
+    const descriptor = editDescriptor;
+    if (!descriptor || descriptor.catalog === 'manual') {
+      ++modelsRequest;
+      modelsPendingService = null;
+      models = [];
+      modelsSource = 'bundled';
+      modelsLoading = false;
+      modelsError = false;
+      modelsService = null;
+      return;
+    }
+    if (
+      !opts?.force &&
+      ((modelsLoading && modelsPendingService === descriptor.id) ||
+        (modelsService === descriptor.id && !modelsLoading && !modelsError))
+    )
+      return;
+    const request = ++modelsRequest;
+    modelsPendingService = descriptor.id;
     modelsLoading = true;
     modelsError = false;
+    models = [];
+    modelsSource = 'bundled';
     try {
-      const dto = await listOpenrouterModels(force);
+      const dto = await listProviderModels(descriptor.id, opts?.force ?? false);
+      if (request !== modelsRequest) return;
       models = [...dto.models];
       modelsSource = dto.source;
-      modelsLoaded = true;
+      modelsService = descriptor.id;
     } catch {
+      if (request !== modelsRequest) return;
       modelsError = true;
     }
     modelsLoading = false;
+    modelsPendingService = null;
+  }
+
+  function changeService(): void {
+    const descriptor = editDescriptor;
+    if (!editing || !descriptor) return;
+    // A service change in the add flow starts fresh; credentials/options never cross service identities.
+    editing.profile = blankProfile(descriptor);
+    resetEditFeedback();
+    void loadModels();
   }
 
   // Clears per-edit UX state (blocked-field marks + the last warn note) so a
@@ -283,10 +306,12 @@
 
   // ── Add / edit dialog ────────────────────────────────────────────────────
   function openAdd(): void {
+    const descriptor = providers[0];
+    if (!descriptor) return;
     editing = {
       name: '',
       original: null,
-      profile: { ...blankOpenrouterProfile(), type: 'openrouter', plan: 'api', model: 'glm-5.3' },
+      profile: blankProfile(descriptor),
     };
     resetEditFeedback();
     void loadModels();
@@ -295,7 +320,9 @@
   function openEdit(name: string): void {
     const p = registry?.profiles[name];
     if (!p || p.type === 'native') return;
-    editing = { name, original: name, profile: toEditable(p) };
+    const descriptor = providers.find((provider) => provider.id === p.type);
+    if (!descriptor) return;
+    editing = { name, original: name, profile: toEditable(p, descriptor) };
     resetEditFeedback();
     void loadModels();
   }
@@ -305,11 +332,11 @@
     saveError = null;
   }
 
-  /** The originally-persisted openrouter DTO for `original` (undefined for add). */
-  function registryProfileDto(original: string | null): OpenrouterProfileDto | undefined {
+  /** The originally-persisted provider DTO for `original` (undefined for add). */
+  function registryProfileDto(original: string | null): GatewayProfileDto | undefined {
     if (!original) return undefined;
     const p = registry?.profiles[original];
-    return p && p.type === 'openrouter' ? p : undefined;
+    return p && p.type !== 'native' ? p : undefined;
   }
 
   function addMapRow(): void {
@@ -335,19 +362,20 @@
   /** Builds the whole profiles record for the write, replacing/adding the edited profile. */
   function buildProfilesForSave(edit: NonNullable<typeof editing>): Record<string, ProfileDto> {
     const out: Record<string, ProfileDto> = {};
-    // Carry over all existing openrouter profiles untouched (whole-record send).
-    for (const name of openrouterNames) {
+    // Carry over all existing provider profiles untouched (whole-record send).
+    for (const name of profileNames) {
       if (name === edit.original) continue; // replaced below
       const existing = registry?.profiles[name];
       if (existing && existing.type !== 'native') out[name] = existing;
     }
     // Add/replace the edited profile under its (possibly renamed) name.
-    out[edit.name.trim()] = edit.profile.type === 'zai' ? editableZaiToDto(edit.profile) : editableToDto(edit.profile);
+    if (!editDescriptor) throw new Error('Provider configuration is unavailable.');
+    out[edit.name.trim()] = editableToDto(edit.profile, editDescriptor);
     return out;
   }
 
   async function saveEdit(): Promise<void> {
-    if (!editing) return;
+    if (!editing || !editDescriptor) return;
     const name = editing.name.trim();
     if (!name) {
       saveError = { code: 'INVALID_PARAMS', message: 'Profile name is required.' };
@@ -359,13 +387,13 @@
     }
     // Renaming onto (or adding with) an existing profile's name would silently
     // overwrite that profile's config — reject instead of clobbering it.
-    if (isDuplicateProfileName(name, editing.original, openrouterNames)) {
+    if (isDuplicateProfileName(name, editing.original, profileNames)) {
       saveError = { code: 'INVALID_PARAMS', message: `A profile named "${name}" already exists.` };
       return;
     }
 
-    if (editing.profile.type === 'zai' && !editing.profile.model?.trim()) {
-      saveError = { code: 'INVALID_PARAMS', message: 'Z.AI model is required.' };
+    if (editDescriptor.model && !editing.profile.model?.trim()) {
+      saveError = { code: 'INVALID_PARAMS', message: `${editDescriptor.model.label} is required.` };
       return;
     }
 
@@ -374,11 +402,11 @@
     // profile so a routine edit never traps an untouched, possibly-delisted slug.
     const grandfathered = persistedSlugSet(registryProfileDto(editing.original));
     const validation =
-      editing.profile.type === 'zai'
+      editDescriptor.catalog === 'manual'
         ? { blocked: [], warnings: [] }
         : validateSlugs(editing.profile, { slugs: new Set(models), source: modelsSource }, grandfathered);
     if (validation.blocked.length > 0) {
-      saveError = { code: 'INVALID_PARAMS', message: blockMessage(validation.blocked) };
+      saveError = { code: 'INVALID_PARAMS', message: blockMessage(validation.blocked, editDescriptor.label) };
       const rows = new Set<number>();
       const agents = new Set<DockerAgent>();
       for (const issue of validation.blocked) {
@@ -426,7 +454,7 @@
     deleting = true;
     try {
       const remaining: Record<string, ProfileDto> = {};
-      for (const name of openrouterNames) {
+      for (const name of profileNames) {
         if (name === deleteTarget) continue;
         const existing = registry?.profiles[name];
         if (existing && existing.type !== 'native') remaining[name] = existing;
@@ -449,7 +477,7 @@
     try {
       // Resend the whole record (unchanged) with the new default.
       const profiles: Record<string, ProfileDto> = {};
-      for (const n of openrouterNames) {
+      for (const n of profileNames) {
         const existing = registry.profiles[n];
         if (existing && existing.type !== 'native') profiles[n] = existing;
       }
@@ -666,8 +694,8 @@
   <div class="flex items-center justify-between flex-wrap gap-3">
     <h3 class="text-lg font-semibold tracking-tight">Model Providers</h3>
     <div class="flex items-center gap-3">
-      <Badge variant="outline">{openrouterNames.length} profile{openrouterNames.length === 1 ? '' : 's'}</Badge>
-      {#if mutationAllowed}
+      <Badge variant="outline">{profileNames.length} profile{profileNames.length === 1 ? '' : 's'}</Badge>
+      {#if mutationAllowed && providers.length > 0}
         <Button variant="default" size="sm" onclick={openAdd} data-testid="add-profile-button">
           <Plus size={16} class="mr-1" /> Add profile
         </Button>
@@ -676,11 +704,9 @@
   </div>
 
   <p class="text-sm text-muted-foreground">
-    Route Docker agents through a model-provider profile. <span class="font-mono">native</span> keeps today's canonical
-    Anthropic / OpenAI / ChatGPT routing; an <span class="font-mono">openrouter</span> profile routes an agent through
-    OpenRouter with a bound model map and key. A Z.AI profile connects directly to Z.AI. Pick a default here, or select
-    a profile per session at
-    <span class="font-mono">/new</span> or with <span class="font-mono">--provider-profile</span>.
+    Route Docker agents through a provider profile. The <span class="font-mono">native</span> profile uses each
+    harness’s normal provider. Select a profile with <span class="font-mono">/new</span> or
+    <span class="font-mono">--provider-profile</span>.
   </p>
 
   {#if saveError}
@@ -773,11 +799,11 @@
       </TableBody>
     </Table>
 
-    {#if openrouterNames.length === 0}
+    {#if profileNames.length === 0}
       <Card>
         <CardContent>
           <p class="text-center text-muted-foreground py-8">
-            No OpenRouter profiles yet.
+            No provider profiles yet.
             {#if mutationAllowed}
               Add one with the “Add profile” button.
             {:else}
@@ -796,7 +822,7 @@
     <div class="space-y-4 max-h-[70vh] overflow-y-auto" data-testid="profile-editor">
       <div>
         <label class="text-xs text-muted-foreground" for="pf-name">Profile name</label>
-        <Input id="pf-name" bind:value={editing.name} placeholder="e.g. glm-5.3" data-testid="profile-name" />
+        <Input id="pf-name" bind:value={editing.name} placeholder="e.g. fast-models" data-testid="profile-name" />
       </div>
 
       <div>
@@ -806,21 +832,26 @@
           class="w-full rounded border bg-background p-2"
           bind:value={editing.profile.type}
           disabled={editing.original !== null}
+          onchange={changeService}
         >
-          <option value="openrouter">OpenRouter</option>
-          <option value="zai">Z.AI (direct)</option>
+          {#each providers as provider (provider.id)}
+            <option value={provider.id}>{provider.label}</option>
+          {/each}
         </select>
       </div>
-      {#if editing.profile.type === 'zai'}
+      {#if editDescriptor?.model}
         <div>
-          <label class="text-xs text-muted-foreground" for="pf-model">Default Z.AI model</label>
-          <Input id="pf-model" bind:value={editing.profile.model} placeholder="glm-5.3" />
+          <label class="text-xs text-muted-foreground" for="pf-model">{editDescriptor.model.label}</label>
+          <Input id="pf-model" bind:value={editing.profile.model} placeholder={editDescriptor.model.defaultValue} />
         </div>
+      {/if}
+      {#if editDescriptor?.plan}
         <div>
           <label class="text-xs text-muted-foreground" for="pf-plan">API plan</label>
           <select id="pf-plan" class="w-full rounded border bg-background p-2" bind:value={editing.profile.plan}>
-            <option value="api">Standard API</option>
-            <option value="coding">Coding Plan</option>
+            {#each editDescriptor.plan.choices as choice (choice.value)}
+              <option value={choice.value}>{choice.label}</option>
+            {/each}
           </select>
         </div>
       {/if}
@@ -829,29 +860,30 @@
         <Input
           id="pf-key"
           bind:value={editing.profile.apiKey}
-          placeholder={editing.profile.type === 'zai' ? 'Z.AI API key' : 'sk-or-v1-...'}
+          placeholder={editDescriptor?.credentialPlaceholder}
           data-testid="profile-apikey"
         />
         <p class="text-[11px] text-muted-foreground mt-1">
           Leave the masked value untouched to keep the stored key. Clear the field to remove it. Env
-          <span class="font-mono">{editing.profile.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'}</span> overrides
-          keys for profiles of this service.
+          <span class="font-mono">{editDescriptor?.credentialEnv}</span> overrides keys for profiles of this service.
         </p>
       </div>
 
       <div>
         <div class="flex items-center justify-between mb-1">
           <p class="text-xs text-muted-foreground">Model map</p>
-          <Button
-            variant="ghost"
-            size="sm"
-            onclick={() => loadModels({ force: true })}
-            disabled={modelsLoading}
-            data-testid="model-refresh"
-          >
-            <ArrowsClockwise size={13} class="mr-1" />
-            {modelsLoading ? 'Refreshing…' : 'Refresh models'}
-          </Button>
+          {#if editDescriptor?.catalog === 'remote'}
+            <Button
+              variant="ghost"
+              size="sm"
+              onclick={() => loadModels({ force: true })}
+              disabled={modelsLoading}
+              data-testid="model-refresh"
+            >
+              <ArrowsClockwise size={13} class="mr-1" />
+              {modelsLoading ? 'Refreshing…' : 'Refresh models'}
+            </Button>
+          {/if}
         </div>
         <label class="flex items-start gap-2 text-sm mb-2">
           <input
@@ -864,13 +896,8 @@
           <span>
             Use IronCurtain’s default model map
             <span class="block text-[11px] text-muted-foreground">
-              {#if editing.profile.type === 'zai'}
-                Opus routes to the configured default model ({editing.profile.model ?? 'glm-5.3'}). Sonnet and Haiku
-                route to glm-5.3-flash.
-              {:else}
-                Opus routes to z-ai/glm-5.3. Sonnet and Haiku route to z-ai/glm-5.3-flash.
-              {/if}
-              The map stays in sync with IronCurtain’s defaults. Uncheck to define your own glob rules.
+              {editDescriptor ? defaultMapSummary(editDescriptor, editing.profile.model) : ''}. The map stays in sync
+              with IronCurtain’s defaults. Uncheck to define your own glob rules.
             </span>
           </span>
         </label>
@@ -890,12 +917,12 @@
               <div class="flex-1">
                 <ModelCombobox
                   bind:value={editing.profile.modelMap[i].model}
-                  models={editing.profile.type === 'zai' ? [] : models}
-                  source={editing.profile.type === 'zai' ? 'bundled' : modelsSource}
+                  {models}
+                  source={modelsSource}
                   loading={modelsLoading}
                   error={modelsError}
                   invalid={invalidModelRows.has(i)}
-                  placeholder="z-ai/glm-5.3-flash"
+                  placeholder={editDescriptor?.modelPlaceholder}
                   testid={`map-model-${i}`}
                 />
               </div>
@@ -922,8 +949,8 @@
               <div class="flex-1">
                 <ModelCombobox
                   bind:value={editing.profile.perAgent[agent]}
-                  models={editing.profile.type === 'zai' ? [] : models}
-                  source={editing.profile.type === 'zai' ? 'bundled' : modelsSource}
+                  {models}
+                  source={modelsSource}
                   loading={modelsLoading}
                   error={modelsError}
                   invalid={invalidAgents.has(agent)}
@@ -936,7 +963,7 @@
         </div>
       </div>
 
-      {#if editing.profile.type !== 'zai'}
+      {#if editDescriptor?.providerRouting}
         <div>
           <p class="text-xs text-muted-foreground mb-1">Provider preference (cache pinning)</p>
           <div class="space-y-2">
@@ -944,7 +971,7 @@
               <span class="text-xs w-16 shrink-0">order</span>
               <Input
                 bind:value={editing.profile.providerOrder}
-                placeholder="z-ai (comma-separated)"
+                placeholder="Provider IDs, comma-separated"
                 data-testid="provider-order"
               />
             </div>
@@ -952,10 +979,22 @@
               <span class="text-xs w-16 shrink-0">only</span>
               <Input
                 bind:value={editing.profile.providerOnly}
-                placeholder="z-ai (comma-separated)"
+                placeholder="Provider IDs, comma-separated"
                 data-testid="provider-only"
               />
             </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="provider-preference-reset"
+              onclick={() => {
+                if (!editing) return;
+                editing.profile.providerOrder = '';
+                editing.profile.providerOnly = '';
+                editing.profile.allowFallbacks = true;
+                editing.profile.providerPreferenceExplicit = false;
+              }}>Use provider defaults</Button
+            >
             <label class="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -966,10 +1005,11 @@
             </label>
           </div>
         </div>
-
+      {/if}
+      {#if editDescriptor?.sessionAffinity}
         <label class="flex items-center gap-3 text-sm">
           <input type="checkbox" bind:checked={editing.profile.sessionAffinity} data-testid="session-affinity" />
-          <span>Session affinity (inject session_id for GLM cache affinity)</span>
+          <span>Session affinity</span>
         </label>
       {/if}
       {#if saveError}

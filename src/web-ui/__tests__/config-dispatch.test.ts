@@ -248,6 +248,35 @@ describe('config.getModelProviders', () => {
     expect(Object.keys(dto.profiles)).toEqual(['native']);
   });
 
+  it('returns safe built-in descriptors and backend-computed routing summaries', async () => {
+    writeConfig({
+      modelProviders: { profiles: { direct: { type: 'zai', apiKey: 'host-only-secret', model: 'custom-full' } } },
+    });
+    const dto = await get(makeCtx(false));
+    expect(dto.providers.map((provider) => provider.id)).toEqual(['openrouter', 'zai']);
+    expect(dto.providers.find((provider) => provider.id === 'zai')).toMatchObject({
+      credentialEnv: 'ZAI_API_KEY',
+      catalog: 'manual',
+      model: { defaultValue: 'glm-5.3' },
+      providerRouting: false,
+    });
+    expect(dto.summaries.direct).toContain('glm-5.3-flash (Z.AI, api)');
+    expect(JSON.stringify(dto)).not.toContain('host-only-secret');
+  });
+
+  it('serves manual provider catalogs without credentials and rejects unknown providers/endpoints', async () => {
+    expect(await configDispatch(makeCtx(false), 'config.listProviderModels', { service: 'zai' })).toEqual({
+      models: [],
+      source: 'bundled',
+    });
+    await expect(
+      configDispatch(makeCtx(false), 'config.listProviderModels', { service: 'custom' }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      set(makeCtx(true), { profiles: { custom: { type: 'zai', baseURL: 'https://models.example.test' } } }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  });
+
   it('masks every openrouter profile key; native present and key-less', async () => {
     writeConfig({
       modelProviders: {

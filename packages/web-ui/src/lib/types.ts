@@ -929,28 +929,48 @@ export interface NativeProfileDto {
  * (`sk-...xyz` / 'none'). On a SET request `apiKey` follows the M5
  * mask-unchanged contract: absent/null/mask-equal → keep, '' → clear, other → set.
  */
-export interface OpenrouterProfileDto {
-  readonly type: 'openrouter';
+export interface GatewayProfileDto {
+  readonly type: string;
   readonly apiKey?: string | null;
+  readonly plan?: string;
+  readonly model?: string;
   readonly modelMap?: readonly ModelMapRuleDto[];
   readonly perAgent?: Readonly<Record<string, string | undefined>>;
   readonly providerPreference?: ProviderPreferenceDto;
   readonly sessionAffinity?: boolean;
 }
-
-/** A single profile DTO (discriminated on `type`). */
-export interface ZaiProfileDto {
-  readonly type: 'zai';
-  readonly apiKey?: string | null;
-  readonly plan?: 'api' | 'coding';
-  readonly model?: string;
-  readonly modelMap?: readonly ModelMapRuleDto[];
-  readonly perAgent?: Readonly<Record<string, string | undefined>>;
+export interface OpenrouterProfileDto extends GatewayProfileDto {
+  readonly type: 'openrouter';
 }
-export type ProfileDto = NativeProfileDto | OpenrouterProfileDto | ZaiProfileDto;
+export interface ZaiProfileDto extends GatewayProfileDto {
+  readonly type: 'zai';
+  readonly plan?: 'api' | 'coding';
+}
+export type ProfileDto = GatewayProfileDto;
+
+/** Credential-free built-in provider metadata supplied by the daemon. */
+export interface ProviderEditorDescriptor {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly credentialEnv: string;
+  readonly credentialPlaceholder: string;
+  readonly modelPlaceholder: string;
+  readonly catalog: 'remote' | 'manual';
+  readonly model?: { readonly label: string; readonly defaultValue: string; readonly defaultMapMatch?: string };
+  readonly plan?: {
+    readonly defaultValue: string;
+    readonly choices: readonly { readonly value: string; readonly label: string }[];
+  };
+  readonly providerRouting: boolean;
+  readonly sessionAffinity: boolean;
+  readonly defaultMap: readonly ModelMapRuleDto[];
+}
 
 /** Response from `config.getModelProviders`. */
 export interface GetModelProvidersDto {
+  readonly providers: readonly ProviderEditorDescriptor[];
+  readonly summaries: Readonly<Record<string, string>>;
   readonly default: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }

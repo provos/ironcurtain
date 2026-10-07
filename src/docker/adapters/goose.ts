@@ -1,3 +1,5 @@
+import { gatewayProfile, resolveChatClient, resolveGatewayCommandModel } from '../../config/gateway-client.js';
+import { gatewayProviders, gatewayCredential, gatewaySentinel } from '../gateway-runtime.js';
 /**
  * Goose agent adapter for Docker Agent Mode.
  *
@@ -23,12 +25,8 @@ import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import type { AuthMethod } from '../oauth-credentials.js';
 import type { ResolvedUserConfig, GooseProvider } from '../../config/user-config.js';
-import { DEFAULT_GLM_SLUG, OPENROUTER_HOST } from '../../config/user-config.js';
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
-import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
-import { makeZaiProvider, zaiCredential } from '../zai.js';
-import { ZAI_HOST, resolveZaiModel, zaiBaseUrls } from '../../config/zai.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE } from '../runtime-trust.js';
 import { resolveApiKeyForProvider } from '../../config/model-provider.js';
 import {
@@ -230,7 +228,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       ];
     },
 
-    // Z.AI batch calls select their effective override via --model. Other
+    // Client-owned model selection passes batch overrides via --model. Other
     // routes retain the GOOSE_MODEL startup selection. Batch calls don't resume.
     buildCommand(
       message: string,
@@ -244,10 +242,9 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     ): readonly string[] {
       const instructions = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const { delimiter } = escapeHeredoc(instructions);
-      const modelOverride =
-        options.providerProfile?.type === 'zai' && options.modelOverride
-          ? resolveZaiModel(options.providerProfile, options.modelOverride, 'goose')
-          : undefined;
+      const modelOverride = options.modelOverride
+        ? resolveGatewayCommandModel(options.providerProfile, options.modelOverride, 'goose')
+        : undefined;
 
       return [
         '/bin/sh',
@@ -269,56 +266,32 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- interface requires authKind parameter
     getProviders(config: IronCurtainConfig, _authKind?: DockerAuthKind): readonly ProviderConfig[] {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'zai') return [makeZaiProvider(profile, 'goose')];
-      if (profile?.type === 'openrouter') {
-        // OpenRouter routing replaces the single native provider. Goose speaks
-        // the OpenAI chat wire format.
-        return [makeOpenRouterProviderForProfile('chat', profile, 'goose')];
-      }
+      const gateway = gatewayProviders(config, 'chat', 'goose', ['gpt-4o-mini']);
+      if (gateway) return gateway;
       // Goose uses exactly one provider based on user config.
       // The authKind parameter is ignored because Goose does not support OAuth.
       return [getProviderConfig(gooseProvider)];
     },
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'zai') {
-        const fakeKey = fakeKeys.get(ZAI_HOST);
-        if (!fakeKey) throw new Error('No fake key generated for Z.AI');
-        return {
-          GOOSE_PROVIDER: 'openai',
-          GOOSE_MODEL: resolveZaiModel(profile, gooseModel, 'goose'),
-          OPENAI_HOST: `https://${ZAI_HOST}`,
-          OPENAI_BASE_PATH: `${new URL(zaiBaseUrls(profile.plan).chat).pathname.slice(1)}/chat/completions`,
-          OPENAI_API_KEY: fakeKey,
+      const profile = gatewayProfile(config.activeProviderProfile);
+      if (profile) {
+        const client = resolveChatClient(profile, gooseModel);
+        const env: Record<string, string> = {
+          GOOSE_PROVIDER: client.provider,
+          GOOSE_MODEL: client.model,
+          [client.credentialEnv]: gatewaySentinel(fakeKeys, client.route.host),
           GOOSE_MODE: 'auto',
           GOOSE_MAX_TURNS: '200',
           SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
           SSL_CERT_DIR: '/etc/ssl/certs',
         };
-      }
-      if (profile?.type === 'openrouter') {
-        // OpenRouter mode: Goose's native OpenRouter provider. The provider
-        // union used inside the adapter widens to 'openrouter' (the config-level
-        // GOOSE_PROVIDERS enum is unchanged — routing is driven by the active
-        // profile, not gooseProvider). GOOSE_MODEL is the resolved slug (D2):
-        // perAgent.goose ?? glob-map(gooseModel) ?? DEFAULT_GLM_SLUG.
-        const fakeKey = fakeKeys.get(OPENROUTER_HOST);
-        if (!fakeKey) {
-          throw new Error(`No fake key generated for ${OPENROUTER_HOST}`);
+        if (client.endpointOverride) {
+          const base = new URL(client.route.baseUrl);
+          env.OPENAI_HOST = base.origin;
+          env.OPENAI_BASE_PATH = `${base.pathname.slice(1)}/chat/completions`;
         }
-        const gooseSlug =
-          profile.perAgent.goose ?? resolveMappedModel(gooseModel, profile.modelMap) ?? DEFAULT_GLM_SLUG;
-        return {
-          GOOSE_PROVIDER: 'openrouter',
-          GOOSE_MODEL: gooseSlug,
-          GOOSE_MODE: 'auto',
-          GOOSE_MAX_TURNS: '200',
-          OPENROUTER_API_KEY: fakeKey,
-          SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
-          SSL_CERT_DIR: '/etc/ssl/certs',
-        };
+        return env;
       }
 
       const env: Record<string, string> = {
@@ -405,10 +378,10 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod {
-      // OpenRouter mode: credential presence is the profile's non-empty apiKey;
+      // Gateway profiles: credential presence is the profile's non-empty apiKey;
       // empty ⇒ 'none' (feeds m5). Native ⇒ undefined, so fall through to the
       // goose provider's API-key detection.
-      const openRouter = zaiCredential(config) ?? openRouterCredential(config);
+      const openRouter = gatewayCredential(config);
       if (openRouter) return openRouter;
       const key = resolveApiKeyForProvider(gooseProvider, config.userConfig);
       if (key) return { kind: 'apikey', key };

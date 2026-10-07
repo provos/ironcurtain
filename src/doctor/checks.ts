@@ -1,3 +1,4 @@
+import { getGatewayDefinition } from '../config/provider-definitions.js';
 /**
  * Diagnostic check functions for `ironcurtain doctor`.
  *
@@ -662,7 +663,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const profile =
     profileName === undefined ? undefined : resolveActiveProfile(config.userConfig.modelProviders, profileName);
   const gateway = profile?.type === 'native' ? undefined : profile;
-  const label = gateway ? (gateway.type === 'zai' ? 'Z.AI' : 'OpenRouter') : formatProviderLabel(provider);
+  const label = gateway ? getGatewayDefinition(gateway.type).label : formatProviderLabel(provider);
   const name = `${label} API round-trip`;
   const apiKey = resolveHostModelApiKey(config.agentModelId, config.userConfig, 'agent');
   if (apiKey.length === 0) {
@@ -684,7 +685,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
         ? `no ${label} API key for host agent profile "${profileName}"`
         : `no ${label} API key — round-trip uses API key auth only`,
       ...(gateway
-        ? { hint: `Set ${gateway.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile apiKey.` }
+        ? { hint: `Set ${getGatewayDefinition(gateway.type).editor.credentialEnv} or the profile apiKey.` }
         : {}),
     };
   }

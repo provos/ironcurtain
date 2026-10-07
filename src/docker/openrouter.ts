@@ -10,24 +10,17 @@
  * See docs/designs/openrouter-integration.md §7.
  */
 
-import { OPENROUTER_HOST } from '../config/user-config.js';
 import type { DockerAgent, ResolvedOpenRouterProfile } from '../config/user-config.js';
-import type { EndpointPattern, ProviderConfig, RequestBodyRewriter, RewriteResult } from './provider-config.js';
+import type { ProviderConfig, RequestBodyRewriter } from './provider-config.js';
 import type { AuthMethod } from './oauth-credentials.js';
 import type { IronCurtainConfig } from '../config/types.js';
 
-import { resolveMappedModel } from '../config/model-mapping.js';
-import { providerPreferenceToWire } from '../config/openrouter.js';
+import type { GatewayProfile } from '../config/provider-definitions.js';
+import { makeGatewayProvider, makeGatewayRequestRewriter } from './gateway-runtime.js';
 export { globToRegExp, resolveMappedModel } from '../config/model-mapping.js';
 
-// --- 7.3 The OpenRouter rewriter ---
-
-/** Top-level fields Anthropic clients may send that non-Anthropic upstreams reject. */
+/** Compatibility exports for existing callers; routing and endpoint policy have one shared implementation. */
 export const ANTHROPIC_ONLY_BETA_FIELDS: readonly string[] = ['context_management'];
-
-/** Maximum length of an injected OpenRouter `session_id` (D4). */
-const SESSION_ID_MAX_LENGTH = 256;
-
 export interface OpenRouterRewriterConfig {
   readonly modelMap: readonly { match: string; model: string }[];
   readonly perAgentDefault: string | undefined;
@@ -36,137 +29,34 @@ export interface OpenRouterRewriterConfig {
   readonly sessionAffinity: boolean;
 }
 
-/** A GLM-family slug requires z.ai first-party endpoint affinity (D3/D4). */
-function isGlmSlug(slug: string): boolean {
-  return slug.startsWith('z-ai/');
-}
-
-/**
- * Builds a RequestBodyRewriter for an OpenRouter completion request. Steps
- * (§7.3):
- *  0. Non-string `body.model` -> return null (no-op, m7).
- *  1. Capture `requestedModelId = body.model`, remap `model` to
- *     `perAgentDefault ?? resolveMappedModel(...) ?? requestedModelId`
- *     (perAgent WINS over the glob map, D1/D2).
- *  2. Inject `session_id = `${cacheKey}:${requestedModelId}`` truncated to 256
- *     when sessionAffinity, the mapped slug is `z-ai/*`, cacheKey is present,
- *     and `session_id` is absent. Deterministic (D4).
- *  3. Inject `provider` when the body has none: the configured preference
- *     (replaces the default) if set, else the D3 default soft pin
- *     `{ order: ["z-ai"] }` for a `z-ai/*` mapped slug.
- *  4. Strip ANTHROPIC_ONLY_BETA_FIELDS.
- *  5. Never touch `cache_control` blocks inside messages.
- * Returns null when nothing changed (caller skips re-serialization).
- */
-export function makeOpenRouterRewriter(cfg: OpenRouterRewriterConfig): RequestBodyRewriter {
-  return (body, context) => {
-    // Step 0: m7 no-op on a non-string model.
-    if (typeof body.model !== 'string') return null;
-
-    const requestedModelId = body.model;
-    const stripped: string[] = [];
-    const modified: Record<string, unknown> = { ...body };
-
-    // Step 1: model remap (D1/D2 precedence).
-    const slug = cfg.perAgentDefault ?? resolveMappedModel(requestedModelId, cfg.modelMap) ?? requestedModelId;
-    if (slug !== requestedModelId) {
-      modified.model = slug;
-      stripped.push(`model:${slug}`);
-    }
-
-    // Step 2: session_id injection (D4).
-    if (cfg.sessionAffinity && isGlmSlug(slug) && context.cacheKey && modified.session_id === undefined) {
-      const sessionId = `${context.cacheKey}:${requestedModelId}`.slice(0, SESSION_ID_MAX_LENGTH);
-      modified.session_id = sessionId;
-      stripped.push(`session_id:${sessionId.slice(0, 8)}`);
-    }
-
-    // Step 3: provider injection (D3). Never overwrite an existing `provider`.
-    if (modified.provider === undefined) {
-      if (cfg.providerPreference !== undefined) {
-        modified.provider = providerPreferenceToWire(cfg.providerPreference);
-        stripped.push('provider:pin');
-      } else if (isGlmSlug(slug)) {
-        modified.provider = { order: ['z-ai'] };
-        stripped.push('provider:default-z-ai');
-      }
-    }
-
-    // Step 4: strip Anthropic-only beta fields (cache_control is left intact — step 5).
-    // Rebuild without the denylisted top-level keys (avoids a dynamic `delete`).
-    const betaToStrip = ANTHROPIC_ONLY_BETA_FIELDS.filter((field) => field in modified);
-    for (const field of betaToStrip) stripped.push(`beta:${field}`);
-    const finalBody =
-      betaToStrip.length > 0
-        ? Object.fromEntries(Object.entries(modified).filter(([key]) => !betaToStrip.includes(key)))
-        : modified;
-
-    if (stripped.length === 0) return null;
-    return { modified: finalBody, stripped } satisfies RewriteResult;
-  };
-}
-
-/**
- * Builds an {@link OpenRouterRewriterConfig} from a resolved openrouter
- * profile for a specific agent. `perAgentDefault` is the agent's own
- * `perAgent` override (D1: it WINS over the glob `modelMap`); `modelMap`,
- * `providerPreference`, and `sessionAffinity` are shared across agents.
- *
- * Keeping this in `openrouter.ts` (rather than duplicating the field pick in
- * each adapter) is the single place that maps the profile shape to the
- * rewriter's contract, per §9.6. Internal to the module — the only caller is
- * {@link makeOpenRouterProviderForProfile} below.
- */
-function rewriterConfigFromProfile(profile: ResolvedOpenRouterProfile, agentId: DockerAgent): OpenRouterRewriterConfig {
+function rewriterProfile(cfg: OpenRouterRewriterConfig): GatewayProfile {
   return {
-    modelMap: profile.modelMap,
-    perAgentDefault: profile.perAgent[agentId],
-    providerPreference: profile.providerPreference,
-    sessionAffinity: profile.sessionAffinity,
+    type: 'openrouter',
+    apiKey: '',
+    usesDefaultMap: false,
+    modelMap: cfg.modelMap,
+    perAgent: { 'claude-code': cfg.perAgentDefault, codex: undefined, goose: undefined },
+    providerPreference: cfg.providerPreference,
+    sessionAffinity: cfg.sessionAffinity,
   };
 }
 
-/**
- * Builds the per-agent OpenRouter provider from a resolved openrouter
- * profile: constructs the rewriter (via {@link rewriterConfigFromProfile})
- * and wires it into {@link makeOpenRouterProvider} for the agent's endpoint
- * kind. The single call site each adapter's `getProviders` needs.
- */
+export function makeOpenRouterRewriter(cfg: OpenRouterRewriterConfig): RequestBodyRewriter {
+  return makeGatewayRequestRewriter(rewriterProfile(cfg), 'messages', 'claude-code');
+}
+
 export function makeOpenRouterProviderForProfile(
   kind: OpenRouterEndpointKind,
   profile: ResolvedOpenRouterProfile,
   agentId: DockerAgent,
 ): ProviderConfig {
-  const rewriter = makeOpenRouterRewriter(rewriterConfigFromProfile(profile, agentId));
-  return makeOpenRouterProvider(kind, rewriter);
+  return makeGatewayProvider(profile, kind, agentId);
 }
 
-// --- 7.4 Provider config factory ---
-
-/** Endpoint subset an agent uses on OpenRouter. */
 export type OpenRouterEndpointKind = 'messages' | 'chat' | 'responses';
-
-/** Structurally valid OpenRouter key shape; swapped host-side. */
-const OPENROUTER_FAKE_KEY_PREFIX = 'sk-or-v1-ironcurtain-';
-
-/** The single completion POST path per endpoint kind. */
-const COMPLETION_PATH: Readonly<Record<OpenRouterEndpointKind, string>> = {
-  messages: '/api/v1/messages',
-  chat: '/api/v1/chat/completions',
-  responses: '/api/v1/responses',
-};
-
-/** OpenRouter wire format served at a given request path. */
 export type OpenRouterWireFormat = 'anthropic' | 'responses' | 'chat';
 
-/**
- * Classifies an OpenRouter request path into its wire format (§11.2/§11.3):
- * one host serves three formats — the Anthropic skin (`.../messages`), the
- * OpenAI Responses API (`.../responses`), and OpenAI Chat Completions (anything
- * else). Query strings are ignored. Shared by the token-stream classifier
- * (`resolveSseProvider`) and the capture classifiers (`providerForHost` /
- * `createReassembler`) so the path-suffix rules live in exactly one place.
- */
+/** Classification remains independent of routing and authorization. */
 export function openRouterWireForPath(path?: string): OpenRouterWireFormat {
   const p = (path ?? '').split('?')[0];
   if (p.endsWith('/messages')) return 'anthropic';
@@ -174,57 +64,20 @@ export function openRouterWireForPath(path?: string): OpenRouterWireFormat {
   return 'chat';
 }
 
-/** Allowlisted endpoints per kind (completion path + metadata + count_tokens for messages, D5). */
-function allowedEndpointsFor(kind: OpenRouterEndpointKind): EndpointPattern[] {
-  const endpoints: EndpointPattern[] = [{ method: 'POST', path: COMPLETION_PATH[kind] }];
-  // D5: count_tokens is allowlisted (but not rewritten/captured) for the messages kind.
-  if (kind === 'messages') {
-    endpoints.push({ method: 'POST', path: '/api/v1/messages/count_tokens' });
-  }
-  // GET /api/v1/models is available on every kind (§9).
-  endpoints.push({ method: 'GET', path: '/api/v1/models' });
-  return endpoints;
-}
-
-/**
- * Builds the openrouterProvider for a given agent's endpoint kind and
- * rewriter. Host `openrouter.ai`; bearer key injection; fake-key prefix
- * `sk-or-v1-ironcurtain-`. The rewriter is attached to the COMPLETION POST
- * path only; count_tokens is allowlisted but neither rewritten nor captured
- * (the proxy passes through whatever OpenRouter returns, 2xx or 4xx, D5).
- */
 export function makeOpenRouterProvider(kind: OpenRouterEndpointKind, rewriter: RequestBodyRewriter): ProviderConfig {
-  const completionPath = COMPLETION_PATH[kind];
-  const protocol =
-    kind === 'messages'
-      ? ('anthropic-messages' as const)
-      : kind === 'responses'
-        ? ('openai-responses' as const)
-        : ('openai-chat-completions' as const);
-  return {
-    id: 'openrouter',
-    host: OPENROUTER_HOST,
-    displayName: `OpenRouter (${kind})`,
-    allowedEndpoints: allowedEndpointsFor(kind),
-    captureEndpoints: [{ method: 'POST', path: completionPath }],
-    completionEndpoints: [
-      {
-        method: 'POST',
-        path: completionPath,
-        protocol,
-        capabilities: {
-          metricsSupport: kind === 'chat' ? 'partial' : 'full',
-          streamingUsageNegotiation: kind === 'chat' ? 'client_or_agent_adapter' : 'none',
-          trajectoryCapture: true,
-        },
-      },
-    ],
-    gatewayAdapterId: 'openrouter',
-    keyInjection: { type: 'bearer' },
-    fakeKeyPrefix: OPENROUTER_FAKE_KEY_PREFIX,
-    requestRewriter: rewriter,
-    rewriteEndpoints: [completionPath],
-  };
+  return makeGatewayProvider(
+    rewriterProfile({
+      modelMap: [],
+      perAgentDefault: undefined,
+      providerPreference: undefined,
+      sessionAffinity: false,
+    }),
+    kind,
+    'claude-code',
+    undefined,
+    [],
+    rewriter,
+  );
 }
 
 // --- 7.5 Credential resolution ---

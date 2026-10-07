@@ -1,20 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import type { OpenrouterProfileDto } from '$lib/types.js';
 import {
-  toEditable,
-  editableToDto,
-  editableZaiToDto,
+  toEditable as descriptorToEditable,
+  editableToDto as descriptorToDto,
   parseList,
-  blankOpenrouterProfile,
+  blankProfile,
   isDuplicateProfileName,
   sourceEnforces,
   persistedSlugSet,
   validateSlugs,
-  blockMessage,
+  blockMessage as descriptorBlockMessage,
   warningMessage,
   type EditableProfile,
   type KnownModels,
 } from './settings-helpers.js';
+
+import { getGatewayDefinition } from '../../../../src/config/provider-definitions.js';
+import type { GatewayProfileDto } from '$lib/types.js';
+const toEditable = (dto: GatewayProfileDto) => descriptorToEditable(dto, getGatewayDefinition(dto.type).editor);
+const editableToDto = (profile: EditableProfile) => descriptorToDto(profile, getGatewayDefinition(profile.type).editor);
+const blankOpenrouterProfile = () => blankProfile(getGatewayDefinition('openrouter').editor);
+const blockMessage = (issues: Parameters<typeof descriptorBlockMessage>[0]) =>
+  descriptorBlockMessage(issues, 'OpenRouter');
 
 // ---------------------------------------------------------------------------
 // Full-field get→edit→set round-trip (M4) + M5 masked-key preservation.
@@ -179,6 +186,8 @@ describe('persistedSlugSet', () => {
 /** A minimal editable profile with a custom map (usesDefaultMap = false). */
 function editableWith(over: Partial<EditableProfile> = {}): EditableProfile {
   return {
+    type: 'openrouter',
+    providerPreferenceExplicit: false,
     apiKey: 'sk-x',
     modelMap: [],
     perAgent: { 'claude-code': '', goose: '', codex: '' },
@@ -318,9 +327,27 @@ describe('Z.AI profile editor', () => {
       modelMap: [],
       perAgent: { goose: 'glm-5.3-flash' },
     };
-    expect(editableZaiToDto(toEditable(dto))).toEqual(dto);
+    expect(editableToDto(toEditable(dto))).toEqual(dto);
   });
   it('preserves an omitted map instead of pinning defaults', () => {
-    expect(editableZaiToDto(toEditable({ type: 'zai', apiKey: MASK })).modelMap).toBeUndefined();
+    expect(editableToDto(toEditable({ type: 'zai', apiKey: MASK })).modelMap).toBeUndefined();
+  });
+});
+
+describe('explicit routing constraints', () => {
+  it.each([{ allowFallbacks: false }, { allowFallbacks: true }, {}])(
+    'preserves an explicitly configured empty preference %j',
+    (preference) => {
+      const dto: OpenrouterProfileDto = { type: 'openrouter', apiKey: MASK, providerPreference: preference };
+      expect(editableToDto(toEditable(dto)).providerPreference).toEqual({
+        allowFallbacks: preference.allowFallbacks ?? true,
+      });
+    },
+  );
+  it('can reset explicit preferences to provider defaults', () => {
+    const profile = toEditable({ type: 'openrouter', providerPreference: { allowFallbacks: false } });
+    profile.allowFallbacks = true;
+    profile.providerPreferenceExplicit = false;
+    expect(editableToDto(profile).providerPreference).toBeUndefined();
   });
 });

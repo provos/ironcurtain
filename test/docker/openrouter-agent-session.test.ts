@@ -97,6 +97,19 @@ function configWithProfile(
 
 // ─── Claude Code (§9.1) ──────────────────────────────────────
 
+/** Assert the served model independently of the unresolved client hint. */
+function servedModel(
+  adapter: ReturnType<typeof createClaudeCodeAdapter>,
+  config: IronCurtainConfig,
+  requested: string,
+): unknown {
+  const provider = adapter.getProviders(config)[0];
+  return (
+    provider.requestRewriter?.({ model: requested }, { method: 'POST', path: provider.completionEndpoints![0].path })
+      ?.modified.model ?? requested
+  );
+}
+
 describe('OpenRouter — Claude Code adapter', () => {
   const adapter = createClaudeCodeAdapter();
 
@@ -127,19 +140,25 @@ describe('OpenRouter — Claude Code adapter', () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
     expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1');
 
-    // Default tier hints preserve the GLM 5.3 / GLM 5.3 Flash split.
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(DEFAULT_GLM_SLUG);
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
+    // Request aliases preserve the GLM tier split through one proxy mapping.
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('claude-sonnet');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_SONNET_MODEL)).toBe(DEFAULT_GLM_FLASH_SLUG);
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('claude-opus');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_OPUS_MODEL)).toBe(DEFAULT_GLM_SLUG);
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('claude-haiku');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_HAIKU_MODEL)).toBe(DEFAULT_GLM_FLASH_SLUG);
   });
 
   it('buildEnv resolves per-tier hints via perAgent override when set (perAgent WINS over modelMap)', () => {
     const config = configWithProfile(openrouterProfile({ perAgent: { 'claude-code': 'anthropic/claude-3.5-sonnet' } }));
     const env = adapter.buildEnv(config, openrouterFakeKeys());
-    // All three tiers collapse to the perAgent value (D1: perAgent ?? map).
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('anthropic/claude-3.5-sonnet');
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('anthropic/claude-3.5-sonnet');
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('anthropic/claude-3.5-sonnet');
+    // The proxy selects the per-agent target without mapping it again.
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('claude-sonnet');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_SONNET_MODEL)).toBe('anthropic/claude-3.5-sonnet');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('claude-opus');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_OPUS_MODEL)).toBe('anthropic/claude-3.5-sonnet');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('claude-haiku');
+    expect(servedModel(adapter, config, env.ANTHROPIC_DEFAULT_HAIKU_MODEL)).toBe('anthropic/claude-3.5-sonnet');
   });
 
   it('buildEnv omits a per-tier hint when neither perAgent nor a glob rule resolves', () => {
@@ -199,15 +218,16 @@ describe('OpenRouter — Codex adapter', () => {
     expect(provider.rewriteEndpoints).toEqual(['/api/v1/responses']);
   });
 
-  it('B1/D2: generateMcpConfig emits top-level model_provider=openrouter and model=perAgent.codex', () => {
+  it('B1/D2: Codex retains its request seed and the proxy applies the per-agent model', () => {
     const config = configWithProfile(openrouterProfile({ perAgent: { codex: 'z-ai/glm-5.2-air' } }));
     const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', config);
-    expect(files).toHaveLength(1);
+    expect(files).toHaveLength(2);
 
     // Parse with a REAL TOML parser to catch "root key captured by a preceding table".
     const parsed = parseToml(files[0].content) as Record<string, unknown>;
     expect(parsed.model_provider).toBe('openrouter');
-    expect(parsed.model).toBe('z-ai/glm-5.2-air');
+    expect(parsed.model).toBe(DEFAULT_GLM_SLUG);
+    expect(servedModel(adapter, config, String(parsed.model))).toBe('z-ai/glm-5.2-air');
 
     // The provider table carries the OpenRouter base_url / env_key / wire_api.
     const providers = parsed.model_providers as Record<string, Record<string, unknown>>;
@@ -222,17 +242,14 @@ describe('OpenRouter — Codex adapter', () => {
     expect(mcp.ironcurtain.command).toBe('socat');
   });
 
-  it('D2: generateMcpConfig maps DEFAULT_GLM_SLUG through modelMap so config.toml matches the served model', () => {
-    // A wildcard map remaps everything (including the GLM default). Codex's
-    // config.toml model must reflect what the MITM rewriter actually serves
-    // (D1 re-globs whatever Codex sends), not the pre-map default — otherwise
-    // the container budgets its context window for a model it isn't routed to.
+  it('D2: Codex retains its default seed and its catalog uses conservative selected-model metadata', () => {
     const config = configWithProfile(openrouterProfile({ modelMap: [{ match: '*', model: 'openai/gpt-5' }] }));
     const parsed = parseToml(adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', config)[0].content) as Record<
       string,
       unknown
     >;
-    expect(parsed.model).toBe('openai/gpt-5');
+    expect(parsed.model).toBe(DEFAULT_GLM_SLUG);
+    expect(servedModel(adapter, config, String(parsed.model))).toBe('openai/gpt-5');
     expect(parsed.model_provider).toBe('openrouter');
   });
 
@@ -299,7 +316,8 @@ describe('OpenRouter — Goose adapter', () => {
     expect(env.GOOSE_PROVIDER).toBe('openrouter');
     expect(env.OPENROUTER_API_KEY).toBe(FAKE_OPENROUTER_KEY);
     // D2: perAgent.goose wins.
-    expect(env.GOOSE_MODEL).toBe('moonshot/kimi-k3');
+    expect(env.GOOSE_MODEL).toBe('claude-sonnet-4-20250514');
+    expect(servedModel(adapter, config, env.GOOSE_MODEL)).toBe('moonshot/kimi-k3');
   });
 
   it('D2: GOOSE_MODEL falls back to modelMap match against gooseModel when no perAgent', () => {
@@ -308,7 +326,8 @@ describe('OpenRouter — Goose adapter', () => {
     const adapter = createGooseAdapter();
     const config = configWithProfile(openrouterProfile());
     const env = adapter.buildEnv(config, openrouterFakeKeys());
-    expect(env.GOOSE_MODEL).toBe(DEFAULT_GLM_FLASH_SLUG);
+    expect(env.GOOSE_MODEL).toBe('claude-sonnet-4-20250514');
+    expect(servedModel(adapter, config, env.GOOSE_MODEL)).toBe(DEFAULT_GLM_FLASH_SLUG);
   });
 
   it('D2: GOOSE_MODEL falls back to DEFAULT_GLM_SLUG when no perAgent and no modelMap match', () => {
@@ -487,10 +506,12 @@ describe('OpenRouter — active-profile resolution + cross-session isolation', (
     const envA = gooseAdapter.buildEnv(configA, openrouterFakeKeys());
     const envB = gooseAdapter.buildEnv(configB, openrouterFakeKeys());
 
-    expect(envA.GOOSE_MODEL).toBe('z-ai/glm-5.2');
-    expect(envB.GOOSE_MODEL).toBe('moonshot/kimi-k3');
+    expect(servedModel(gooseAdapter, configA, envA.GOOSE_MODEL)).toBe('z-ai/glm-5.2');
+    expect(servedModel(gooseAdapter, configB, envB.GOOSE_MODEL)).toBe('moonshot/kimi-k3');
     // No bleed: A did not observe kimi and vice versa.
-    expect(envA.GOOSE_MODEL).not.toBe(envB.GOOSE_MODEL);
+    expect(servedModel(gooseAdapter, configA, envA.GOOSE_MODEL)).not.toBe(
+      servedModel(gooseAdapter, configB, envB.GOOSE_MODEL),
+    );
 
     // The provider each session gets carries a rewriter bound to ITS profile:
     // remapping the same requested model yields each session's own slug.

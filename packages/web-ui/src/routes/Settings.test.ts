@@ -54,7 +54,7 @@ vi.mock('$lib/stores.svelte.js', () => ({
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
   setDockerWorkloadSettings: (...args: unknown[]) => mockSetDockerWorkload(...(args as [DockerWorkloadSettingsDto])),
   setModelProviders: (...args: unknown[]) => mockSet(...(args as [SetModelProvidersDto])),
-  listOpenrouterModels: (...args: unknown[]) => mockList(...(args as [])),
+  listProviderModels: (...args: unknown[]) => mockList(...(args as [])),
   getStatisticsConfig: (...args: unknown[]) => mockGetStatistics(...(args as [])),
   setStatisticsConfig: (...args: unknown[]) => mockSetStatistics(...(args as [StatisticsConfigDto])),
   get appState() {
@@ -70,11 +70,19 @@ vi.mock('$lib/stores.svelte.js', () => ({
 
 import Settings from './Settings.svelte';
 
+import { getProviderEditorDescriptors } from '../../../../src/config/provider-definitions.js';
+
 const MASK = 'sk-...xyz';
 
 function makeRegistry(overrides?: Partial<GetModelProvidersDto>): GetModelProvidersDto {
   return {
     default: 'glm',
+    providers: getProviderEditorDescriptors(),
+    summaries: {
+      native: 'Native providers (Anthropic / OpenAI / ChatGPT)',
+      glm: '→ z-ai/glm-5.2 · key: sk-...xyz',
+      kimi: '→ moonshotai/kimi-k2 · key: none',
+    },
     profiles: {
       native: { type: 'native' },
       glm: {
@@ -281,6 +289,8 @@ describe('Settings', () => {
     // editor must say so — never render a bare, empty rules list that reads as
     // "nothing configured" or the misleading "per-agent only" note.
     mockGet.mockResolvedValue({
+      providers: getProviderEditorDescriptors(),
+      summaries: {},
       default: 'glm',
       profiles: {
         native: { type: 'native' },
@@ -525,6 +535,104 @@ describe('Settings', () => {
     mockList.mockClear();
     await fireEvent.click(screen.getByTestId('model-refresh'));
     // Re-fetches even though the catalog already loaded this session, and with force=true.
-    await vi.waitFor(() => expect(mockList).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(mockList).toHaveBeenCalledWith('openrouter', true));
+  });
+  it('renders and saves a compatible provider solely from backend descriptors', async () => {
+    const descriptor = {
+      id: 'fixture',
+      label: 'Compatible fixture',
+      description: 'A built-in test provider.',
+      credentialEnv: 'FIXTURE_API_KEY',
+      credentialPlaceholder: 'Fixture key',
+      modelPlaceholder: 'fixture-fast',
+      catalog: 'manual' as const,
+      model: { label: 'Default fixture model', defaultValue: 'fixture-large', defaultMapMatch: '*opus*' },
+      plan: {
+        defaultValue: 'standard',
+        choices: [
+          { value: 'standard', label: 'Fixture standard' },
+          { value: 'coding', label: 'Fixture coding' },
+        ],
+      },
+      providerRouting: false,
+      sessionAffinity: false,
+      defaultMap: [
+        { match: '*opus*', model: 'fixture-large' },
+        { match: '*sonnet*', model: 'fixture-fast' },
+      ],
+    };
+    mockGet.mockResolvedValue(makeRegistry({ providers: [descriptor], profiles: { native: { type: 'native' } } }));
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('add-profile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('add-profile-button'));
+    expect(screen.getByLabelText('Provider service').textContent).toContain('Compatible fixture');
+    expect((screen.getByLabelText('Default fixture model') as HTMLInputElement).value).toBe('fixture-large');
+    expect(screen.getByLabelText('API plan').textContent).toContain('Fixture coding');
+    expect(screen.getByTestId('profile-editor').textContent).toContain('FIXTURE_API_KEY');
+    expect(screen.queryByTestId('provider-order')).toBeNull();
+    expect(screen.queryByTestId('session-affinity')).toBeNull();
+    expect(screen.queryByTestId('model-refresh')).toBeNull();
+    expect(mockList).not.toHaveBeenCalled();
+    await fireEvent.input(screen.getByTestId('profile-name'), { target: { value: 'compatible' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledOnce());
+    expect(mockSet.mock.calls[0][0].profiles.compatible).toEqual({
+      type: 'fixture',
+      apiKey: '',
+      model: 'fixture-large',
+      plan: 'standard',
+    });
+  });
+
+  it('clears provider-specific data and ignores stale catalogs when switching service in the add flow', async () => {
+    let resolveCatalog!: (value: OpenrouterModelsDto) => void;
+    mockList.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCatalog = resolve;
+        }),
+    );
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('add-profile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('add-profile-button'));
+    await vi.waitFor(() => expect(mockList).toHaveBeenCalledOnce());
+    await fireEvent.input(screen.getByTestId('profile-apikey'), { target: { value: 'old-service-key' } });
+    await fireEvent.change(screen.getByLabelText('Provider service'), { target: { value: 'zai' } });
+    expect((screen.getByTestId('profile-apikey') as HTMLInputElement).value).toBe('');
+    resolveCatalog({ models: ['old-provider/model'], source: 'live' });
+    await fireEvent.input(screen.getByTestId('profile-name'), { target: { value: 'direct' } });
+    await fireEvent.input(screen.getByTestId('peragent-goose'), { target: { value: 'glm-custom' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledOnce());
+    expect(mockSet.mock.calls[0][0].profiles.direct).toMatchObject({
+      type: 'zai',
+      apiKey: '',
+      model: 'glm-5.3',
+      plan: 'api',
+      perAgent: { goose: 'glm-custom' },
+    });
+  });
+
+  it('finishes a pending catalog refresh after closing and reopening the same provider', async () => {
+    let completeRefresh!: (value: OpenrouterModelsDto) => void;
+    mockList.mockResolvedValueOnce({ models: CATALOG_SLUGS, source: 'live' });
+    mockList.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          completeRefresh = resolve;
+        }),
+    );
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    await vi.waitFor(() => expect(mockList).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect((screen.getByTestId('model-refresh') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByTestId('model-refresh'));
+    await vi.waitFor(() => expect(mockList).toHaveBeenCalledTimes(2));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    completeRefresh({ models: CATALOG_SLUGS, source: 'live' });
+    await vi.waitFor(() => expect((screen.getByTestId('model-refresh') as HTMLButtonElement).disabled).toBe(false));
+    expect(mockList).toHaveBeenCalledTimes(2);
   });
 });

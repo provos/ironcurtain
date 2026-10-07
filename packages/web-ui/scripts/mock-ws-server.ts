@@ -610,29 +610,35 @@ const ORIGINAL_PERSONA_DETAILS_FULL: Record<string, MockPersonaDetail> = structu
 // dropped default to 'native'). State holds the REAL keys; the wire always masks.
 // ---------------------------------------------------------------------------
 
+// The dev server runs on Node and consumes the same safe descriptors as the daemon.
+import {
+  getProviderEditorDescriptors,
+  getGatewayDefinition,
+  providerDefaultMap,
+  providerProfileSummary,
+  type GatewayProfile,
+} from '../../../src/config/provider-definitions.js';
+import { resolvedGatewayToInput } from '../../../src/config/provider-editor.js';
+import { providerProfileSchema } from '../../../src/config/user-config.js';
+
 const NATIVE_NAME = 'native';
 const DOCKER_AGENTS = ['claude-code', 'goose', 'codex'] as const;
 
-interface MockOpenrouterProfile {
-  type: 'openrouter';
+interface MockStoredProfile {
+  type: string;
+  model?: string;
+  plan?: string;
   apiKey?: string;
   modelMap?: { match: string; model: string }[];
   perAgent?: Record<string, string>;
   providerPreference?: { order?: string[]; only?: string[]; allowFallbacks?: boolean };
   sessionAffinity?: boolean;
 }
-type MockStoredProfile = { type: 'native' } | MockOpenrouterProfile;
 
 interface MockModelProviders {
   default: string;
   profiles: Record<string, MockStoredProfile>;
 }
-
-const DEFAULT_MODEL_MAP = [
-  { match: '*opus*', model: 'z-ai/glm-5.2' },
-  { match: '*sonnet*', model: 'z-ai/glm-5.2' },
-  { match: '*haiku*', model: 'z-ai/glm-5.2' },
-];
 
 /** The stored config (REAL keys). The wire representation masks apiKey. */
 let modelProviders: MockModelProviders = {
@@ -702,6 +708,8 @@ const MOCK_SLUGS: readonly string[] = [
   'z-ai/glm-4.5',
   'z-ai/glm-4.6',
   'z-ai/glm-5.2',
+  'z-ai/glm-5.3',
+  'z-ai/glm-5.3-flash',
 ];
 
 function resolveMockOpenrouterSource(): 'live' | 'cache' | 'bundled' {
@@ -717,28 +725,40 @@ function maskApiKey(key: string | undefined): string {
   return key.slice(0, 3) + '...' + key.slice(-3);
 }
 
-/** The resolved (defaults-applied) view of one stored openrouter profile. */
-function resolveOpenrouter(p: MockOpenrouterProfile) {
-  const perAgent: Record<string, string | undefined> = {};
-  for (const agent of DOCKER_AGENTS) perAgent[agent] = p.perAgent?.[agent];
-  return {
-    type: 'openrouter' as const,
-    apiKey: maskApiKey(p.apiKey),
-    modelMap: (p.modelMap ?? DEFAULT_MODEL_MAP).map((r) => ({ match: r.match, model: r.model })),
-    perAgent,
-    providerPreference: p.providerPreference,
-    sessionAffinity: p.sessionAffinity ?? true,
-  };
-}
-
-/** Builds the masked GetModelProvidersDto (native always present, key-less). */
+/** The dev server consumes the same provider metadata and pure projections as production. */
 function buildModelProvidersDto() {
   const profiles: Record<string, unknown> = { [NATIVE_NAME]: { type: 'native' } };
+  const summaries: Record<string, string> = { [NATIVE_NAME]: 'Native providers (Anthropic / OpenAI / ChatGPT)' };
   for (const [name, prof] of Object.entries(modelProviders.profiles)) {
     if (name === NATIVE_NAME) continue;
-    profiles[name] = prof.type === 'openrouter' ? resolveOpenrouter(prof) : { type: 'native' };
+    if (prof.type === 'native') {
+      profiles[name] = { type: 'native' };
+      summaries[name] = summaries[NATIVE_NAME];
+      continue;
+    }
+    const descriptor = getGatewayDefinition(prof.type).editor;
+    const resolved: GatewayProfile = {
+      ...prof,
+      apiKey: prof.apiKey ?? '',
+      plan: prof.plan ?? descriptor.plan?.defaultValue,
+      model: prof.model ?? descriptor.model?.defaultValue,
+      modelMap: prof.modelMap ?? providerDefaultMap(prof.type, prof.model),
+      usesDefaultMap: prof.modelMap === undefined,
+      perAgent: {
+        'claude-code': prof.perAgent?.['claude-code'],
+        codex: prof.perAgent?.codex,
+        goose: prof.perAgent?.goose,
+      },
+      sessionAffinity: prof.sessionAffinity ?? true,
+    };
+    profiles[name] = {
+      ...resolvedGatewayToInput(resolved),
+      perAgent: resolved.perAgent,
+      apiKey: maskApiKey(prof.apiKey),
+    };
+    summaries[name] = `${providerProfileSummary(resolved)} · key: ${maskApiKey(prof.apiKey)}`;
   }
-  return { default: modelProviders.default, profiles };
+  return { default: modelProviders.default, profiles, providers: getProviderEditorDescriptors(), summaries };
 }
 
 /**
@@ -770,13 +790,16 @@ function applySetModelProviders(params: Record<string, unknown>): RpcErrorResult
       next[name] = { type: 'native' };
       continue;
     }
-    if (dto.type !== 'openrouter') return errorResult('INVALID_PARAMS', `Invalid profile "${name}"`);
+    const descriptor = getProviderEditorDescriptors().find((provider) => provider.id === dto.type);
+    if (!descriptor) return errorResult('INVALID_PARAMS', `Invalid profile "${name}"`);
 
     const current = modelProviders.profiles[name];
-    const currentKey = current?.type === 'openrouter' ? current.apiKey : undefined;
+    const currentKey = current?.type === dto.type ? current.apiKey : undefined;
     const resolvedKey = resolveKey(dto.apiKey, currentKey);
 
-    const built: MockOpenrouterProfile = { type: 'openrouter' };
+    const built: MockStoredProfile = { type: descriptor.id };
+    if (descriptor.model && typeof dto.model === 'string') built.model = dto.model;
+    if (descriptor.plan && typeof dto.plan === 'string') built.plan = dto.plan;
     if (resolvedKey) built.apiKey = resolvedKey;
     if (Array.isArray(dto.modelMap)) {
       built.modelMap = (dto.modelMap as { match: string; model: string }[]).map((r) => ({
@@ -793,10 +816,12 @@ function applySetModelProviders(params: Record<string, unknown>): RpcErrorResult
     }
     if (Object.keys(perAgent).length > 0) built.perAgent = perAgent;
     if (dto.providerPreference && typeof dto.providerPreference === 'object') {
-      built.providerPreference = dto.providerPreference as MockOpenrouterProfile['providerPreference'];
+      built.providerPreference = dto.providerPreference as MockStoredProfile['providerPreference'];
     }
     if (typeof dto.sessionAffinity === 'boolean') built.sessionAffinity = dto.sessionAffinity;
-    next[name] = built;
+    const parsed = providerProfileSchema.safeParse(built);
+    if (!parsed.success) return errorResult('INVALID_PARAMS', `Invalid profile "${name}"`);
+    next[name] = parsed.data;
   }
 
   // F10: re-point a `default` that names a DROPPED profile; reject a genuinely
@@ -2267,6 +2292,13 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     // Ungated read of the OpenRouter catalog. Source is env-toggled (see
     // MOCK_OPENROUTER_SOURCE near MOCK_SLUGS) so both validation modes are
     // reachable offline; defaults to 'live' (hard-block path).
+    case 'config.listProviderModels': {
+      const descriptor = getProviderEditorDescriptors().find((provider) => provider.id === params.service);
+      if (!descriptor) return errorResult('INVALID_PARAMS', 'Unknown built-in provider.');
+      return descriptor.catalog === 'manual'
+        ? { models: [], source: 'bundled' }
+        : { models: MOCK_SLUGS, source: resolveMockOpenrouterSource() };
+    }
     case 'config.listOpenrouterModels':
       return { models: MOCK_SLUGS, source: resolveMockOpenrouterSource() };
 
