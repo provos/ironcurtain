@@ -48,6 +48,16 @@ export function makeGatewayRequestRewriter(
         modified.model = model;
         stripped.push(`model:${model}`);
       }
+      const formatted = definition.formatRequest?.(modified, {
+        protocol,
+        agent,
+        requestedModel: current.model,
+        selectedModel: model,
+      });
+      for (const [key, value] of Object.entries(formatted?.body ?? {})) {
+        modified[key] = value;
+        stripped.push(formatted?.auditLabels[key] ?? key);
+      }
       const prefix = definition.sessionAffinityModelPrefix;
       if (
         profile.sessionAffinity &&

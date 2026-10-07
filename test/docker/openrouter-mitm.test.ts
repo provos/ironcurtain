@@ -33,6 +33,7 @@ import { loadOrCreateCA, type CertificateAuthority } from '../../src/docker/ca.j
 import { createMitmProxy, type MitmProxy } from '../../src/docker/mitm-proxy.js';
 import type { ProviderConfig, RequestBodyRewriter } from '../../src/docker/provider-config.js';
 import { makeOpenRouterProvider, makeOpenRouterRewriter } from '../../src/docker/openrouter.js';
+import { makeGatewayRequestRewriter } from '../../src/docker/gateway-runtime.js';
 import { getTokenStreamBus, resetTokenStreamBus } from '../../src/docker/token-stream-bus.js';
 import type { TokenStreamEvent } from '../../src/docker/token-stream-types.js';
 import { providerForHost, createReassembler, AnthropicReassembler } from '../../src/docker/trajectory-reassembler.js';
@@ -166,6 +167,67 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
     const req = (upstream as FakeUpstream).requests()[0];
     expect(req.headers['authorization']).toBe(`Bearer ${REAL_KEY}`);
     expect(req.headers['x-openrouter-metadata']).toBe('enabled');
+  });
+
+  it('routes Goose main and auxiliary requests once and formats each selected model through TLS', async () => {
+    const fast = 'google/gemini-2.5-flash';
+    const anthropic = 'anthropic/claude-sonnet-4';
+    const details = [{ type: 'encrypted', data: 'opaque-signature' }];
+    const rewriter = makeGatewayRequestRewriter(
+      {
+        type: 'openrouter',
+        apiKey: '',
+        modelMap: [
+          { match: 'A', model: fast },
+          { match: fast, model: anthropic },
+        ],
+        usesDefaultMap: false,
+        perAgent: { 'claude-code': undefined, codex: undefined, goose: undefined },
+        providerPreference: { only: ['approved'], allowFallbacks: false },
+      },
+      'chat',
+      'goose',
+    );
+    await startProxy({ kind: 'chat', rewriter });
+    for (const [requested, selected] of [
+      ['A', fast],
+      [fast, anthropic],
+    ]) {
+      const response = await post('/api/v1/chat/completions', {
+        model: requested,
+        messages: [
+          { role: 'system', content: 'system' },
+          { role: 'user', content: 'user' },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call',
+                type: 'function',
+                function: { name: 'tool', arguments: '{}' },
+                reasoning_details: details,
+              },
+            ],
+          },
+          { role: 'tool', content: 'result', tool_call_id: 'call' },
+        ],
+        tools: [{ type: 'function', function: { name: 'tool', parameters: {} } }],
+      });
+      expect(response.statusCode).toBe(200);
+      const body = echoedBody();
+      expect(body.model).toBe(selected);
+      expect(body.provider).toEqual({ only: ['approved'], allow_fallbacks: false });
+      const messages = body.messages as Record<string, unknown>[];
+      if (selected === fast) {
+        expect(messages[2].reasoning_details).toEqual(details);
+        expect(messages[0].content).toBe('system');
+      } else {
+        expect(messages[2].reasoning_details).toBeUndefined();
+        expect(messages[0].content).toEqual([{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }]);
+      }
+      expect((upstream as FakeUpstream).requests().at(-1)?.headers.authorization).toBe(`Bearer ${REAL_KEY}`);
+    }
   });
 
   it('keeps OpenRouter metadata negotiation enabled when statistics are enabled', async () => {

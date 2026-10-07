@@ -3,6 +3,7 @@ import type { DockerAgent } from './user-config.js';
 import { parseModelId } from './model-id.js';
 import { resolveMappedModel } from './model-mapping.js';
 import { openRouterRequestFields } from './openrouter.js';
+import { formatOpenRouterGooseRequest } from './openrouter-goose.js';
 
 /** Normalized facts consumed by routing; service-specific persistence schemas remain authoritative. */
 export interface GatewayProfile {
@@ -75,6 +76,11 @@ export interface GatewayDefinition {
     >
   >;
   requestFields?(profile: GatewayProfile, model: string): GatewayRequestFields | undefined;
+  /** Private protocol formatting after routing; never exposed in editor descriptors. */
+  formatRequest?(
+    body: Readonly<Record<string, unknown>>,
+    context: GatewayRequestContext,
+  ): GatewayRequestFields | undefined;
   defaultModel(profile: GatewayProfile): string;
   baseUrls(profile: Pick<GatewayProfile, 'type' | 'plan'>): Readonly<Record<GatewayProtocol, string>>;
 }
@@ -82,6 +88,13 @@ export interface GatewayDefinition {
 export interface GatewayRequestFields {
   readonly body: Readonly<Record<string, unknown>>;
   readonly auditLabels: Readonly<Record<string, string>>;
+}
+
+export interface GatewayRequestContext {
+  readonly protocol: GatewayProtocol;
+  readonly agent: DockerAgent;
+  readonly requestedModel: string;
+  readonly selectedModel: string;
 }
 
 export interface ProviderModelMetadata {
@@ -131,6 +144,7 @@ const DEFINITIONS: readonly GatewayDefinition[] = [
     filterMessagesTools: false,
     sessionAffinityModelPrefix: 'z-ai/',
     requestFields: openRouterRequestFields,
+    formatRequest: formatOpenRouterGooseRequest,
     proxyPaths: () => ({
       messages: {
         completion: '/api/v1/messages',
