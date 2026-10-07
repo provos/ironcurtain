@@ -1,4 +1,3 @@
-import { ZAI_HOST } from '../config/zai.js';
 /**
  * TLS-terminating MITM proxy for Docker agent sessions.
  *
@@ -15,6 +14,7 @@ import { ZAI_HOST } from '../config/zai.js';
  */
 
 import * as dns from 'node:dns';
+import { ZAI_HOST } from '../config/zai.js';
 import * as http from 'node:http';
 import * as tls from 'node:tls';
 import * as net from 'node:net';

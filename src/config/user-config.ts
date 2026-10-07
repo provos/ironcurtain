@@ -1335,7 +1335,7 @@ function stripEnvProviderKeys(
       isPlainObject(fileProfile) && fileProfile['type'] === profile['type'] && typeof fileProfile['apiKey'] === 'string'
         ? fileProfile['apiKey']
         : undefined;
-    if (fileKey && fileKey !== envKey) profile['apiKey'] = fileKey;
+    if (fileKey) profile['apiKey'] = fileKey;
     else delete profile['apiKey'];
   }
   return merged;

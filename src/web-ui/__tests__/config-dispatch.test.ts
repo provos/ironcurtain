@@ -674,6 +674,21 @@ describe('Z.AI provider configuration round trips', () => {
     },
   );
 
+  it.each(['zai', 'openrouter'] as const)(
+    'preserves %s file keys that equal the environment key on rename',
+    async (type) => {
+      writeConfig({ modelProviders: { profiles: { original: { type, apiKey: 'shared-file-env-key' } } } });
+      const envName = type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY';
+      process.env[envName] = 'shared-file-env-key';
+      const ctx = makeCtx(true);
+      const dto = await get(ctx);
+      await set(ctx, { profiles: { renamed: dto.profiles.original }, renameFrom: { renamed: 'original' } });
+      if (type === 'zai') delete process.env.ZAI_API_KEY;
+      else delete process.env.OPENROUTER_API_KEY;
+      expect(readConfig().modelProviders).toMatchObject({ profiles: { renamed: { apiKey: 'shared-file-env-key' } } });
+    },
+  );
+
   it('blocks deleting a bound profile and changing service with the old masked key', async () => {
     writeConfig({
       modelProviders: { profiles: { glm: { type: 'zai', apiKey: 'file-zai-key' } } },
