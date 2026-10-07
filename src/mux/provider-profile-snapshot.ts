@@ -22,7 +22,7 @@ export interface ProviderProfileSnapshot {
   /** Discriminant used to choose the render label style. */
   readonly type: 'native' | 'openrouter' | 'zai';
   /**
-   * Human-readable primary-model label (e.g. `z-ai/glm-5.2 (OpenRouter)` or
+   * Human-readable primary-model label (e.g. `z-ai/glm-5.3-flash (OpenRouter)` or
    * `Anthropic / OpenAI / ChatGPT`), computed once when the snapshot is built.
    */
   readonly primaryModelLabel: string;
@@ -40,8 +40,9 @@ const NATIVE_LABEL = 'Anthropic / OpenAI / ChatGPT';
  * profile), followed by each configured profile in registry order. The
  * `isDefault` flag marks `modelProviders.default`.
  *
- * The openrouter `primaryModelLabel` uses the same Sonnet probe the buildEnv
- * hint uses: `perAgent['claude-code'] ?? resolveMappedModel('claude-sonnet',
+ * Gateway `primaryModelLabel` values use a Sonnet probe, honoring per-agent
+ * overrides and the profile's model map. The openrouter label uses the buildEnv
+ * hint formula: `perAgent['claude-code'] ?? resolveMappedModel('claude-sonnet',
  * modelMap) ?? DEFAULT_GLM_SLUG`.
  */
 export function buildProviderProfileSnapshots(modelProviders: ResolvedModelProvidersConfig): ProviderProfileSnapshot[] {
@@ -56,7 +57,7 @@ export function buildProviderProfileSnapshots(modelProviders: ResolvedModelProvi
       snapshots.push({
         name,
         type: 'zai',
-        primaryModelLabel: `${resolveZaiModel(profile, undefined, 'claude-code')} (Z.AI, ${profile.plan})`,
+        primaryModelLabel: `${resolveZaiModel(profile, 'claude-sonnet', 'claude-code')} (Z.AI, ${profile.plan})`,
         isDefault,
       });
       continue;

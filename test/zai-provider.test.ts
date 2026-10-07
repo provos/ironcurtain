@@ -12,6 +12,7 @@ import { createClaudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { createCodexAdapter } from '../src/docker/adapters/codex.js';
 import { createGooseAdapter } from '../src/docker/adapters/goose.js';
 import { resolveSessionMode } from '../src/session/preflight.js';
+import { buildProviderProfileSnapshots } from '../src/mux/provider-profile-snapshot.js';
 import { makeZaiProvider } from '../src/docker/zai.js';
 import { resolveZaiModel, ZAI_HOST } from '../src/config/zai.js';
 import { isEndpointAllowed } from '../src/docker/provider-config.js';
@@ -79,6 +80,20 @@ describe('Z.AI provider profiles', () => {
     expect(resolveZaiModel(profile, 'claude-sonnet-4-6')).toBe('glm-5.3-flash');
     expect(resolveZaiModel(profile, 'claude-haiku-4-5')).toBe('glm-5.3-flash');
     expect(resolveZaiModel(profile)).toBe('custom-model');
+  });
+
+  it.each([
+    { modelMap: undefined, perAgent: undefined, model: 'glm-5.3-flash' },
+    { modelMap: undefined, perAgent: { 'claude-code': 'chosen-model' }, model: 'chosen-model' },
+    { modelMap: [{ match: '*sonnet*', model: 'mapped-model' }], perAgent: undefined, model: 'mapped-model' },
+    { modelMap: [], perAgent: undefined, model: 'claude-sonnet' },
+  ])('shows the resolved Sonnet selection $model in the Z.AI picker', ({ modelMap, perAgent, model }) => {
+    const c = config({
+      modelProviders: { profiles: { glm: { type: 'zai', model: 'custom-opus', modelMap, perAgent } } },
+    });
+    expect(
+      buildProviderProfileSnapshots(c.userConfig.modelProviders).find((profile) => profile.name === 'glm'),
+    ).toMatchObject({ primaryModelLabel: `${model} (Z.AI, api)` });
   });
 
   it('uses ZAI_API_KEY only for Z.AI profiles and preserves explicit empty maps', () => {

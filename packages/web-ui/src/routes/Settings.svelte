@@ -864,8 +864,13 @@
           <span>
             Use IronCurtain’s default model map
             <span class="block text-[11px] text-muted-foreground">
-              Every Claude model (Sonnet / Opus / Haiku) routes to the default GLM model, and stays in sync if the
-              built-in defaults change. Uncheck to define your own glob rules.
+              {#if editing.profile.type === 'zai'}
+                Opus routes to the configured default model ({editing.profile.model ?? 'glm-5.3'}). Sonnet and Haiku
+                route to glm-5.3-flash.
+              {:else}
+                Opus routes to z-ai/glm-5.3. Sonnet and Haiku route to z-ai/glm-5.3-flash.
+              {/if}
+              The map stays in sync with IronCurtain’s defaults. Uncheck to define your own glob rules.
             </span>
           </span>
         </label>

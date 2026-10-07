@@ -40,6 +40,8 @@ With user authorization, bounded hello-world tests also ran against the actual Z
 
 These live checks explicitly selected `glm-5.3`. They do not qualify the later default Sonnet/Haiku routing to `glm-5.3-flash`; the tier split is covered by configuration, adapter, host-SDK, and OpenRouter wire tests.
 
+The generated Codex catalog conservatively advertises Flash as text-only with a 200k context window. These settings have not been qualified against the account's Responses endpoint; larger contexts and multimodal Flash behavior remain unverified.
+
 Initial attempts encountered Docker `ENOSPC` before provider exchanges. Retried tests used temporary memory-backed home/workspace directories without removing existing Docker resources. An initial isolated Codex setup removed its provider table while disabling MCP; the corrected test retained the generated table and disabled MCP through a CLI override. Real keys remained in host proxy memory, and no production configuration changed.
 
 These results qualify short completions for this key, model, plan, and client builds. Standard API-plan access, full agent/tool loops, host-role live calls, cache/context behavior, and benchmark completion remain unverified. The Codex capture gap is preserved as an aborted exchange rather than a fabricated served-model result.
