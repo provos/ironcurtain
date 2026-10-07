@@ -21,6 +21,7 @@ import { resolveMappedModel } from './model-mapping.js';
 import { resolveZaiModel, zaiBaseUrls } from './zai.js';
 import { parseModelId } from './model-id.js';
 import type { ProviderId } from './model-id.js';
+import { providerPreferenceToWire } from './openrouter.js';
 
 export { parseModelId, PROVIDER_ENV_VARS } from './model-id.js';
 export type { ProviderId, ParsedModelId } from './model-id.js';
@@ -77,11 +78,32 @@ export async function createLanguageModel(
           ? resolveZaiModel(profile, requested)
           : (resolveMappedModel(requested, profile.modelMap) ?? requested);
       const { createOpenAI } = await import('@ai-sdk/openai');
+      const proxyFetch = await getProxyFetch();
+      const preference =
+        profile.type === 'openrouter'
+          ? profile.providerPreference !== undefined
+            ? providerPreferenceToWire(profile.providerPreference)
+            : model.startsWith('z-ai/')
+              ? { order: ['z-ai'] }
+              : undefined
+          : undefined;
+      const fetch: typeof globalThis.fetch | undefined =
+        preference === undefined
+          ? proxyFetch
+          : (input, init) => {
+              if (typeof init?.body !== 'string')
+                throw new Error('OpenRouter host model requests require a JSON body.');
+              const body = JSON.parse(init.body) as Record<string, unknown>;
+              return (proxyFetch ?? globalThis.fetch)(input, {
+                ...init,
+                body: JSON.stringify({ ...body, provider: preference }),
+              });
+            };
       const provider = createOpenAI({
         name: profile.type,
         apiKey: profile.apiKey,
         baseURL: profile.type === 'zai' ? zaiBaseUrls(profile.plan).chat : 'https://openrouter.ai/api/v1',
-        fetch: await getProxyFetch(),
+        fetch,
       });
       // Gateways implement Chat Completions; the SDK's default is Responses.
       const chat = provider.chat(model);

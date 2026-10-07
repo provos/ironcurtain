@@ -1,5 +1,6 @@
 import type { DockerAgent, ResolvedZaiProfile } from '../config/user-config.js';
 import { ZAI_HOST, resolveZaiModel, zaiBaseUrls } from '../config/zai.js';
+import { resolveMappedModel } from '../config/model-mapping.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AuthMethod } from './oauth-credentials.js';
 import { anthropicRequestRewriter } from './provider-config.js';
@@ -47,6 +48,17 @@ export function makeZaiProvider(profile: ResolvedZaiProfile, agent: DockerAgent)
       const current = filtered?.modified ?? body;
       const stripped = [...(filtered?.stripped ?? [])];
       const modified = { ...current };
+      // Goose 1.26.1's OpenAI provider uses this fixed model for titles and
+      // compaction. Route that internal selection through the profile without
+      // reapplying mappings to the already-selected main model.
+      if (kind === 'chat' && current.model === 'gpt-4o-mini') {
+        const fastModel =
+          profile.perAgent.goose ?? resolveMappedModel(current.model, profile.modelMap) ?? profile.model;
+        if (fastModel !== current.model) {
+          modified.model = fastModel;
+          stripped.push(`model:${fastModel}`);
+        }
+      }
       if (kind === 'messages' && 'context_management' in modified) {
         delete modified.context_management;
         stripped.push('context_management');

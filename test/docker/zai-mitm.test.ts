@@ -104,5 +104,12 @@ it.each(['claude-code', 'codex', 'goose'] as const)(
     expect((await post(path as string, request, 'agent-owned-key')).statusCode).toBe(200);
     expect(upstream.requests()[2].headers.authorization).toBe('Bearer agent-owned-key');
     expect(upstream.requests()).toHaveLength(3);
+    if (agent === 'goose') {
+      expect(
+        (await post(path as string, { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Title' }] }))
+          .statusCode,
+      ).toBe(200);
+      expect(upstream.requests()[3].body.model).toBe('glm-5.3');
+    }
   },
 );

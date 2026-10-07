@@ -157,6 +157,29 @@ describe('Z.AI provider profiles', () => {
     expect(env.GOOSE_MODEL).toBe('glm-4.7');
   });
 
+  it('routes Goose internal fast requests through the profile without remapping selected main models', () => {
+    const c = config({
+      modelProviders: {
+        profiles: {
+          glm: {
+            type: 'zai',
+            model: 'glm-5.3',
+            modelMap: [
+              { match: 'gpt-4o-mini', model: 'glm-4.7' },
+              { match: 'glm-4.7', model: 'glm-5.3' },
+            ],
+          },
+        },
+      },
+    });
+    const provider = makeZaiProvider(c.activeProviderProfile as ResolvedZaiProfile, 'goose');
+    const context = { method: 'POST', path: '/api/paas/v4/chat/completions' };
+    expect(provider.requestRewriter?.({ model: 'gpt-4o-mini' }, context)?.modified.model).toBe('glm-4.7');
+    expect(provider.requestRewriter?.({ model: 'glm-4.7' }, context)).toBeNull();
+    const defaultProvider = makeZaiProvider(config().activeProviderProfile as ResolvedZaiProfile, 'goose');
+    expect(defaultProvider.requestRewriter?.({ model: 'gpt-4o-mini' }, context)?.modified.model).toBe('glm-5.3');
+  });
+
   it('does not write an env-only Z.AI key back to disk', () => {
     vi.stubEnv('ZAI_API_KEY', 'env-only-key');
     const c = config({ modelProviders: { profiles: { glm: { type: 'zai' } } } });
@@ -257,6 +280,45 @@ describe('named profiles for host roles using the installed SDK', () => {
     const model = await createLanguageModel('anthropic:claude-haiku-4-5', c.userConfig, 'summary');
     expect(model.modelId).toBe('z-ai/glm-5.2');
     expect(model.provider).toBe('openrouter.chat');
+  });
+
+  it('preserves strict OpenRouter provider constraints on host wire requests', async () => {
+    const c = config({
+      modelProviders: {
+        profiles: {
+          glm: {
+            type: 'openrouter',
+            apiKey: 'router-key',
+            providerPreference: { only: ['approved-provider'], allowFallbacks: false },
+          },
+        },
+      },
+      hostModelProfiles: { policy: 'glm' },
+    });
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        if (typeof init.body !== 'string') throw new Error('Expected JSON body');
+        body = JSON.parse(init.body) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            id: 'pinned-chat',
+            created: 1,
+            model: 'z-ai/glm-5.2',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    const { generateText } = await import('ai');
+    const model = await createLanguageModel(c.userConfig.policyModelId, c.userConfig, 'policy');
+    await generateText({ model, prompt: 'Reply OK', maxRetries: 0 });
+    expect(body).toMatchObject({
+      model: 'z-ai/glm-5.2',
+      provider: { only: ['approved-provider'], allow_fallbacks: false },
+    });
   });
 
   it('sends JSON mode to Z.AI and still validates auto-approver output', async () => {

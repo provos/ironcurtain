@@ -1,4 +1,3 @@
-import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * Diagnostic check functions for `ironcurtain doctor`.
  *
@@ -31,8 +30,10 @@ import {
   resolveApiKeyForProvider,
   createLanguageModel,
   parseModelId,
+  resolveHostModelApiKey,
   type ProviderId,
 } from '../config/model-provider.js';
+import { resolveActiveProfile } from '../config/user-config.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
@@ -657,11 +658,19 @@ function formatElapsed(ms: number): string {
  */
 export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise<CheckResult> {
   const { provider } = parseModelId(config.agentModelId);
-  const label = formatProviderLabel(provider);
+  const profileName = config.userConfig.hostModelProfiles?.agent;
+  const profile =
+    profileName === undefined ? undefined : resolveActiveProfile(config.userConfig.modelProviders, profileName);
+  const gateway = profile?.type === 'native' ? undefined : profile;
+  const label = gateway ? (gateway.type === 'zai' ? 'Z.AI' : 'OpenRouter') : formatProviderLabel(provider);
   const name = `${label} API round-trip`;
   const apiKey = resolveHostModelApiKey(config.agentModelId, config.userConfig, 'agent');
   if (apiKey.length === 0) {
-    if (provider === 'anthropic' && (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth') {
+    if (
+      !gateway &&
+      provider === 'anthropic' &&
+      (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth'
+    ) {
       return {
         name,
         status: 'skip',
@@ -671,7 +680,12 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
     return {
       name,
       status: 'skip',
-      message: `no ${label} API key — round-trip uses API key auth only`,
+      message: gateway
+        ? `no ${label} API key for host agent profile "${profileName}"`
+        : `no ${label} API key — round-trip uses API key auth only`,
+      ...(gateway
+        ? { hint: `Set ${gateway.type === 'zai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY'} or the profile apiKey.` }
+        : {}),
     };
   }
   try {
@@ -696,7 +710,9 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
       name,
       status: 'fail',
       message: describeApiError(err),
-      hint: `Verify the ${label} API key is valid and the configured agentModelId exists.`,
+      hint: gateway
+        ? `Verify the ${label} profile "${profileName}" API key and mapped agent model.`
+        : `Verify the ${label} API key is valid and the configured agentModelId exists.`,
     };
   }
 }

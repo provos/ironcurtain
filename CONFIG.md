@@ -329,7 +329,7 @@ Host models select profiles independently of container profiles. Omitted roles r
 }
 ```
 
-Select bindings in `ironcurtain config` → Model Providers → Host model profiles. Roles are `agent` (builtin), `policy`, `prefilter`, `summary` (conversation compaction), and `autoApprove` (both session modes). These bindings support `native`, OpenRouter, and Z.AI profiles. Host roles use the profile's model map, without Docker per-agent overrides. Auto-approval remains disabled by default; a binding alone does not enable it. Model or output failures continue to escalate to a human.
+Select bindings in `ironcurtain config` → Model Providers → Host model profiles. Roles are `agent` (builtin), `policy`, `prefilter`, `summary` (conversation compaction), and `autoApprove` (both session modes). These bindings support `native`, OpenRouter, and Z.AI profiles. Host roles use the profile's model map, without Docker per-agent overrides. OpenRouter host requests preserve provider preferences, including strict pins and disabled fallback. Auto-approval remains disabled by default; a binding alone does not enable it. Model or output failures continue to escalate to a human.
 
 A referenced profile cannot be deleted until its host roles are reassigned. Web profile renames migrate bindings and the default atomically, preserving stored keys. Existing profiles retain their service type; create a new profile to change service. Unknown host-profile references are configuration errors.
 

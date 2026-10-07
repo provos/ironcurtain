@@ -17,6 +17,7 @@ import type { AuthMethod } from './oauth-credentials.js';
 import type { IronCurtainConfig } from '../config/types.js';
 
 import { resolveMappedModel } from '../config/model-mapping.js';
+import { providerPreferenceToWire } from '../config/openrouter.js';
 export { globToRegExp, resolveMappedModel } from '../config/model-mapping.js';
 
 // --- 7.3 The OpenRouter rewriter ---
@@ -31,27 +32,13 @@ export interface OpenRouterRewriterConfig {
   readonly modelMap: readonly { match: string; model: string }[];
   readonly perAgentDefault: string | undefined;
   readonly providerPreference:
-    | { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean }
-    | undefined;
+    { order?: readonly string[]; only?: readonly string[]; allowFallbacks?: boolean } | undefined;
   readonly sessionAffinity: boolean;
 }
 
 /** A GLM-family slug requires z.ai first-party endpoint affinity (D3/D4). */
 function isGlmSlug(slug: string): boolean {
   return slug.startsWith('z-ai/');
-}
-
-/** Serializes a provider preference to the wire shape (snake_case `allow_fallbacks`). */
-function providerPreferenceToWire(pref: {
-  order?: readonly string[];
-  only?: readonly string[];
-  allowFallbacks?: boolean;
-}): Record<string, unknown> {
-  const wire: Record<string, unknown> = {};
-  if (pref.order !== undefined) wire.order = [...pref.order];
-  if (pref.only !== undefined) wire.only = [...pref.only];
-  if (pref.allowFallbacks !== undefined) wire.allow_fallbacks = pref.allowFallbacks;
-  return wire;
 }
 
 /**

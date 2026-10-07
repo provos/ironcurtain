@@ -750,11 +750,7 @@ export interface AgentReceivedEntry extends MessageLogBaseEntry {
 }
 
 export type AgentRetryReason =
-  | 'missing_status_block'
-  | 'malformed_status_block'
-  | 'missing_artifacts'
-  | 'invalid_verdict'
-  | 'upstream_stall';
+  'missing_status_block' | 'malformed_status_block' | 'missing_artifacts' | 'invalid_verdict' | 'upstream_stall';
 
 export interface AgentRetryEntry extends MessageLogBaseEntry {
   readonly type: 'agent_retry';

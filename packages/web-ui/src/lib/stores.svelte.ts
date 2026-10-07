@@ -55,14 +55,7 @@ import { createWsClient, type PreflightResult, type WsClient } from './ws-client
 import { handleEvent as handleEventPure, SESSION_MUTATION_EVENTS } from './event-handler.js';
 
 export type ViewId =
-  | 'dashboard'
-  | 'statistics'
-  | 'sessions'
-  | 'escalations'
-  | 'jobs'
-  | 'workflows'
-  | 'personas'
-  | 'settings';
+  'dashboard' | 'statistics' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
