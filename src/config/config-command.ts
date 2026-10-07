@@ -1145,7 +1145,7 @@ async function editProfile(resolved: ResolvedUserConfig, pending: UserConfig, na
   }
 }
 
-/** Edits one field of an openrouter profile, returning the updated profile or undefined (no change). */
+/** Edits one field of a gateway profile, returning the updated profile or undefined (no change). */
 async function editProfileField(field: string, profile: PendingProfile): Promise<PendingProfile | undefined> {
   const descriptor = getGatewayDefinition(profile.type).editor;
   if (field === 'model' && descriptor.model) {
@@ -1166,7 +1166,7 @@ async function editProfileField(field: string, profile: PendingProfile): Promise
   if (field === 'apiKey') {
     const apiKey = await p.text({
       message: `${descriptor.label} API key (${descriptor.credentialPlaceholder}):`,
-      placeholder: profile.apiKey ? '(keep current)' : `leave blank to use ${descriptor.credentialEnv} env`,
+      placeholder: `leave blank to clear the stored key and use ${descriptor.credentialEnv} env`,
       validate: () => undefined,
     });
     if (isCancelled(apiKey)) return undefined;

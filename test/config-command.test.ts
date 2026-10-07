@@ -333,6 +333,44 @@ describe('config-command', () => {
     expect(() => loadUserConfig()).not.toThrow();
   });
 
+  it.each([
+    ['openrouter', 'OPENROUTER_API_KEY'],
+    ['zai', 'ZAI_API_KEY'],
+  ])('clearing a %s profile key explicitly falls back to its environment', async (type, credentialEnv) => {
+    const saved = process.env[credentialEnv];
+    process.env[credentialEnv] = 'dummy-environment-key';
+    try {
+      seedConfig(env.testHome, {
+        modelProviders: {
+          profiles: { gateway: { type, apiKey: 'dummy-stored-key' } },
+        },
+      });
+      mocks.select
+        .mockResolvedValueOnce('modelProviders')
+        .mockResolvedValueOnce('profile:gateway')
+        .mockResolvedValueOnce('apiKey')
+        .mockResolvedValueOnce('back')
+        .mockResolvedValueOnce('back')
+        .mockResolvedValueOnce('save');
+      mocks.text.mockResolvedValueOnce('');
+      mocks.confirm.mockResolvedValueOnce(true);
+
+      await runConfigCommand();
+
+      expect(mocks.text).toHaveBeenCalledWith(
+        expect.objectContaining({
+          placeholder: `leave blank to clear the stored key and use ${credentialEnv} env`,
+        }),
+      );
+      const stored = readConfig(env.testHome).modelProviders as { profiles: Record<string, { apiKey?: string }> };
+      expect(stored.profiles.gateway.apiKey).toBeUndefined();
+      expect(loadUserConfig().modelProviders.profiles.gateway).toMatchObject({ apiKey: 'dummy-environment-key' });
+    } finally {
+      if (saved === undefined) delete process.env[credentialEnv];
+      else process.env[credentialEnv] = saved;
+    }
+  });
+
   it('deleting the default-pointed profile re-points default to native (F10)', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
