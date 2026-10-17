@@ -5,6 +5,7 @@ import {
   validateSandboxAvailability,
   selectTransportConfig,
   proxyCanServe,
+  getMissingEnvVars,
 } from '../src/trusted-process/mcp-proxy-server.js';
 import type { MCPServerConfig } from '../src/config/types.js';
 import {
@@ -181,6 +182,44 @@ describe('addRootToClient timeout behavior', () => {
     // Should not have sent notification or added duplicate
     expect(state.roots).toHaveLength(1);
     expect(state.sendRootsListChangedCalled).toBe(false);
+  });
+});
+
+// ── getMissingEnvVars tests ────────────────────────────────────────────
+
+describe('getMissingEnvVars', () => {
+  const VAR = 'GITHUB_PERSONAL_ACCESS_TOKEN';
+  const githubArgs = ['run', '-i', '--rm', '-e', VAR, 'ghcr.io/github/github-mcp-server'];
+  const savedValue = process.env[VAR];
+
+  beforeEach(() => {
+    delete process.env[VAR];
+  });
+
+  afterEach(() => {
+    if (savedValue === undefined) delete process.env[VAR];
+    else process.env[VAR] = savedValue;
+  });
+
+  it('reports a -e var that is unset in process.env and absent from credentials', () => {
+    expect(getMissingEnvVars(githubArgs)).toEqual([VAR]);
+  });
+
+  it('treats a var supplied only via server credentials as present', () => {
+    expect(getMissingEnvVars(githubArgs, { [VAR]: 'tok' })).toEqual([]);
+  });
+
+  it('treats a var set in process.env as present', () => {
+    process.env[VAR] = 'tok';
+    expect(getMissingEnvVars(githubArgs)).toEqual([]);
+  });
+
+  it('ignores -e VAR=value forms', () => {
+    expect(getMissingEnvVars(['run', '-e', `${VAR}=inline`, 'image'])).toEqual([]);
+  });
+
+  it('treats an empty-string value as missing', () => {
+    expect(getMissingEnvVars(githubArgs, { [VAR]: '' })).toEqual([VAR]);
   });
 });
 

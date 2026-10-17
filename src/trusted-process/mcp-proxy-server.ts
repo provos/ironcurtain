@@ -101,15 +101,17 @@ function logToSessionFile(sessionLogPath: string, message: string): void {
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
+ * A var counts as present if it is set in `process.env` or in `credentials`
+ * (the per-server credentials from config.json, injected into the child env at spawn).
  * Returns the names of missing variables, or an empty array if all are present.
  */
-function getMissingEnvVars(args: string[]): string[] {
+export function getMissingEnvVars(args: string[], credentials: Record<string, string> = {}): string[] {
   const missing: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-e' && i + 1 < args.length) {
       const val = args[i + 1];
       // "-e VAR_NAME" (no =) means forward from host env; "-e VAR=value" sets explicitly
-      if (!val.includes('=') && !process.env[val]) {
+      if (!val.includes('=') && !process.env[val] && !credentials[val]) {
         missing.push(val);
       }
       i++; // skip the value arg
@@ -420,7 +422,7 @@ async function main(): Promise<void> {
   for (const [serverName, config] of Object.entries(serversConfig)) {
     // Skip servers whose args reference env vars (Docker -e VAR_NAME syntax)
     // that aren't set — the server will fail to start without them.
-    const missingEnvVars = getMissingEnvVars(config.args);
+    const missingEnvVars = getMissingEnvVars(config.args, serverCredentials);
     if (missingEnvVars.length > 0) {
       emitProxyDiagnostic(
         'WARNING',
