@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as dns from 'node:dns';
 import * as http from 'node:http';
+import type { Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -30,6 +31,36 @@ afterEach(async () => {
 });
 
 describe('direct destination-bound transport', () => {
+  it('destroys idle pooled upstream sockets without waiting for their timeout', async () => {
+    const connections = new Set<Socket>();
+    const server = http.createServer((_req, res) => res.end('pooled-ok'));
+    server.keepAliveTimeout = 60_000;
+    server.on('connection', (socket) => {
+      connections.add(socket);
+      socket.on('close', () => connections.delete(socket));
+    });
+    servers.push(server);
+    const port = await listenTcp(server);
+    const transport = createDirectOutboundTransport({ lookup: stubLookup({ 'linux.localdomain': '127.0.0.1' }) });
+    try {
+      await expect(
+        requestBody(transport, {
+          destination: { protocol: 'http:', hostname: 'linux.localdomain', port },
+          addressPolicy: 'approved-private-network',
+          method: 'GET',
+          path: '/',
+        }),
+      ).resolves.toBe('pooled-ok');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(connections.size).toBe(1);
+      transport.destroy?.();
+      await vi.waitFor(() => expect(connections.size).toBe(0), { timeout: 1_000 });
+      transport.destroy?.(); // Destruction is safe to repeat during cleanup.
+    } finally {
+      transport.destroy?.();
+    }
+  });
+
   it('allows an explicitly authorized private passthrough without relaxing other requests', async () => {
     const server = http.createServer((_req, res) => res.end('private-ok'));
     servers.push(server);
@@ -417,6 +448,27 @@ describe('derived-redirect refusal symmetry', () => {
 });
 
 describe('address classification', () => {
+  it.each([false, true])('screens trailing-dot literals consistently with private access=%s', async (allowPrivate) => {
+    for (const hostname of ['169.254.169.254.', '169.254.1.2.', '100.100.100.200.', 'fd00:ec2::254.', 'fe80::1.']) {
+      expect(() => assertHostnameIsEligible(hostname, allowPrivate)).toThrow(/not public|not allowed/u);
+      // No DNS answer can turn a denied literal into an allowed destination.
+      const resolver = vi.fn(stubLookup({ [hostname]: '8.8.8.8' }));
+      const result = new Promise((resolve, reject) => {
+        createGuardedLookup(resolver, allowPrivate)(hostname, { all: true }, (err, answers) => {
+          if (err) reject(err);
+          else resolve(answers);
+        });
+      });
+      await expect(result).rejects.toThrow(/not public|not allowed/u);
+      expect(resolver).not.toHaveBeenCalled();
+    }
+    expect(() => assertHostnameIsEligible('8.8.8.8.', allowPrivate)).not.toThrow();
+    for (const hostname of ['192.168.1.10.', '127.0.0.1.', '::1.', '100.64.0.1.', 'fd12::1.']) {
+      if (allowPrivate) expect(() => assertHostnameIsEligible(hostname, allowPrivate)).not.toThrow();
+      else expect(() => assertHostnameIsEligible(hostname, allowPrivate)).toThrow(/not public/u);
+    }
+  });
+
   it.each(['0:0:0:0:0:0:0:1', '0:0:0:0:0:ffff:c0a8:101', '::ffff:192.168.1.1', 'fe80:0:0:0::1', '2001:0db8::1'])(
     'rejects equivalent non-public IPv6 address %s',
     (address) => {

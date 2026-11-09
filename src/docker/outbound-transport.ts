@@ -90,6 +90,8 @@ export interface OutboundTransport {
   /** Checked capability, not an assumption; see {@link OutboundAddressGuard}. */
   readonly addressGuard: OutboundAddressGuard;
   request(request: DestinationBoundRequest, onResponse?: (response: http.IncomingMessage) => void): http.ClientRequest;
+  /** Release owned connections. The creator controls the lifetime of injected/shared transports. */
+  destroy?(): void;
 }
 
 export interface DirectOutboundTransportOptions {
@@ -129,6 +131,12 @@ export function createDirectOutboundTransport(options: DirectOutboundTransportOp
   return {
     kind: 'direct',
     addressGuard: 'local-resolver',
+    destroy() {
+      publicHttpAgent.destroy();
+      privateHttpAgent.destroy();
+      publicHttpsAgent.destroy();
+      privateHttpsAgent.destroy();
+    },
     request(request, onResponse) {
       const allowPrivate = allowPrivateForEveryRequest || permitsPrivateAddresses(request.addressPolicy);
       const normalized = normalizeRequest(request, allowPrivate);
@@ -403,7 +411,7 @@ export function assertHostnameIsEligible(hostname: string, allowPrivate: boolean
   ) {
     throw new Error(`outbound destination is local or metadata-scoped: ${hostname}`);
   }
-  if (net.isIP(hostname) !== 0 && !(allowPrivate ? isPublicOrPrivateAddress(hostname) : isPublicAddress(hostname))) {
+  if (net.isIP(lower) !== 0 && !(allowPrivate ? isPublicOrPrivateAddress(lower) : isPublicAddress(lower))) {
     throw new Error(
       allowPrivate
         ? `outbound destination address is not allowed by its address policy: ${hostname}`
