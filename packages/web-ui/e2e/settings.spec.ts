@@ -27,6 +27,21 @@ test.describe('Settings — Model Providers', () => {
     await expect(page.getByTestId('default-badge-glm-5.2')).toBeVisible();
   });
 
+  test('persists private network access independently of nested Docker', async ({ page }) => {
+    await navigateTo(page, 'Settings');
+    const checkbox = page.getByTestId('allow-private-network-access');
+    await expect(checkbox).not.toBeChecked();
+    await expect(checkbox).toBeEnabled();
+    await checkbox.check();
+    await page.getByTestId('save-network-settings').click();
+    await expect(page.getByRole('status').filter({ hasText: 'Network settings saved' })).toBeVisible();
+    await page.reload();
+    await connectWithToken(page);
+    await navigateTo(page, 'Settings');
+    await expect(page.getByTestId('allow-private-network-access')).toBeChecked();
+    await expect(page.getByTestId('docker-workload-enabled')).not.toBeChecked();
+  });
+
   test('enables nested Docker with recommended package access by default', async ({ page }) => {
     await navigateTo(page, 'Settings');
     await expect(page.getByRole('heading', { name: 'Runtime', exact: true })).toBeVisible({ timeout: 10_000 });

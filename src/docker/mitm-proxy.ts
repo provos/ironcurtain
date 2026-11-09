@@ -43,7 +43,12 @@ import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
-import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
+import {
+  assertHostnameIsEligible,
+  createDirectOutboundTransport,
+  createGuardedLookup,
+  type OutboundTransport,
+} from './outbound-transport.js';
 import { connectionNominatedHeaderNames, HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
 import { consumeProxyAuthorization } from './proxy-authorization.js';
@@ -78,7 +83,7 @@ import { validateCompletionEndpoints, type CompletionEndpoint } from './llm-obse
  * filtering is performed. The agent's own headers are forwarded
  * as-is to the upstream server.
  *
- * Provider domains that are already statically configured
+ * Provider and registry domains that are already statically configured
  * cannot be added as passthrough. addHost() returns false for these
  * domains, and the tool handler surfaces a clear message to the agent.
  */
@@ -90,7 +95,7 @@ export interface DynamicHostController {
    *
    * @throws Error if the domain fails validation.
    * @returns true if the domain was newly added, false if already present
-   *          (either as a static provider or a previous dynamic addition).
+   *          (either as a static provider/registry or a previous dynamic addition).
    */
   addHost(domain: string): boolean;
 
@@ -217,6 +222,8 @@ export interface MitmProxyOptions {
   readonly outboundTransport?: OutboundTransport;
   /** Test-only escape hatch for loopback provider and registry fixtures. */
   readonly allowPrivateDestinationsForTests?: boolean;
+  /** Permit private addresses for approved passthrough domains; metadata/link-local remain blocked. */
+  readonly allowPrivateNetworkAccess?: boolean;
   /**
    * Public workload-image registry-egress mode (§6.4). When present, this proxy
    * serves ONLY the nested bundle's `public-registry` image-pull path: it has no LLM
@@ -801,6 +808,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // may substitute a resolver without silently disabling the check that its
   // answers are public. Relaxing the policy takes its own explicit opt-in.
   const allowPrivateDestinations = options.allowPrivateDestinationsForTests === true;
+  const allowPrivatePassthrough = allowPrivateDestinations || options.allowPrivateNetworkAccess === true;
   const dnsLookup = options.dnsLookup as typeof dns.lookup | undefined;
   const outboundTransport =
     options.outboundTransport ??
@@ -814,7 +822,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
    * resolves to a private or link-local address would be tunneled straight
    * into the host network.
    */
-  const passthroughLookup = createGuardedLookup(dnsLookup ?? dns.lookup, allowPrivateDestinations);
+  const passthroughLookup = createGuardedLookup(dnsLookup ?? dns.lookup, allowPrivatePassthrough);
+  const passthroughAddressPolicy =
+    options.allowPrivateNetworkAccess === true ? 'approved-private-network' : 'public-only';
 
   // Hostnames are case-insensitive (RFC 1035 §2.3.3, RFC 7230 §5.4). Normalize
   // to lowercase at every storage and lookup site so the allowlist cannot be
@@ -1820,6 +1830,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       upstreamReq = outboundTransport.request(
         {
           destination: { protocol: 'http:', hostname: host, port },
+          addressPolicy: passthroughAddressPolicy,
           method,
           path,
           headers: forwardHeaders,
@@ -1936,7 +1947,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    if (parsed && passthroughEligible && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
+    if (
+      parsed &&
+      passthroughEligible &&
+      !isKnownStaticHost(parsed.hostname) &&
+      (passthroughHosts.has(parsed.hostname) || isWildcardEligible)
+    ) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -2031,6 +2047,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     //    from request headers. WSS on that nested path is intentionally
     //    rejected by innerServer's upgrade handler.
     if (listenerMode.kind === 'standard' && isPassthrough && outboundTransport.kind === 'direct') {
+      // IP literals bypass net.connect's lookup hook, so validate the authority
+      // as well as every DNS answer before permitting a raw tunnel.
+      try {
+        assertHostnameIsEligible(host, allowPrivatePassthrough);
+      } catch {
+        clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return;
+      }
       logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
 
       // Acknowledge immediately per standard proxy behavior — the client
@@ -2147,7 +2171,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
-    if (!passthroughEligible || !parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
+    if (
+      !passthroughEligible ||
+      !parsed ||
+      isKnownStaticHost(parsed.hostname) ||
+      (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)
+    ) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
@@ -2183,6 +2212,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const upstreamReq = outboundTransport.request(
       {
         destination: { protocol: useHttps ? 'https:' : 'http:', hostname: host, port },
+        addressPolicy: passthroughAddressPolicy,
         method,
         path: path ?? '/',
         headers: forwardHeaders,
@@ -2281,6 +2311,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     try {
       upstreamReq = outboundTransport.request({
         destination: { protocol: 'http:', hostname: targetHost, port: targetPort },
+        addressPolicy: passthroughAddressPolicy,
         method: 'GET',
         path,
         headers: forwardHeaders,
@@ -2363,7 +2394,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     addHost(domain: string): boolean {
       validateDomain(domain);
       const h = normalizeHost(domain);
-      if (providersByHost.has(h)) return false;
+      if (isKnownStaticHost(h)) return false;
       if (passthroughHosts.has(h)) return false;
       passthroughHosts.add(h);
       // Pre-warm cert cache for the new domain

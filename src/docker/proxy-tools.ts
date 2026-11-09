@@ -272,7 +272,10 @@ export async function handleVirtualProxyTool(
       validateDomain(domain);
       const result = await client.addDomain(domain);
       if (!result.added) {
-        return { status: 'already_accessible', message: 'Domain is already accessible (built-in provider)' };
+        return {
+          status: 'already_accessible',
+          message: 'Domain is already accessible (built-in provider or registry)',
+        };
       }
       return { status: 'added', domain };
     }

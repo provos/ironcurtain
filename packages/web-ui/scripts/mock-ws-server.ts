@@ -659,6 +659,7 @@ let modelProviders: MockModelProviders = {
 const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
 
 let dockerWorkloadSettings = { enabled: false, networkAccess: 'packages' };
+let networkSettings = { allowPrivateNetworkAccess: false };
 const ORIGINAL_DOCKER_WORKLOAD_SETTINGS = structuredClone(dockerWorkloadSettings);
 let statisticsScenario: StatisticsFixtureScenario = 'mixed';
 let statisticsFixture: StatisticsFixtureEngine = createStatisticsFixtureEngine(statisticsScenario);
@@ -1432,6 +1433,7 @@ function resetState(opts?: ResetOptions): void {
   // Restore the model-provider registry so a set-mutating e2e starts fresh.
   modelProviders = structuredClone(ORIGINAL_MODEL_PROVIDERS);
   dockerWorkloadSettings = structuredClone(ORIGINAL_DOCKER_WORKLOAD_SETTINGS);
+  networkSettings = { allowPrivateNetworkAccess: false };
   statisticsScenario = opts?.statisticsScenario ?? 'mixed';
   statisticsFixture = createStatisticsFixtureEngine(statisticsScenario);
   statisticsConfig = { enabled: statisticsScenario !== 'disabled', retentionDays: 90 };
@@ -2203,6 +2205,21 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (applied) return applied;
       broadcast('config.changed', {});
       return buildModelProvidersDto();
+    }
+
+    case 'config.getNetwork':
+      if (Object.keys(params).length !== 0) return errorResult('INVALID_PARAMS', 'No parameters are supported');
+      return { ...networkSettings };
+
+    case 'config.setNetwork': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      if (Object.keys(params).length !== 1 || typeof params.allowPrivateNetworkAccess !== 'boolean') {
+        return errorResult('INVALID_PARAMS', 'allowPrivateNetworkAccess must be a boolean');
+      }
+      networkSettings = { allowPrivateNetworkAccess: params.allowPrivateNetworkAccess };
+      broadcast('config.changed', {});
+      return { ...networkSettings };
     }
 
     case 'config.getDockerWorkload':

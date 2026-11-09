@@ -1406,7 +1406,8 @@ export async function prepareDockerInfrastructure(
       captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureInput.capturesDir });
     }
 
-    const proxyAttributionOptions = {
+    const sharedProxyOptions = {
+      allowPrivateNetworkAccess: config.userConfig.allowPrivateNetworkAccess,
       recordedAgentName: captureInput?.recordedAgentName ?? adapter.id,
       workflowRunId: captureInput?.workflowRunId ?? workflowId,
       bundleId: String(bundleId),
@@ -1426,7 +1427,7 @@ export async function prepareDockerInfrastructure(
           agentKind,
           allowRemoteAddress,
           statisticsEnabled: metricsCapable,
-          ...proxyAttributionOptions,
+          ...sharedProxyOptions,
           ...captureProxyOptions,
         })
       : createMitmProxy({
@@ -1439,7 +1440,7 @@ export async function prepareDockerInfrastructure(
           initialTokenSessionId: routingId,
           agentKind,
           statisticsEnabled: metricsCapable,
-          ...proxyAttributionOptions,
+          ...sharedProxyOptions,
           ...captureProxyOptions,
         });
     mitmProxy = activeMitmProxy;

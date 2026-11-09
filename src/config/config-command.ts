@@ -219,6 +219,7 @@ export function computeDiff(
     'preferredDockerAgent',
     'preferredMode',
     'containerRuntime',
+    'allowPrivateNetworkAccess',
   ] as const;
   for (const key of topLevelKeys) {
     if (key in pending && pending[key] !== undefined && pending[key] !== resolved[key]) {
@@ -1673,6 +1674,14 @@ async function handleDockerAgent(
         hint: nestedDockerSummary(resolved, pending, requestedDockerWorkload),
       },
       {
+        value: 'network',
+        label: 'Network...',
+        hint:
+          (pending.allowPrivateNetworkAccess ?? resolved.allowPrivateNetworkAccess)
+            ? 'private addresses allowed'
+            : 'public addresses only',
+      },
+      {
         value: 'configureGoose',
         label: 'Configure Goose...',
         hint: gooseConfigHint(resolved, pending),
@@ -1709,6 +1718,13 @@ async function handleDockerAgent(
       await handleDockerResources(resolved, pending);
     } else if (field === 'nestedDocker') {
       await handleNestedDocker(resolved, pending, requestedDockerWorkload);
+    } else if (field === 'network') {
+      const enabled = await p.confirm({
+        message:
+          'Allow approved domains to resolve to private network addresses? Metadata/link-local stay blocked. Applies to new sessions.',
+        initialValue: pending.allowPrivateNetworkAccess ?? resolved.allowPrivateNetworkAccess,
+      });
+      if (typeof enabled === 'boolean') pending.allowPrivateNetworkAccess = enabled;
     }
   }
 }

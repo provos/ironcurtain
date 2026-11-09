@@ -90,6 +90,55 @@ afterEach(() => {
   rmSync(testHome, { recursive: true, force: true });
 });
 
+describe('network settings', () => {
+  it('reads default false without mutating the config file', async () => {
+    writeConfig({ preferredMode: 'container' });
+    await expect(configDispatch(makeCtx(false), 'config.getNetwork', {})).resolves.toEqual({
+      allowPrivateNetworkAccess: false,
+    });
+    expect(readConfig()).toEqual({ preferredMode: 'container' });
+  });
+
+  it.each([false, true])('persists private network access %s and emits config.changed', async (enabled) => {
+    writeConfig({ allowPrivateNetworkAccess: !enabled, preferredMode: 'container' });
+    const ctx = makeCtx(true);
+    const emit = vi.spyOn(ctx.eventBus, 'emit');
+    await expect(configDispatch(ctx, 'config.setNetwork', { allowPrivateNetworkAccess: enabled })).resolves.toEqual({
+      allowPrivateNetworkAccess: enabled,
+    });
+    expect(readConfig()).toMatchObject({ allowPrivateNetworkAccess: enabled, preferredMode: 'container' });
+    expect(emit).toHaveBeenCalledWith('config.changed', {});
+    await expect(configDispatch(ctx, 'config.getNetwork', {})).resolves.toEqual({ allowPrivateNetworkAccess: enabled });
+  });
+
+  it('requires mutation permission', async () => {
+    writeConfig({});
+    await expect(
+      configDispatch(makeCtx(false), 'config.setNetwork', { allowPrivateNetworkAccess: true }),
+    ).rejects.toMatchObject({ code: 'POLICY_MUTATION_FORBIDDEN' });
+    expect(readConfig()).toEqual({});
+  });
+
+  it.each([{}, { allowPrivateNetworkAccess: 'true' }, { allowPrivateNetworkAccess: true, extra: true }])(
+    'rejects invalid input %j without changing the config',
+    async (params) => {
+      writeConfig({});
+      await expect(configDispatch(makeCtx(true), 'config.setNetwork', params)).rejects.toMatchObject({
+        code: 'INVALID_PARAMS',
+      });
+      expect(readConfig()).toEqual({});
+    },
+  );
+
+  it('refuses to overwrite unreadable configuration', async () => {
+    writeFileSync(configPath(), '{invalid json');
+    await expect(
+      configDispatch(makeCtx(true), 'config.setNetwork', { allowPrivateNetworkAccess: true }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(readFileSync(configPath(), 'utf-8')).toBe('{invalid json');
+  });
+});
+
 describe('config.getDockerWorkload', () => {
   it('returns disabled with recommended package access without backfilling config', async () => {
     writeConfig({ preferredMode: 'container' });

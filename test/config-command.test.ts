@@ -79,6 +79,21 @@ describe('config-command', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([false, true])('saves private network access %s through Docker Agent Network settings', async (enabled) => {
+    seedConfig(env.testHome, { allowPrivateNetworkAccess: !enabled });
+    mocks.select
+      .mockResolvedValueOnce('dockerAgent')
+      .mockResolvedValueOnce('network')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(enabled).mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).allowPrivateNetworkAccess).toBe(enabled);
+    expect(mocks.confirm.mock.calls[0][0]).toMatchObject({ initialValue: !enabled });
+  });
+
   it('model change flows through to disk', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',

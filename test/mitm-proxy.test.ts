@@ -1032,8 +1032,11 @@ describe('MitmProxy', () => {
       providers: [],
       registries: [debianRegistry, npmRegistry],
       packageValidation: { validator: DENY_ALL_VALIDATOR },
+      allowPrivateNetworkAccess: true,
+      dnsLookup: localhostDnsLookup,
     });
     await proxy.start();
+    expect(proxy.hosts.addHost('registry.npmjs.org')).toBe(false);
 
     const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
       new Promise((resolve, reject) => {
@@ -1058,6 +1061,7 @@ describe('MitmProxy', () => {
     // plain HTTP to an npm host is still blocked at the allowlist level.
     const npm = await fetchStatus('http://registry.npmjs.org/express');
     expect(npm.statusCode).toBe(403);
+    await expect(sendWsUpgrade(socketPath, 'registry.npmjs.org', 80, '/ws')).rejects.toThrow(/403/u);
 
     // Unknown host: still blocked at the allowlist level.
     const unknown = await fetchStatus('http://evil.example.com/malware');
@@ -1952,7 +1956,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
@@ -2078,6 +2082,68 @@ describe('MitmProxy', () => {
     expect(health).toBe(403);
   });
 
+  it.each([false, true])('requires domain approval and gates private HTTP with flag=%s', async (enabled) => {
+    let hits = 0;
+    const server = http.createServer((_req, res) => {
+      hits++;
+      res.end('private-ok');
+    });
+    const port = await new Promise<number>((resolve) =>
+      server.listen(0, '127.0.0.1', () => {
+        resolve((server.address() as import('node:net').AddressInfo).port);
+      }),
+    );
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: localhostDnsLookup,
+        allowPrivateNetworkAccess: enabled,
+      });
+      await proxy.start();
+      const request = () =>
+        new Promise<number>((resolve, reject) => {
+          const req = http.get({ socketPath, path: `http://linux.localdomain:${port}/` }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          });
+          req.on('error', reject);
+        });
+      expect(await request()).toBe(403);
+      const denied = await sendConnect(socketPath, 'linux.localdomain', port);
+      denied.socket?.destroy();
+      expect(denied.statusCode).toBe(403);
+      proxy.hosts.addHost('linux.localdomain');
+      expect(await request()).toBe(enabled ? 200 : 502);
+      expect(hits).toBe(enabled ? 1 : 0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.each(['169.254.169.254', '100.100.100.200', 'metadata.google.internal', 'METADATA.GOOGLE.INTERNAL.'])(
+    'blocks metadata CONNECT authority %s with private networking enabled',
+    async (hostname) => {
+      vi.stubEnv('IRONCURTAIN_MITM_ALLOW_ALL_HOSTS', '1');
+      try {
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [],
+          dnsLookup: localhostDnsLookup,
+          allowPrivateNetworkAccess: true,
+        });
+        await proxy.start();
+        const { socket, statusCode } = await sendConnect(socketPath, hostname, 80);
+        socket?.destroy();
+        expect(statusCode).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it('forwards plain HTTP through CONNECT tunnel to passthrough domain', async () => {
     // Create a simple HTTP server that responds to /health
     const httpServer = http.createServer((req, res) => {
@@ -2102,7 +2168,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('passthrough-http.example.com');
@@ -2262,7 +2328,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-tunnel.example.com');

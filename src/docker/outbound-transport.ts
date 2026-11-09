@@ -3,7 +3,8 @@
  *
  * Callers supply a trusted destination separately from request headers. The
  * transport owns Host/SNI, applies a public-only policy by default, and permits
- * private destinations only for an explicit trusted provider override. It
+ * private destinations only for an explicit trusted provider override or
+ * host-enabled approved passthrough. It
  * resolves and screens every destination name locally, never follows redirects,
  * and can route through one fixed parent HTTP proxy without exposing a
  * caller-selected CONNECT primitive.
@@ -51,7 +52,7 @@ import { domainToASCII } from 'node:url';
 import type { Duplex } from 'node:stream';
 
 export type OutboundProtocol = 'http:' | 'https:';
-export type OutboundAddressPolicy = 'public-only' | 'trusted-provider-override';
+export type OutboundAddressPolicy = 'public-only' | 'trusted-provider-override' | 'approved-private-network';
 
 export interface OutboundDestination {
   readonly protocol: OutboundProtocol;
@@ -63,8 +64,9 @@ export interface DestinationBoundRequest {
   readonly destination: OutboundDestination;
   /**
    * Public-only by default. The trusted provider-routing branch may opt into a
-   * host-configured private gateway; untrusted passthrough, redirects, build,
-   * and registry callers must never set this.
+   * host-configured private gateway. Approved passthrough may use
+   * approved-private-network when enabled by host config. Redirects, build,
+   * and registry callers must remain public-only.
    */
   readonly addressPolicy?: OutboundAddressPolicy;
   readonly method: string | undefined;
@@ -116,11 +118,19 @@ export function createDirectOutboundTransport(options: DirectOutboundTransportOp
   const publicLookup = createGuardedLookup(resolver, false);
   const trustedPrivateLookup = createGuardedLookup(resolver, true);
   const allowPrivateForEveryRequest = options.allowPrivateDestinationsForTests === true;
+  // Lookup hooks are skipped when a keep-alive socket is reused. Keep public
+  // and private pools separate so a private request cannot lend its connection
+  // to a later public-only request for the same origin.
+  const agentOptions = { keepAlive: true, timeout: 5_000 };
+  const publicHttpAgent = new http.Agent(agentOptions);
+  const privateHttpAgent = new http.Agent(agentOptions);
+  const publicHttpsAgent = new https.Agent(agentOptions);
+  const privateHttpsAgent = new https.Agent(agentOptions);
   return {
     kind: 'direct',
     addressGuard: 'local-resolver',
     request(request, onResponse) {
-      const allowPrivate = allowPrivateForEveryRequest || request.addressPolicy === 'trusted-provider-override';
+      const allowPrivate = allowPrivateForEveryRequest || permitsPrivateAddresses(request.addressPolicy);
       const normalized = normalizeRequest(request, allowPrivate);
       const requestOptions: http.RequestOptions = {
         hostname: normalized.destination.hostname,
@@ -131,8 +141,8 @@ export function createDirectOutboundTransport(options: DirectOutboundTransportOp
         lookup: allowPrivate ? trustedPrivateLookup : publicLookup,
       };
       return normalized.destination.protocol === 'https:'
-        ? https.request(requestOptions, onResponse)
-        : http.request(requestOptions, onResponse);
+        ? https.request({ ...requestOptions, agent: allowPrivate ? privateHttpsAgent : publicHttpsAgent }, onResponse)
+        : http.request({ ...requestOptions, agent: allowPrivate ? privateHttpAgent : publicHttpAgent }, onResponse);
     },
   };
 }
@@ -156,7 +166,7 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
       // applied. Literal/local destinations are refused here, and both agents
       // screen the destination *name* against the guarded resolver before any
       // CONNECT authority or absolute-form target is written to the parent.
-      const allowPrivate = allowPrivateForEveryRequest || request.addressPolicy === 'trusted-provider-override';
+      const allowPrivate = allowPrivateForEveryRequest || permitsPrivateAddresses(request.addressPolicy);
       const normalized = normalizeRequest(request, allowPrivate);
       if (normalized.destination.protocol === 'http:') {
         const absolutePath =
@@ -306,6 +316,10 @@ class FixedParentProxyHttpsAgent extends https.Agent {
   }
 }
 
+function permitsPrivateAddresses(policy: OutboundAddressPolicy | undefined): boolean {
+  return policy === 'trusted-provider-override' || policy === 'approved-private-network';
+}
+
 function normalizeRequest(request: DestinationBoundRequest, allowPrivate: boolean): DestinationBoundRequest {
   const destination = {
     protocol: request.destination.protocol,
@@ -374,8 +388,8 @@ function normalizePort(port: number): number {
   return port;
 }
 
-function assertHostnameIsEligible(hostname: string, allowPrivate: boolean): void {
-  const lower = hostname.toLowerCase();
+export function assertHostnameIsEligible(hostname: string, allowPrivate: boolean): void {
+  const lower = hostname.toLowerCase().replace(/\.$/u, '');
   if (lower === 'metadata.google.internal') {
     throw new Error(`outbound destination is metadata-scoped: ${hostname}`);
   }
@@ -389,7 +403,7 @@ function assertHostnameIsEligible(hostname: string, allowPrivate: boolean): void
   ) {
     throw new Error(`outbound destination is local or metadata-scoped: ${hostname}`);
   }
-  if (net.isIP(hostname) !== 0 && !(allowPrivate ? isTrustedProviderAddress(hostname) : isPublicAddress(hostname))) {
+  if (net.isIP(hostname) !== 0 && !(allowPrivate ? isPublicOrPrivateAddress(hostname) : isPublicAddress(hostname))) {
     throw new Error(
       allowPrivate
         ? `outbound destination address is not allowed by its address policy: ${hostname}`
@@ -414,6 +428,12 @@ export function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boo
     callback: LookupCallback,
   ) => void;
   return ((hostname: string, options: dns.LookupOptions, callback: LookupCallback) => {
+    try {
+      assertHostnameIsEligible(hostname, allowPrivate);
+    } catch (error) {
+      callback(error as Error, []);
+      return;
+    }
     const allOptions: dns.LookupAllOptions = { ...options, all: true, verbatim: true };
     invokeLookup(hostname, allOptions, (error, result, family) => {
       if (error) {
@@ -426,7 +446,7 @@ export function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boo
         addresses.some(
           (entry) =>
             net.isIP(entry.address) === 0 ||
-            !(allowPrivate ? isTrustedProviderAddress(entry.address) : isPublicAddress(entry.address)),
+            !(allowPrivate ? isPublicOrPrivateAddress(entry.address) : isPublicAddress(entry.address)),
         )
       ) {
         callback(new Error(`DNS resolution for ${hostname} included a non-public address or disallowed address`), []);
@@ -441,77 +461,66 @@ export function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boo
   }) as typeof dns.lookup;
 }
 
+// BlockList handles equivalent IPv6 spellings and IPv4-mapped IPv6 without
+// string-prefix parsing. Construct the range tables once, outside request paths.
+const NON_PUBLIC_ADDRESSES = new net.BlockList();
+for (const [network, bits] of [
+  ['0.0.0.0', 8],
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['169.254.0.0', 16],
+  ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
+  ['192.0.2.0', 24],
+  ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
+  ['198.51.100.0', 24],
+  ['203.0.113.0', 24],
+  ['224.0.0.0', 4],
+  ['240.0.0.0', 4],
+] as const)
+  NON_PUBLIC_ADDRESSES.addSubnet(network, bits);
+for (const [network, bits] of [
+  ['::', 128],
+  ['::1', 128],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['ff00::', 8],
+  ['2001:db8::', 32],
+] as const)
+  NON_PUBLIC_ADDRESSES.addSubnet(network, bits, 'ipv6');
+
+const PRIVATE_ADDRESSES = new net.BlockList();
+for (const [network, bits] of [
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['172.16.0.0', 12],
+  ['192.168.0.0', 16],
+] as const)
+  PRIVATE_ADDRESSES.addSubnet(network, bits);
+PRIVATE_ADDRESSES.addAddress('::1', 'ipv6');
+PRIVATE_ADDRESSES.addSubnet('fc00::', 7, 'ipv6');
+
+const METADATA_ADDRESSES = new net.BlockList();
+METADATA_ADDRESSES.addAddress('100.100.100.200'); // Alibaba Cloud metadata, inside CGNAT.
+METADATA_ADDRESSES.addAddress('fd00:ec2::254', 'ipv6'); // EC2 metadata, inside ULA.
+
 /** Conservative routability classifier used for SSRF and rebinding defense. */
 export function isPublicAddress(address: string): boolean {
   const family = net.isIP(address);
-  if (family === 4) {
-    const octets = address.split('.').map(Number);
-    const value = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
-    return ![
-      ['0.0.0.0', 8],
-      ['10.0.0.0', 8],
-      ['100.64.0.0', 10],
-      ['127.0.0.0', 8],
-      ['169.254.0.0', 16],
-      ['172.16.0.0', 12],
-      ['192.0.0.0', 24],
-      ['192.0.2.0', 24],
-      ['192.168.0.0', 16],
-      ['198.18.0.0', 15],
-      ['198.51.100.0', 24],
-      ['203.0.113.0', 24],
-      ['224.0.0.0', 4],
-      ['240.0.0.0', 4],
-    ].some(([network, bits]) => ipv4InCidr(value, String(network), Number(bits)));
-  }
-  if (family === 6) {
-    const normalized = address.toLowerCase();
-    if (normalized.startsWith('::ffff:')) return isPublicAddress(normalized.slice('::ffff:'.length));
-    return !(
-      normalized === '::' ||
-      normalized === '::1' ||
-      normalized.startsWith('fc') ||
-      normalized.startsWith('fd') ||
-      /^fe[89ab]/u.test(normalized) ||
-      normalized.startsWith('ff') ||
-      normalized.startsWith('2001:db8:')
-    );
-  }
-  return false;
+  return family !== 0 && !NON_PUBLIC_ADDRESSES.check(address, family === 6 ? 'ipv6' : 'ipv4');
 }
 
-/**
- * Private destinations intentionally supported for a trusted provider gateway.
- * Link-local/metadata, unspecified, multicast, and documentation-only ranges
- * remain denied even on this path.
- */
-function isTrustedProviderAddress(address: string): boolean {
-  if (isPublicAddress(address)) return true;
+/** Link-local, metadata, unspecified, multicast, and documentation ranges remain denied. */
+function isPublicOrPrivateAddress(address: string): boolean {
   const family = net.isIP(address);
-  if (family === 4) {
-    const octets = address.split('.').map(Number);
-    const value = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
-    return [
-      ['10.0.0.0', 8],
-      ['100.64.0.0', 10],
-      ['127.0.0.0', 8],
-      ['172.16.0.0', 12],
-      ['192.168.0.0', 16],
-    ].some(([network, bits]) => ipv4InCidr(value, String(network), Number(bits)));
-  }
-  if (family === 6) {
-    const normalized = address.toLowerCase();
-    if (normalized.startsWith('::ffff:')) return isTrustedProviderAddress(normalized.slice('::ffff:'.length));
-    return normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd');
-  }
-  return false;
-}
-
-function ipv4InCidr(value: number, network: string, bits: number): boolean {
-  const octets = network.split('.').map(Number);
-  const base = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
-  const mask = bits === 0 ? 0 : (0xffff_ffff << (32 - bits)) >>> 0;
-  return (value & mask) === (base & mask);
+  if (family === 0) return false;
+  const type = family === 6 ? 'ipv6' : 'ipv4';
+  return (
+    !METADATA_ADDRESSES.check(address, type) && (isPublicAddress(address) || PRIVATE_ADDRESSES.check(address, type))
+  );
 }
 
 function formatAuthority(hostname: string, port: number, protocol: OutboundProtocol): string {

@@ -29,6 +29,7 @@
   import { Modal } from '$lib/components/ui/modal/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
   import ResourceLimitsSettings from '$lib/components/features/resource-limits-settings.svelte';
+  import NetworkSettings from './NetworkSettings.svelte';
   import ModelCombobox from '$lib/components/features/model-combobox.svelte';
   import Plus from 'phosphor-svelte/lib/Plus';
   import Trash from 'phosphor-svelte/lib/Trash';
@@ -465,6 +466,7 @@
 
   <section class="space-y-3" aria-labelledby="runtime-heading">
     <h3 id="runtime-heading" class="text-lg font-semibold tracking-tight">Runtime</h3>
+    <NetworkSettings />
     <Card>
       <CardHeader>
         <CardTitle>Nested Docker</CardTitle>

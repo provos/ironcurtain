@@ -7,6 +7,7 @@
  *     persists the WHOLE section via `saveUserConfig`, emits `config.changed`.
  *   - `config.getDockerWorkload` — read; returns enablement plus the three-state network selector.
  *   - `config.setDockerWorkload` — gated mutation; persists only those controls.
+ *   - `config.getNetwork` / `config.setNetwork` — approved-domain private address access.
  *   - `config.getStatistics` / `config.setStatistics` — resolved statistics
  *     settings, with the same mutation gate and change event.
  *
@@ -26,6 +27,7 @@ import {
   type ProfileDto,
   type StatisticsConfigDto,
   type ResourceBudgetConfigDto,
+  type NetworkSettingsDto,
   RpcError,
   MethodNotFoundError,
 } from '../web-ui-types.js';
@@ -102,6 +104,7 @@ const statisticsConfigSchema = z
   .strict();
 
 const getDockerWorkloadSchema = z.object({});
+const networkSettingsSchema = z.object({ allowPrivateNetworkAccess: z.boolean() }).strict();
 
 const setDockerWorkloadSchema = z
   .object({
@@ -120,6 +123,24 @@ export async function configDispatch(
   params: Record<string, unknown>,
 ): Promise<unknown> {
   switch (method) {
+    case 'config.getNetwork': {
+      validateParams(z.object({}).strict(), params);
+      return getNetwork();
+    }
+
+    case 'config.setNetwork': {
+      requirePolicyMutation(ctx);
+      const input = validateParams(networkSettingsSchema, params);
+      try {
+        loadUserConfig({ readOnly: true });
+        saveUserConfig(input);
+      } catch (err) {
+        throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+      }
+      ctx.eventBus.emit('config.changed', {});
+      return getNetwork();
+    }
+
     case 'config.getResourceBudget': {
       validateParams(z.object({}).strict(), params);
       return loadUserConfig({ readOnly: true }).resourceBudget;
@@ -182,6 +203,10 @@ export async function configDispatch(
     default:
       throw new MethodNotFoundError(method);
   }
+}
+
+function getNetwork(): NetworkSettingsDto {
+  return { allowPrivateNetworkAccess: loadUserConfig({ readOnly: true }).allowPrivateNetworkAccess };
 }
 
 function getStatistics(): StatisticsConfigDto {

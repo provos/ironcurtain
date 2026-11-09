@@ -31,11 +31,26 @@ Supported providers: `anthropic`, `google`, `openai`.
 
 ### Network destination screening
 
-IronCurtain screens every proxy destination again after DNS resolution. Localhost, `.local`, `.internal`,
+By default, IronCurtain screens every proxy destination again after DNS resolution. Localhost, `.local`, `.internal`,
 `.docker.internal`, private/link-local/metadata addresses, empty answer sets, and mixed public/private
 answer sets are rejected even when a passthrough domain was approved. This prevents DNS rebinding and
 SSRF into the host or VPN network. It also means internal registries and split-DNS names that resolve to
-private addresses are intentionally unavailable from ordinary sessions.
+private addresses are unavailable unless explicitly enabled.
+
+Set `allowPrivateNetworkAccess` to `true` to let approved passthrough domains resolve to private addresses:
+
+```json
+{
+  "allowPrivateNetworkAccess": true
+}
+```
+
+The flag defaults to `false`. Configure it with `ironcurtain config` → **Docker Agent** → **Network**, or
+web Settings → **Runtime** → **Network**. Changes apply to new container sessions, including workflow bundles.
+Domain approval through `add_proxy_domain` is still required; this flag does not add any domains.
+It permits RFC1918, loopback, carrier-grade NAT, and IPv6 unique-local addresses for approved domains.
+Metadata endpoints and IPv4/IPv6 link-local addresses remain blocked, including mixed DNS answer sets
+containing a blocked address. Package and registry destinations keep their public-only restrictions.
 
 Agent images do not bake in a user-specific IronCurtain CA. Each ephemeral container installs the
 session-mounted public CA into its system trust store at startup and also receives tool-specific trust

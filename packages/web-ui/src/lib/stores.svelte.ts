@@ -35,6 +35,7 @@ import type {
   SetModelProvidersDto,
   OpenrouterModelsDto,
   DockerWorkloadSettingsDto,
+  NetworkSettingsDto,
   PtySink,
   CreateSessionOptions,
   ResumableSessionDto,
@@ -928,6 +929,14 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
     ...(input.default !== undefined ? { default: input.default } : {}),
     profiles: input.profiles,
   });
+}
+
+export async function getNetworkSettings(): Promise<NetworkSettingsDto> {
+  return getWsClient().request<NetworkSettingsDto>('config.getNetwork', {});
+}
+
+export async function setNetworkSettings(input: NetworkSettingsDto): Promise<NetworkSettingsDto> {
+  return getWsClient().request<NetworkSettingsDto>('config.setNetwork', { ...input });
 }
 
 export async function getStatisticsConfig(): Promise<StatisticsConfigDto> {
