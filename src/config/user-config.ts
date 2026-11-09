@@ -55,6 +55,7 @@ export const USER_CONFIG_DEFAULTS = {
     enabled: true,
   },
   preferredMode: 'container',
+  allowPrivateNetworkAccess: false,
   dockerResources: {
     /** Memory ceiling in MB; null means "do not pass --memory". */
     memoryMb: 8192,
@@ -437,6 +438,7 @@ export const userConfigSchema = z
     preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
     preferredMode: preferredModeSchema.optional(),
     containerRuntime: z.enum(CONTAINER_RUNTIMES).optional(),
+    allowPrivateNetworkAccess: z.boolean().optional(),
     packageInstall: packageInstallSchema,
     dockerResources: dockerResourcesSchema,
     capture: captureSchema,
@@ -634,6 +636,8 @@ export interface ResolvedUserConfig {
   readonly preferredMode: SessionModeKind;
   /** Container runtime backend: 'auto' (default), 'docker', or 'apple-container'. */
   readonly containerRuntime: ContainerRuntimeSetting;
+  /** Allow approved proxy domains to resolve to private addresses; metadata/link-local remain blocked. */
+  readonly allowPrivateNetworkAccess: boolean;
   /** Package installation proxy configuration. */
   readonly packageInstall: ResolvedPackageInstallConfig;
   /** Docker container resource ceilings (pre-clamp). */
@@ -693,6 +697,7 @@ const DEFAULT_CONFIG_CONTENT =
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
       auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
       preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
+      allowPrivateNetworkAccess: USER_CONFIG_DEFAULTS.allowPrivateNetworkAccess,
       dockerResources: USER_CONFIG_DEFAULTS.dockerResources,
       snapshot: USER_CONFIG_DEFAULTS.snapshot,
       statistics: USER_CONFIG_DEFAULTS.statistics,
@@ -1031,6 +1036,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
     preferredMode: config.preferredMode ?? USER_CONFIG_DEFAULTS.preferredMode,
     containerRuntime: config.containerRuntime ?? 'auto',
+    allowPrivateNetworkAccess: config.allowPrivateNetworkAccess ?? USER_CONFIG_DEFAULTS.allowPrivateNetworkAccess,
     packageInstall: {
       enabled: config.packageInstall?.enabled ?? true,
       quarantineDays: config.packageInstall?.quarantineDays ?? 2,

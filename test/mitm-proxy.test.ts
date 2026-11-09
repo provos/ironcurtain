@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import * as http from 'node:http';
+import type { Socket } from 'node:net';
 import * as tls from 'node:tls';
 import * as crypto from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
@@ -1032,8 +1033,11 @@ describe('MitmProxy', () => {
       providers: [],
       registries: [debianRegistry, npmRegistry],
       packageValidation: { validator: DENY_ALL_VALIDATOR },
+      allowPrivateNetworkAccess: true,
+      dnsLookup: localhostDnsLookup,
     });
     await proxy.start();
+    expect(proxy.hosts.addHost('registry.npmjs.org')).toBe(false);
 
     const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
       new Promise((resolve, reject) => {
@@ -1058,6 +1062,7 @@ describe('MitmProxy', () => {
     // plain HTTP to an npm host is still blocked at the allowlist level.
     const npm = await fetchStatus('http://registry.npmjs.org/express');
     expect(npm.statusCode).toBe(403);
+    await expect(sendWsUpgrade(socketPath, 'registry.npmjs.org', 80, '/ws')).rejects.toThrow(/403/u);
 
     // Unknown host: still blocked at the allowlist level.
     const unknown = await fetchStatus('http://evil.example.com/malware');
@@ -2006,7 +2011,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
@@ -2132,6 +2137,72 @@ describe('MitmProxy', () => {
     expect(health).toBe(403);
   });
 
+  it.each([false, true])('requires domain approval and gates private HTTP with flag=%s', async (enabled) => {
+    let hits = 0;
+    const server = http.createServer((_req, res) => {
+      hits++;
+      res.end('private-ok');
+    });
+    const port = await new Promise<number>((resolve) =>
+      server.listen(0, '127.0.0.1', () => {
+        resolve((server.address() as import('node:net').AddressInfo).port);
+      }),
+    );
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: localhostDnsLookup,
+        allowPrivateNetworkAccess: enabled,
+      });
+      await proxy.start();
+      const request = () =>
+        new Promise<number>((resolve, reject) => {
+          const req = http.get({ socketPath, path: `http://linux.localdomain:${port}/` }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          });
+          req.on('error', reject);
+        });
+      expect(await request()).toBe(403);
+      const denied = await sendConnect(socketPath, 'linux.localdomain', port);
+      denied.socket?.destroy();
+      expect(denied.statusCode).toBe(403);
+      proxy.hosts.addHost('linux.localdomain');
+      expect(await request()).toBe(enabled ? 200 : 502);
+      expect(hits).toBe(enabled ? 1 : 0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.each([
+    '169.254.169.254',
+    '169.254.169.254.',
+    '100.100.100.200',
+    '100.100.100.200.',
+    'metadata.google.internal',
+    'METADATA.GOOGLE.INTERNAL.',
+  ])('blocks metadata CONNECT authority %s with private networking enabled', async (hostname) => {
+    vi.stubEnv('IRONCURTAIN_MITM_ALLOW_ALL_HOSTS', '1');
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: localhostDnsLookup,
+        allowPrivateNetworkAccess: true,
+      });
+      await proxy.start();
+      const { socket, statusCode } = await sendConnect(socketPath, hostname, 80);
+      socket?.destroy();
+      expect(statusCode).toBe(403);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('forwards plain HTTP through CONNECT tunnel to passthrough domain', async () => {
     // Create a simple HTTP server that responds to /health
     const httpServer = http.createServer((req, res) => {
@@ -2156,7 +2227,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('passthrough-http.example.com');
@@ -2245,6 +2316,34 @@ describe('MitmProxy', () => {
     }
   });
 
+  it.each([new Error('synchronous TLS destination rejection'), 'non-Error TLS destination rejection'])(
+    'contains synchronous TLS passthrough rejection %s and keeps serving requests',
+    async (error) => {
+      const rejectingTransport: OutboundTransport = {
+        kind: 'fixed-parent-proxy',
+        addressGuard: 'local-resolver',
+        request() {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- exercise non-Error transport failures
+          throw error;
+        },
+      };
+      proxy = createMitmProxy({ socketPath, ca, providers: [], outboundTransport: rejectingTransport });
+      await proxy.start();
+      proxy.hosts.addHost('rejected-tls.example.com');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { socket, statusCode } = await sendConnect(socketPath, 'rejected-tls.example.com', 443);
+        expect(statusCode).toBe(200);
+        if (!socket) throw new Error('CONNECT did not return a socket');
+        const response = await makeHttpsRequest(socket, ca, 'rejected-tls.example.com', { path: '/' });
+        expect(response.statusCode).toBe(502);
+        expect(response.body).toContain(error instanceof Error ? error.message : error);
+      }
+      const denied = await sendConnect(socketPath, 'not-approved.example.com', 443);
+      denied.socket?.destroy();
+      expect(denied.statusCode).toBe(403);
+    },
+  );
+
   it('MITMs nested HTTPS passthrough and uses only the fixed parent transport', async () => {
     const received: DestinationBoundRequest[] = [];
     const upstream = http.createServer((req, res) => {
@@ -2316,7 +2415,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
+        allowPrivateNetworkAccess: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-tunnel.example.com');
@@ -2364,6 +2463,65 @@ describe('MitmProxy', () => {
     } finally {
       wsServer.close();
     }
+  });
+
+  it('closes idle upstream sockets on stop without waiting for keep-alive expiry', async () => {
+    const connections = new Set<Socket>();
+    const upstream = http.createServer((_req, res) => res.end('pooled-ok'));
+    upstream.keepAliveTimeout = 60_000;
+    upstream.on('connection', (socket) => {
+      connections.add(socket);
+      socket.on('close', () => connections.delete(socket));
+    });
+    const port = await new Promise<number>((resolve) =>
+      upstream.listen(0, '127.0.0.1', () => {
+        resolve((upstream.address() as import('node:net').AddressInfo).port);
+      }),
+    );
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: localhostDnsLookup,
+        allowPrivateNetworkAccess: true,
+      });
+      await proxy.start();
+      proxy.hosts.addHost('linux.localdomain');
+      await new Promise<void>((resolve, reject) => {
+        const request = http.get({ socketPath, path: `http://linux.localdomain:${port}/` }, (res) => {
+          res.resume();
+          res.once('end', resolve);
+          res.once('error', reject);
+        });
+        request.once('error', reject);
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(connections.size).toBe(1);
+      await proxy.stop();
+      proxy = undefined;
+      await waitFor(() => connections.size === 0, { timeoutMs: 1_000 });
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
+  it('leaves injected transport cleanup to its owner on stop', async () => {
+    const destroy = vi.fn();
+    const transport: OutboundTransport = {
+      kind: 'fixed-parent-proxy',
+      addressGuard: 'local-resolver',
+      destroy,
+      request() {
+        throw new Error('unused transport');
+      },
+    };
+    proxy = createMitmProxy({ socketPath, ca, providers: [], outboundTransport: transport });
+    await proxy.start();
+    await proxy.stop();
+    proxy = undefined;
+    expect(destroy).not.toHaveBeenCalled();
   });
 
   it('cleans up active WebSocket connections on stop()', async () => {

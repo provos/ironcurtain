@@ -988,6 +988,10 @@ export interface StatisticsConfigDto {
   readonly retentionDays: number | null;
 }
 
+export interface NetworkSettingsDto {
+  readonly allowPrivateNetworkAccess: boolean;
+}
+
 /**
  * Response from `config.listOpenrouterModels`. `source` drives validation
  * strictness: `live`/`cache` hard-block unknown slugs; `bundled` (the offline

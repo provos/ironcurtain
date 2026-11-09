@@ -50,6 +50,8 @@ vi.mock('$lib/stores.svelte.js', () => ({
       warnThresholdPercent: 80,
     }),
   setResourceBudget: (input: unknown) => Promise.resolve(input),
+  getNetworkSettings: () => Promise.resolve({ allowPrivateNetworkAccess: false }),
+  setNetworkSettings: (input: unknown) => Promise.resolve(input),
   getDockerWorkloadSettings: (...args: unknown[]) => mockGetDockerWorkload(...(args as [])),
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
   setDockerWorkloadSettings: (...args: unknown[]) => mockSetDockerWorkload(...(args as [DockerWorkloadSettingsDto])),

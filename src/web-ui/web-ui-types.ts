@@ -100,6 +100,8 @@ export type MethodName =
   | 'config.setModelProviders'
   | 'config.getDockerWorkload'
   | 'config.setDockerWorkload'
+  | 'config.getNetwork'
+  | 'config.setNetwork'
   | 'config.getStatistics'
   | 'config.getResourceBudget'
   | 'config.setResourceBudget'
@@ -712,6 +714,11 @@ export interface SetModelProvidersDto {
 export interface StatisticsConfigDto {
   readonly enabled: boolean;
   readonly retentionDays: number | null;
+}
+
+/** Container proxy destination policy. Domain approval is required independently. */
+export interface NetworkSettingsDto {
+  readonly allowPrivateNetworkAccess: boolean;
 }
 
 /**

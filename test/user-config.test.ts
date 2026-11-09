@@ -63,6 +63,17 @@ describe('loadUserConfig', () => {
     expect(config.anthropicApiKey).toBe('');
     expect(config.dockerWorkload).toEqual({ enabled: false });
     expect(config.statistics).toEqual({ enabled: true, retentionDays: 90 });
+    expect(config.allowPrivateNetworkAccess).toBe(false);
+  });
+
+  it.each([false, true])('persists explicit allowPrivateNetworkAccess=%s', (enabled) => {
+    saveUserConfig({ allowPrivateNetworkAccess: enabled });
+    expect(loadUserConfig().allowPrivateNetworkAccess).toBe(enabled);
+    expect(JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8')).allowPrivateNetworkAccess).toBe(enabled);
+  });
+
+  it.each(['true', 1, null])('rejects non-boolean private network flag %s', (value) => {
+    expect(userConfigSchema.safeParse({ allowPrivateNetworkAccess: value }).success).toBe(false);
   });
 
   it('reads the validated requested Docker-workload block without creating or resolving config', () => {

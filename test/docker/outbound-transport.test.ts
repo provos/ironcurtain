@@ -1,12 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as dns from 'node:dns';
 import * as http from 'node:http';
+import type { Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   createDirectOutboundTransport,
   createParentProxyOutboundTransport,
+  createGuardedLookup,
+  assertHostnameIsEligible,
   isPublicAddress,
   type OutboundTransport,
 } from '../../src/docker/outbound-transport.js';
@@ -28,6 +31,58 @@ afterEach(async () => {
 });
 
 describe('direct destination-bound transport', () => {
+  it('destroys idle pooled upstream sockets without waiting for their timeout', async () => {
+    const connections = new Set<Socket>();
+    const server = http.createServer((_req, res) => res.end('pooled-ok'));
+    server.keepAliveTimeout = 60_000;
+    server.on('connection', (socket) => {
+      connections.add(socket);
+      socket.on('close', () => connections.delete(socket));
+    });
+    servers.push(server);
+    const port = await listenTcp(server);
+    const transport = createDirectOutboundTransport({ lookup: stubLookup({ 'linux.localdomain': '127.0.0.1' }) });
+    try {
+      await expect(
+        requestBody(transport, {
+          destination: { protocol: 'http:', hostname: 'linux.localdomain', port },
+          addressPolicy: 'approved-private-network',
+          method: 'GET',
+          path: '/',
+        }),
+      ).resolves.toBe('pooled-ok');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(connections.size).toBe(1);
+      transport.destroy?.();
+      await vi.waitFor(() => expect(connections.size).toBe(0), { timeout: 1_000 });
+      transport.destroy?.(); // Destruction is safe to repeat during cleanup.
+    } finally {
+      transport.destroy?.();
+    }
+  });
+
+  it('allows an explicitly authorized private passthrough without relaxing other requests', async () => {
+    const server = http.createServer((_req, res) => res.end('private-ok'));
+    servers.push(server);
+    const port = await listenTcp(server);
+    const transport = createDirectOutboundTransport({ lookup: stubLookup({ 'linux.localdomain': '127.0.0.1' }) });
+    await expect(
+      requestBody(transport, {
+        destination: { protocol: 'http:', hostname: 'linux.localdomain', port },
+        addressPolicy: 'approved-private-network',
+        method: 'GET',
+        path: '/',
+      }),
+    ).resolves.toBe('private-ok');
+    await expect(
+      requestBody(transport, {
+        destination: { protocol: 'http:', hostname: 'linux.localdomain', port },
+        method: 'GET',
+        path: '/',
+      }),
+    ).rejects.toThrow(/non-public/u);
+  });
+
   it('owns Host and strips proxy credentials while preserving the origin-form path', async () => {
     const observed = new Promise<{ url: string; host?: string; proxyAuthorization?: string }>((resolve) => {
       const server = http.createServer((request, response) => {
@@ -393,6 +448,108 @@ describe('derived-redirect refusal symmetry', () => {
 });
 
 describe('address classification', () => {
+  it.each([false, true])('screens trailing-dot literals consistently with private access=%s', async (allowPrivate) => {
+    for (const hostname of ['169.254.169.254.', '169.254.1.2.', '100.100.100.200.', 'fd00:ec2::254.', 'fe80::1.']) {
+      expect(() => assertHostnameIsEligible(hostname, allowPrivate)).toThrow(/not public|not allowed/u);
+      // No DNS answer can turn a denied literal into an allowed destination.
+      const resolver = vi.fn(stubLookup({ [hostname]: '8.8.8.8' }));
+      const result = new Promise((resolve, reject) => {
+        createGuardedLookup(resolver, allowPrivate)(hostname, { all: true }, (err, answers) => {
+          if (err) reject(err);
+          else resolve(answers);
+        });
+      });
+      await expect(result).rejects.toThrow(/not public|not allowed/u);
+      expect(resolver).not.toHaveBeenCalled();
+    }
+    expect(() => assertHostnameIsEligible('8.8.8.8.', allowPrivate)).not.toThrow();
+    for (const hostname of ['192.168.1.10.', '127.0.0.1.', '::1.', '100.64.0.1.', 'fd12::1.']) {
+      if (allowPrivate) expect(() => assertHostnameIsEligible(hostname, allowPrivate)).not.toThrow();
+      else expect(() => assertHostnameIsEligible(hostname, allowPrivate)).toThrow(/not public/u);
+    }
+  });
+
+  it.each(['0:0:0:0:0:0:0:1', '0:0:0:0:0:ffff:c0a8:101', '::ffff:192.168.1.1', 'fe80:0:0:0::1', '2001:0db8::1'])(
+    'rejects equivalent non-public IPv6 address %s',
+    (address) => {
+      expect(isPublicAddress(address)).toBe(false);
+    },
+  );
+
+  it.each([
+    '192.168.1.10',
+    '10.1.2.3',
+    '172.16.0.1',
+    '100.64.0.1',
+    'fd12::1',
+    '::ffff:192.168.1.10',
+    '0:0:0:0:0:ffff:c0a8:10a',
+  ])('permits private answer %s only when enabled', async (address) => {
+    const resolver = stubLookup({ 'linux.localdomain': address });
+    const lookup = (enabled: boolean) =>
+      new Promise((resolve, reject) => {
+        createGuardedLookup(resolver, enabled)('linux.localdomain', { all: true }, (err, answers) => {
+          if (err) reject(err);
+          else resolve(answers);
+        });
+      });
+    await expect(lookup(false)).rejects.toThrow(/non-public/u);
+    await expect(lookup(true)).resolves.toEqual([{ address, family: address.includes(':') ? 6 : 4 }]);
+  });
+
+  it.each([
+    '169.254.169.254',
+    '169.254.1.2',
+    'fe80::1',
+    'fe80:0:0:0:0:0:0:1',
+    '100.100.100.200',
+    'fd00:ec2::254',
+    'fd00:0ec2:0:0:0:0:0:0254',
+    '::ffff:169.254.169.254',
+    '::ffff:6464:64c8',
+    '0.0.0.0',
+    '224.0.0.1',
+    '2001:db8::1',
+  ])('keeps metadata/link-local/reserved address %s blocked when private access is enabled', async (address) => {
+    expect(() => assertHostnameIsEligible(address, true)).toThrow(/not allowed/u);
+    const resolver = stubLookup({ 'linux.localdomain': address });
+    const result = new Promise((resolve, reject) => {
+      createGuardedLookup(resolver, true)('linux.localdomain', { all: true }, (err, answers) => {
+        if (err) reject(err);
+        else resolve(answers);
+      });
+    });
+    await expect(result).rejects.toThrow(/non-public/u);
+  });
+
+  it('rejects mixed allowed/private and metadata answers', async () => {
+    const resolver = ((_hostname, _options, callback) =>
+      callback(null, [
+        { address: '192.168.1.10', family: 4 },
+        { address: '169.254.169.254', family: 4 },
+      ])) as typeof dns.lookup;
+    const result = new Promise((resolve, reject) => {
+      createGuardedLookup(resolver, true)('linux.localdomain', { all: true }, (err, answers) => {
+        if (err) reject(err);
+        else resolve(answers);
+      });
+    });
+    await expect(result).rejects.toThrow(/non-public/u);
+  });
+
+  it.each(['metadata.google.internal', 'METADATA.GOOGLE.INTERNAL.'])(
+    'rejects metadata hostname %s even if its DNS would return an allowed address',
+    async (hostname) => {
+      const result = new Promise((resolve, reject) => {
+        createGuardedLookup(stubLookup({ [hostname]: '127.0.0.1' }), true)(hostname, { all: true }, (err, answers) => {
+          if (err) reject(err);
+          else resolve(answers);
+        });
+      });
+      await expect(result).rejects.toThrow(/metadata/u);
+    },
+  );
+
   it.each(['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111'])('accepts public address %s', (address) => {
     expect(isPublicAddress(address)).toBe(true);
   });

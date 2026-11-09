@@ -195,7 +195,7 @@ describe('handleVirtualProxyTool', () => {
     );
     expect(result).toEqual({
       status: 'already_accessible',
-      message: 'Domain is already accessible (built-in provider)',
+      message: 'Domain is already accessible (built-in provider or registry)',
     });
   });
 
