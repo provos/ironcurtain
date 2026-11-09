@@ -1,3 +1,4 @@
+import { resolveHostModelApiKey } from '../config/model-provider.js';
 /**
  * CLI entry point for `ironcurtain mux`.
  *
@@ -12,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getPtyRegistryDir } from '../config/paths.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
-import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
+import { parseModelId } from '../config/model-provider.js';
 import { modelFlagMisusedAsAgent } from '../config/agent-model-guard.js';
 import { loadConfig } from '../config/index.js';
 import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
@@ -102,12 +103,12 @@ function emitAutoApproveWarning(userConfig: ResolvedUserConfig): boolean {
   if (!userConfig.autoApprove.enabled) return false;
 
   const { provider } = parseModelId(userConfig.autoApprove.modelId);
-  const apiKey = resolveApiKeyForProvider(provider, userConfig);
+  const apiKey = resolveHostModelApiKey(userConfig.autoApprove.modelId, userConfig, 'autoApprove');
   if (apiKey) return false;
 
   process.stderr.write(
     chalk.yellow(
-      `Warning: auto-approve is enabled but no API key found for provider "${provider}".\n` +
+      `Warning: auto-approve is enabled but no API key found for provider "${userConfig.hostModelProfiles?.autoApprove ?? provider}".\n` +
         'Auto-approve will be silently disabled. Set the API key in your environment or config.\n',
     ),
   );

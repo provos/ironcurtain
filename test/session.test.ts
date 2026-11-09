@@ -200,6 +200,59 @@ describe('Session', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    { override: undefined, selected: 'openai/gpt-4o-mini', cap: 1, estimated: 0.06 },
+    { override: 'anthropic:claude-opus-4-6', selected: 'openai/gpt-4o', cap: 2, estimated: 1 },
+  ])(
+    'budgets the mapped host model $selected without remapping the SDK request',
+    async ({ override, selected, cap, estimated }) => {
+      const config = createTestConfig();
+      config.userConfig.resourceBudget.maxEstimatedCostUsd = cap;
+      config.userConfig.modelProviders = {
+        default: 'cheap',
+        profiles: {
+          native: { type: 'native' },
+          cheap: {
+            type: 'openrouter',
+            apiKey: 'dummy-host-key',
+            modelMap: [
+              { match: '*sonnet*', model: 'openai/gpt-4o-mini' },
+              { match: '*opus*', model: 'openai/gpt-4o' },
+              { match: 'openai/gpt-4o-mini', model: 'anthropic/claude-sonnet-4-6' },
+              { match: 'openai/gpt-4o', model: 'anthropic/claude-opus-4-6' },
+            ],
+            usesDefaultMap: false,
+            perAgent: { 'claude-code': 'docker-only', goose: 'docker-only', codex: 'docker-only' },
+            sessionAffinity: false,
+          },
+        },
+      };
+      config.userConfig.hostModelProfiles = { agent: 'cheap' };
+      mockGenerateText.mockImplementation(
+        async (opts: {
+          model: { modelId: string };
+          stopWhen: Array<(result: { steps: Array<{ usage: ReturnType<typeof mockUsage> }> }) => boolean>;
+        }) => {
+          expect(opts.model.modelId).toBe(selected);
+          expect(opts.stopWhen[1]({ steps: [{ usage: mockUsage(0, 100_000) }] })).toBe(false);
+          return createMockGenerateResult('within budget');
+        },
+      );
+      const session = await createSession({
+        config,
+        sandboxFactory: createMockSandboxFactory(),
+        agentModelOverride: override,
+      });
+      try {
+        await expect(session.sendMessage('hello')).resolves.toBe('within budget');
+        expect(session.getBudgetStatus().cumulative.estimatedCostUsd).toBeCloseTo(estimated);
+        expect(session.getDiagnosticLog().some((event) => event.kind === 'budget_exhausted')).toBe(false);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
   describe('lifecycle', () => {
     it('transitions through initializing -> ready states during creation', async () => {
       const session = await createTestSession();

@@ -829,6 +829,47 @@ describe('checkAgentApiRoundtrip', () => {
     });
   }
 
+  function configWithZaiKey(apiKey: string) {
+    return buildConfig({
+      userConfig: {
+        ...baseConfig.userConfig,
+        hostModelProfiles: { agent: 'glm' },
+        modelProviders: {
+          default: 'native',
+          profiles: {
+            glm: {
+              type: 'zai',
+              apiKey,
+              plan: 'api',
+              model: 'glm-5.3',
+              modelMap: [],
+              usesDefaultMap: false,
+              perAgent: { 'claude-code': undefined, codex: undefined, goose: undefined },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  it('identifies a named Z.AI agent route in a successful diagnostic', async () => {
+    vi.mocked(createLanguageModel).mockResolvedValueOnce(fakeModel);
+    vi.mocked(generateText).mockResolvedValueOnce({} as never);
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(configWithZaiKey('zai-key'));
+    expect(r).toMatchObject({ name: 'Z.AI API round-trip', status: 'ok' });
+  });
+
+  it('does not treat missing named-profile credentials as an unrelated OAuth setup', async () => {
+    const priorAuthCalls = vi.mocked(detectAuthMethod).mock.calls.length;
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(configWithZaiKey(''));
+    expect(r).toMatchObject({ name: 'Z.AI API round-trip', status: 'skip' });
+    expect(r.message).toContain('host agent profile "glm"');
+    expect(r.hint).toContain('ZAI_API_KEY');
+    expect(detectAuthMethod).toHaveBeenCalledTimes(priorAuthCalls);
+  });
+
   it('skips with provider-aware message when no API key is set and provider is non-Anthropic', async () => {
     // For non-Anthropic providers the OAuth fallback branch is short-circuited,
     // so detectAuthMethod is never called — no need to mock it here.

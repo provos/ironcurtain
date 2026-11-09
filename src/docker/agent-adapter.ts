@@ -276,6 +276,7 @@ export interface AgentAdapter {
       readonly sessionId: string;
       readonly firstTurn: boolean;
       readonly modelOverride?: string;
+      readonly providerProfile?: import('../config/user-config.js').ResolvedProviderProfile;
     },
   ): readonly string[];
 

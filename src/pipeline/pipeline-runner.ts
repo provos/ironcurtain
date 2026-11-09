@@ -208,7 +208,7 @@ export async function createPipelineModels(logDir?: string, logFileName?: string
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown', logFileName);
   const userConfig = loadUserConfig();
-  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig);
+  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig, 'prefilter');
   const { model: prefilterModel } = createPerServerModel(haikuBaseLlm, llm.logPath, 'prefilter');
   return {
     baseLlm: llm.baseLlm,

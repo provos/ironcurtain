@@ -138,7 +138,7 @@ export class TrustedProcess {
     const autoApproveConfig = this.config.userConfig.autoApprove;
     if (!autoApproveConfig.enabled) return null;
     try {
-      return await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
+      return await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig, 'autoApprove');
     } catch {
       logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
       return null;

@@ -302,7 +302,7 @@ export async function createPipelineLlm(
     throw new Error(`logFileName must be a bare filename, got: ${JSON.stringify(logFileName)}`);
   }
   const userConfig = loadUserConfig();
-  const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
+  const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig, 'policy');
   const logContext: LlmLogContext = { stepName: initialStepName };
   const logPath = resolve(generatedDir, logFileName);
   const model = wrapLanguageModel({

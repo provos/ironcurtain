@@ -1,3 +1,4 @@
+import { ZAI_HOST } from '../config/zai.js';
 /**
  * SSE → final-message reassembly for streaming LLM API responses.
  *
@@ -920,6 +921,7 @@ function splitJsonArrayElements(arrayRaw: string): string[] {
  */
 export function providerForHost(host: string, path?: string): CaptureProvider {
   const normalized = host.toLowerCase();
+  if (normalized === ZAI_HOST) return path?.split('?')[0].endsWith('/v1/messages') ? 'anthropic' : 'openai';
   if (normalized === 'api.anthropic.com') return 'anthropic';
   if (normalized === 'api.openai.com') return 'openai';
   if (normalized === 'chatgpt.com') return 'openai';
@@ -946,6 +948,12 @@ export function providerForHost(host: string, path?: string): CaptureProvider {
  */
 export function createReassembler(host: string, path?: string): Reassembler | undefined {
   const h = host.toLowerCase();
+  if (h === ZAI_HOST) {
+    const cleanPath = path?.split('?')[0];
+    if (cleanPath?.endsWith('/v1/messages')) return new AnthropicReassembler();
+    if (cleanPath?.endsWith('/responses')) return new ResponsesReassembler();
+    return undefined;
+  }
   if (h === 'api.anthropic.com') return new AnthropicReassembler();
   if (h === 'chatgpt.com' || h === 'api.openai.com') return new ResponsesReassembler();
   // OpenRouter, disambiguated by path (§11.2): the Anthropic skin reassembles

@@ -21,7 +21,7 @@ import {
   type ToolSet,
 } from 'ai';
 import { z } from 'zod';
-import { createLanguageModel } from '../config/model-provider.js';
+import { createLanguageModel, resolveHostModelId } from '../config/model-provider.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from '../observability/llm-logger.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
@@ -115,9 +115,9 @@ export class AgentSession implements Session {
   private readonly systemPromptAugmentation?: string;
 
   /**
-   * Resolved model ID for this session. Shared across the budget tracker,
-   * cache strategy, and model creation — all three must agree so tokenizer
-   * and pricing estimates match the model actually invoked.
+   * Requested model ID, including the session override. SDK creation resolves
+   * this fresh request through its host profile; budgeting uses the effective
+   * selection without feeding it back through the model map.
    */
   private readonly agentModelId: string;
 
@@ -140,7 +140,8 @@ export class AgentSession implements Session {
     this.systemPromptAugmentation = options.systemPromptAugmentation;
     this.agentModelId = options.agentModelOverride ?? config.agentModelId;
     this.createdAt = new Date().toISOString();
-    this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, this.agentModelId);
+    const budgetModelId = resolveHostModelId(this.agentModelId, config.userConfig, 'agent');
+    this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, budgetModelId);
     this.compactor = new MessageCompactor(config.userConfig.autoCompact);
     this.cacheStrategy = createCacheStrategy(this.agentModelId);
   }
@@ -377,7 +378,7 @@ export class AgentSession implements Session {
   }
 
   private async buildModel(): Promise<LanguageModel> {
-    const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig);
+    const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig, 'agent');
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };

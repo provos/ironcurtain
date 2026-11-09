@@ -1,3 +1,4 @@
+import { getGatewayDefinition } from '../config/provider-definitions.js';
 /**
  * Diagnostic check functions for `ironcurtain doctor`.
  *
@@ -30,8 +31,10 @@ import {
   resolveApiKeyForProvider,
   createLanguageModel,
   parseModelId,
+  resolveHostModelApiKey,
   type ProviderId,
 } from '../config/model-provider.js';
+import { resolveActiveProfile } from '../config/user-config.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
@@ -656,11 +659,19 @@ function formatElapsed(ms: number): string {
  */
 export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise<CheckResult> {
   const { provider } = parseModelId(config.agentModelId);
-  const label = formatProviderLabel(provider);
+  const profileName = config.userConfig.hostModelProfiles?.agent;
+  const profile =
+    profileName === undefined ? undefined : resolveActiveProfile(config.userConfig.modelProviders, profileName);
+  const gateway = profile?.type === 'native' ? undefined : profile;
+  const label = gateway ? getGatewayDefinition(gateway.type).label : formatProviderLabel(provider);
   const name = `${label} API round-trip`;
-  const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
+  const apiKey = resolveHostModelApiKey(config.agentModelId, config.userConfig, 'agent');
   if (apiKey.length === 0) {
-    if (provider === 'anthropic' && (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth') {
+    if (
+      !gateway &&
+      provider === 'anthropic' &&
+      (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth'
+    ) {
       return {
         name,
         status: 'skip',
@@ -670,14 +681,19 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
     return {
       name,
       status: 'skip',
-      message: `no ${label} API key — round-trip uses API key auth only`,
+      message: gateway
+        ? `no ${label} API key for host agent profile "${profileName}"`
+        : `no ${label} API key — round-trip uses API key auth only`,
+      ...(gateway
+        ? { hint: `Set ${getGatewayDefinition(gateway.type).editor.credentialEnv} or the profile apiKey.` }
+        : {}),
     };
   }
   try {
     const start = Date.now();
     // Lazy-import the AI SDK so the default doctor run doesn't pay the load cost.
     const { generateText } = await import('ai');
-    const model = await createLanguageModel(config.agentModelId, config.userConfig);
+    const model = await createLanguageModel(config.agentModelId, config.userConfig, 'agent');
     await generateText({
       model,
       prompt: 'Reply with the single word OK.',
@@ -695,7 +711,9 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
       name,
       status: 'fail',
       message: describeApiError(err),
-      hint: `Verify the ${label} API key is valid and the configured agentModelId exists.`,
+      hint: gateway
+        ? `Verify the ${label} profile "${profileName}" API key and mapped agent model.`
+        : `Verify the ${label} API key is valid and the configured agentModelId exists.`,
     };
   }
 }

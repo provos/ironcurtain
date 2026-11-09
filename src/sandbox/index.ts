@@ -607,7 +607,7 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorB
   const autoApprove = config.userConfig.autoApprove;
   if (autoApprove.enabled) {
     try {
-      const base = await createLanguageModel(autoApprove.modelId, config.userConfig);
+      const base = await createLanguageModel(autoApprove.modelId, config.userConfig, 'autoApprove');
       autoApproveModel = wrapAutoApproveModel(base, config.autoApproveLlmLogPath);
     } catch (err) {
       // Model construction failure is non-fatal: auto-approve becomes

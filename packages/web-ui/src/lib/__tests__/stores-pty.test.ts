@@ -37,6 +37,7 @@ vi.mock('../ws-client.js', async (importOriginal) => {
 });
 
 import {
+  setModelProviders,
   attachPty,
   detachPty,
   sendPtyInput,
@@ -349,5 +350,17 @@ describe('PTY sink registry seam', () => {
     expect(handle.writes.length).toBeLessThan(total);
     expect(handle.writes[handle.writes.length - 1].startsWith(`${total - 1}:`)).toBe(true);
     unregisterPtySink(46);
+  });
+});
+
+describe('provider registry actions', () => {
+  it('forwards rename identity to preserve provider keys and host-role bindings', async () => {
+    mockRequest.mockResolvedValue({ default: 'renamed', profiles: {} });
+    const input = {
+      profiles: { renamed: { type: 'zai' as const, apiKey: 'masked' } },
+      renameFrom: { renamed: 'original' },
+    };
+    await setModelProviders(input);
+    expect(mockRequest).toHaveBeenLastCalledWith('config.setModelProviders', input);
   });
 });

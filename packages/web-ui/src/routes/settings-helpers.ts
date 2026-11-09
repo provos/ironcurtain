@@ -3,11 +3,11 @@
  *
  * The editable form works with a flattened `EditableProfile` (comma-separated
  * provider lists, a bindable perAgent record) that round-trips to/from the wire
- * `OpenrouterProfileDto`. Kept Svelte-free so the get→edit→set→get round-trip
+ * `GatewayProfileDto`. Kept Svelte-free so the get→edit→set→get round-trip
  * (incl. the M5 masked-key preservation) is unit-testable without the DOM.
  */
 
-import type { ModelMapRuleDto, OpenrouterProfileDto } from '$lib/types.js';
+import type { ModelMapRuleDto, GatewayProfileDto, ProviderEditorDescriptor } from '$lib/types.js';
 
 /** The reserved, always-present implicit profile name. */
 export const NATIVE_NAME = 'native';
@@ -17,7 +17,7 @@ export const DOCKER_AGENTS = ['claude-code', 'goose', 'codex'] as const;
 export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 
 /**
- * The form's editable representation of an openrouter profile.
+ * The form's editable representation of an gateway profile.
  *
  * `apiKey` holds either the masked value (unchanged → sent back verbatim so the
  * backend keeps the stored key) or a user-typed replacement. `providerOrder` /
@@ -25,6 +25,9 @@ export type DockerAgent = (typeof DOCKER_AGENTS)[number];
  * uses '' for "unset" so the inputs are always bindable.
  */
 export interface EditableProfile {
+  type: string;
+  plan?: string;
+  model?: string;
   apiKey: string;
   modelMap: ModelMapRuleDto[];
   perAgent: Record<DockerAgent, string>;
@@ -32,13 +35,17 @@ export interface EditableProfile {
   providerOnly: string;
   allowFallbacks: boolean;
   sessionAffinity: boolean;
+  providerPreferenceExplicit: boolean;
   /** True when the profile omitted `modelMap` entirely (use the default map). */
   usesDefaultMap: boolean;
 }
 
-/** A fresh blank openrouter profile for the "Add profile" flow. */
-export function blankOpenrouterProfile(): EditableProfile {
+/** A fresh blank gateway profile for the "Add profile" flow. */
+export function blankProfile(descriptor: ProviderEditorDescriptor): EditableProfile {
   return {
+    type: descriptor.id,
+    plan: descriptor.plan?.defaultValue,
+    model: descriptor.model?.defaultValue,
     apiKey: '',
     modelMap: [],
     perAgent: { 'claude-code': '', goose: '', codex: '' },
@@ -46,6 +53,7 @@ export function blankOpenrouterProfile(): EditableProfile {
     providerOnly: '',
     allowFallbacks: true,
     sessionAffinity: true,
+    providerPreferenceExplicit: false,
     // A brand-new profile with no rows means "no glob mapping" only if the user
     // leaves it empty AND explicitly opts into per-agent-only. To keep the add
     // flow ergonomic we start with the default map (usesDefaultMap = true).
@@ -54,11 +62,15 @@ export function blankOpenrouterProfile(): EditableProfile {
 }
 
 /** Converts a fetched masked DTO into the form's editable shape. */
-export function toEditable(dto: OpenrouterProfileDto): EditableProfile {
+export function toEditable(dto: GatewayProfileDto, descriptor: ProviderEditorDescriptor): EditableProfile {
   const pp = dto.providerPreference;
   return {
+    ...blankProfile(descriptor),
+    type: dto.type,
+    plan: dto.plan ?? descriptor.plan?.defaultValue,
+    model: dto.model ?? descriptor.model?.defaultValue,
     apiKey: dto.apiKey ?? '',
-    modelMap: (dto.modelMap ?? []).map((r) => ({ match: r.match, model: r.model })),
+    modelMap: (dto.modelMap ?? []).map((rule) => ({ ...rule })),
     perAgent: {
       'claude-code': dto.perAgent?.['claude-code'] ?? '',
       goose: dto.perAgent?.goose ?? '',
@@ -67,9 +79,20 @@ export function toEditable(dto: OpenrouterProfileDto): EditableProfile {
     providerOrder: (pp?.order ?? []).join(', '),
     providerOnly: (pp?.only ?? []).join(', '),
     allowFallbacks: pp?.allowFallbacks ?? true,
+    providerPreferenceExplicit: pp !== undefined,
     sessionAffinity: dto.sessionAffinity ?? true,
     usesDefaultMap: dto.modelMap === undefined,
   };
+}
+
+/** Format descriptor defaults using only supplied configuration, including the editable default target. */
+export function defaultMapSummary(descriptor: ProviderEditorDescriptor, model?: string): string {
+  return descriptor.defaultMap
+    .map(
+      (rule) =>
+        `${rule.match} → ${descriptor.model?.defaultMapMatch === rule.match ? (model ?? descriptor.model.defaultValue) : rule.model}`,
+    )
+    .join('; ');
 }
 
 /**
@@ -98,7 +121,7 @@ export function parseList(value: string): string[] {
 }
 
 /**
- * Converts the editable form back into a wire `OpenrouterProfileDto`.
+ * Converts the editable form back into a wire `GatewayProfileDto`.
  *
  * The apiKey is passed through verbatim: an untouched masked value is sent back
  * (backend M5 mask-equality → keep), an empty string clears, any other value
@@ -107,15 +130,19 @@ export function parseList(value: string): string[] {
  * rows are sent, and zero valid rows becomes `[]` ("per-agent only" — the glob
  * never matches). Provider preference is omitted when both lists are empty.
  */
-export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
+export function editableToDto(p: EditableProfile, descriptor: ProviderEditorDescriptor): GatewayProfileDto {
   const dto: {
-    type: 'openrouter';
+    type: string;
+    plan?: string;
+    model?: string;
     apiKey?: string;
     modelMap?: ModelMapRuleDto[];
     perAgent?: Record<string, string>;
     providerPreference?: { order?: string[]; only?: string[]; allowFallbacks?: boolean };
     sessionAffinity?: boolean;
-  } = { type: 'openrouter' };
+  } = { type: descriptor.id };
+  if (descriptor.model) dto.model = p.model?.trim() || descriptor.model.defaultValue;
+  if (descriptor.plan) dto.plan = p.plan ?? descriptor.plan.defaultValue;
 
   // apiKey: '' is meaningful (clear); pass through untouched (mask/new/clear).
   dto.apiKey = p.apiKey;
@@ -137,7 +164,10 @@ export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
 
   const order = parseList(p.providerOrder);
   const only = parseList(p.providerOnly);
-  if (order.length > 0 || only.length > 0) {
+  if (
+    descriptor.providerRouting &&
+    (order.length > 0 || only.length > 0 || p.providerPreferenceExplicit || !p.allowFallbacks)
+  ) {
     dto.providerPreference = {
       ...(order.length > 0 ? { order } : {}),
       ...(only.length > 0 ? { only } : {}),
@@ -145,12 +175,12 @@ export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
     };
   }
 
-  dto.sessionAffinity = p.sessionAffinity;
+  if (descriptor.sessionAffinity) dto.sessionAffinity = p.sessionAffinity;
   return dto;
 }
 
 // ---------------------------------------------------------------------------
-// Slug validation (OpenRouter model autocomplete).
+// Model validation (provider catalog autocomplete).
 //
 // A pure, DOM-free guardrail run in `saveEdit` before persisting. The block-vs
 // -warn decision keys ONLY on the catalog `source` (mirrors the backend's
@@ -199,7 +229,7 @@ export function sourceEnforces(source: ModelCatalogSource): boolean {
  * from blocking — the robust, per-profile way to grandfather values the user did
  * not introduce this session (no per-row identity tracking needed).
  */
-export function persistedSlugSet(dto: OpenrouterProfileDto | undefined): ReadonlySet<string> {
+export function persistedSlugSet(dto: GatewayProfileDto | undefined): ReadonlySet<string> {
   const slugs = new Set<string>();
   if (!dto) return slugs;
   for (const row of dto.modelMap ?? []) {
@@ -259,8 +289,8 @@ function describeIssue(issue: SlugIssue): string {
 }
 
 /** Save-blocking message naming each unknown slug and where it lives. */
-export function blockMessage(blocked: SlugIssue[]): string {
-  return blocked.map((issue) => `${describeIssue(issue)} is not a known OpenRouter model`).join('; ');
+export function blockMessage(blocked: SlugIssue[], label: string): string {
+  return blocked.map((issue) => `${describeIssue(issue)} is not a known ${label} model`).join('; ');
 }
 
 /** Non-blocking note for slugs unverifiable against the offline `bundled` floor. */

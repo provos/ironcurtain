@@ -68,7 +68,7 @@ export class MessageCompactor {
     const toKeep = messages.slice(splitIndex);
 
     if (!this.summaryModel) {
-      this.summaryModel = await createLanguageModel(this.config.summaryModelId, userConfig);
+      this.summaryModel = await createLanguageModel(this.config.summaryModelId, userConfig, 'summary');
     }
 
     const result = await generateText({

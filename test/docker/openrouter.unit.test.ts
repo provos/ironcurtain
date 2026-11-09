@@ -16,11 +16,12 @@ import {
   type OpenRouterRewriterConfig,
 } from '../../src/docker/openrouter.js';
 import type { RequestBodyRewriter, RewriteResult } from '../../src/docker/provider-config.js';
+import { DEFAULT_MODEL_MAP } from '../../src/config/user-config.js';
 
 const MESSAGES_PATH = '/api/v1/messages';
 const GLM = 'z-ai/glm-5.2';
 
-/** Default map used across most rewriter tests. */
+/** Explicit legacy map retained to verify configured targets remain supported. */
 const DEFAULT_MAP = [
   { match: '*opus*', model: GLM },
   { match: '*sonnet*', model: GLM },
@@ -80,6 +81,18 @@ describe('globToRegExp / resolveMappedModel', () => {
 });
 
 describe('makeOpenRouterRewriter — model remap (D1/D2)', () => {
+  it.each([
+    ['claude-opus-4-6', 'z-ai/glm-5.3'],
+    ['claude-sonnet-4-6', 'z-ai/glm-5.3-flash'],
+    ['CLAUDE-HAIKU-4-5', 'z-ai/glm-5.3-flash'],
+  ])('routes the shipped %s tier to %s on the wire', (requested, expected) => {
+    const result = rewrite(makeOpenRouterRewriter(makeConfig({ modelMap: DEFAULT_MODEL_MAP })), {
+      model: requested,
+    });
+    expect(result?.modified.model).toBe(expected);
+    expect(result?.modified.provider).toEqual({ order: ['z-ai'] });
+  });
+
   it('remaps model per the glob map', () => {
     const result = rewrite(makeOpenRouterRewriter(makeConfig()), { model: 'claude-sonnet-4-6' });
     expect(result?.modified.model).toBe(GLM);

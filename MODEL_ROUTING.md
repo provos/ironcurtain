@@ -2,11 +2,19 @@
 
 IronCurtain supports redirecting LLM API traffic to a custom upstream — an OpenAI-compatible gateway like [LiteLLM](https://docs.litellm.ai/) fronting [OpenRouter](https://openrouter.ai/), a regional Anthropic endpoint, or a corporate proxy. The same configuration works in both Code Mode and Docker Agent Mode.
 
+## First-class Z.AI
+
+Named `zai` profiles route directly to the protocol supported by each harness: Anthropic Messages for Claude Code, OpenAI Responses for Codex, and Chat Completions for Goose. Profiles define the API plan, default model, optional ordered model map, and per-agent overrides. Credentials remain host-side. [Configuration and host model roles](CONFIG.md#direct-zai-profiles) describes setup; [design and validation](docs/designs/zai-provider-profiles.md) records the compatibility contract.
+
+The default tier map sends Opus to `glm-5.3` and Sonnet/Haiku to `glm-5.3-flash`. OpenRouter uses the same tier split with `z-ai/`-prefixed model IDs. Explicit maps and per-agent overrides take precedence.
+
+Host roles can select named Z.AI or OpenRouter profiles through `hostModelProfiles` independently of the container's active profile. Auto-approval remains optional and disabled by default.
+
 ## First-class OpenRouter
 
 For OpenRouter specifically there is a dedicated, no-external-proxy path: **named provider profiles**. A profile is a _model preset_ — "run this session on GLM", "on Kimi" — that routes a Docker agent (Claude Code, Codex, Goose) straight through `openrouter.ai` with a bound model map and key, **no LiteLLM sidecar**. See [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the full design.
 
-Profiles live in the `modelProviders` section of `~/.ironcurtain/config.json` (see [CONFIG.md](CONFIG.md#model-providers-first-class-openrouter)). An implicit `native` profile — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present and is the fallback.
+Profiles live in the `modelProviders` section of `~/.ironcurtain/config.json` (see [CONFIG.md](CONFIG.md#model-providers-openrouter-and-zai)). An implicit `native` profile — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present and is the fallback.
 
 There are three selection surfaces:
 
@@ -18,19 +26,19 @@ There are three selection surfaces:
 
 The generic base-URL mechanism below (`anthropicBaseUrl` etc. + LiteLLM) **remains the escape hatch** for any other gateway (Bedrock, a regional endpoint, or a non-OpenRouter provider). When an OpenRouter profile is active it takes precedence over `anthropicBaseUrl` for that session; the base-URL override only applies to sessions on the `native` profile.
 
-### Quickstart: GLM-5.2 via OpenRouter
+### Quickstart: GLM-5.3 via OpenRouter
 
 Fresh install → working, cached GLM in four steps:
 
 1. Get an OpenRouter API key (`sk-or-v1-...`) from [openrouter.ai](https://openrouter.ai/).
-2. Run `ironcurtain config` → **Model Providers** → **Add profile...** → choose type `openrouter`, name it (e.g. `glm-5.2`), and paste the key.
-3. **Set default** to that profile (or pick it later at the mux `/new` picker, or pass `--provider-profile glm-5.2`).
-4. Done. Because `DEFAULT_MODEL_MAP` maps `*opus*` / `*sonnet*` / `*haiku*` → `z-ai/glm-5.2` and D3 injects the soft z-ai pin, a session on this profile routes Claude Code to cached GLM-5.2 with no further config.
+2. Run `ironcurtain config` → **Model Providers** → **Add profile...** → choose type `openrouter`, name it (e.g. `glm-5.3`), and paste the key.
+3. **Set default** to that profile (or pick it later at the mux `/new` picker, or pass `--provider-profile glm-5.3`).
+4. Done. `DEFAULT_MODEL_MAP` maps `*opus*` → `z-ai/glm-5.3` and `*sonnet*` / `*haiku*` → `z-ai/glm-5.3-flash`. The default soft z-ai pin and session affinity apply to both models.
 
 Per-session instead of default:
 
 ```bash
-ironcurtain start --provider-profile glm-5.2 "your task"
+ironcurtain start --provider-profile glm-5.3 "your task"
 ```
 
 The equivalent minimal `config.json` — no `modelMap` / `providerPreference` needed; the defaults supply GLM mapping + soft z-ai pin + session affinity:
@@ -38,8 +46,8 @@ The equivalent minimal `config.json` — no `modelMap` / `providerPreference` ne
 ```json
 {
   "modelProviders": {
-    "default": "glm-5.2",
-    "profiles": { "glm-5.2": { "type": "openrouter", "apiKey": "sk-or-v1-..." } }
+    "default": "glm-5.3",
+    "profiles": { "glm-5.3": { "type": "openrouter", "apiKey": "sk-or-v1-..." } }
   }
 }
 ```
