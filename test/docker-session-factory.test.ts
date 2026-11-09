@@ -84,7 +84,7 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import { createDockerInfrastructure, destroyDockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import { createAgentConversationId } from '../src/session/types.js';
-import { loadSessionMetadata } from '../src/session/session-metadata.js';
+import { loadSessionMetadata, saveSessionMetadata } from '../src/session/session-metadata.js';
 import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 import { loadFrozenWatchdogPolicyTemplate } from '../src/docker-workload/watchdog-policy.js';
 import { resolve } from 'node:path';
@@ -508,45 +508,77 @@ describe('createDockerSession borrow path', () => {
     expect(teardownCounts.mitmStop).toBe(0);
   });
 
-  it('standalone batch persists complete workload configuration through the shared metadata factory', async () => {
-    const configuration = resolveDockerWorkloadConfig(
-      { enabled: true, networkAccess: 'packages' },
-      { memoryMb: 8192, cpus: 4 },
-    );
-    const watchdogPolicy = {
-      ...loadFrozenWatchdogPolicyTemplate(resolve('config/docker-workload/resource-watchdog-policy.json')),
-      targetRoot: '/state',
-      targetDevice: 1,
-      targetInode: 2,
-    };
-    const builtBundle = {
-      ...createMockInfra(tempDir, 'standalone-workload'),
-      runtimeKind: 'docker' as const,
-      dockerWorkload: {
-        leaseId: 'lease-batch',
-        generation: 'generation-batch',
-        loadedPolicy: { policy: watchdogPolicy },
-      } as unknown as NonNullable<DockerInfrastructure['dockerWorkload']>,
-    };
-    infraState.createReturnValue = builtBundle;
-    const baseConfig = createTestConfig();
-    const session = await createSession({
-      config: { ...baseConfig, userConfig: { ...baseConfig.userConfig, dockerWorkload: configuration } },
-      mode: { kind: 'docker', agent: 'claude-code' as never },
-      agentConversationId: createAgentConversationId(),
-    });
-    try {
-      expect(loadSessionMetadata(session.getInfo().id)?.dockerWorkload).toEqual({
-        leaseId: 'lease-batch',
-        generation: 'generation-batch',
-        configuration,
-        watchdogPolicy,
-        backend: 'docker',
+  it.each(['fresh', 'resume', 'resume without metadata'])(
+    'records fresh workload metadata for standalone admission (%s)',
+    async (mode) => {
+      const resuming = mode !== 'fresh';
+      const configuration = resolveDockerWorkloadConfig(
+        { enabled: true, networkAccess: 'packages' },
+        { memoryMb: 8192, cpus: 4 },
+      );
+      const watchdogPolicy = {
+        ...loadFrozenWatchdogPolicyTemplate(resolve('config/docker-workload/resource-watchdog-policy.json')),
+        targetRoot: '/state',
+        targetDevice: 1,
+        targetInode: 2,
+      };
+      const builtBundle = {
+        ...createMockInfra(tempDir, 'standalone-workload'),
+        runtimeKind: 'docker' as const,
+        dockerWorkload: {
+          leaseId: 'lease-batch',
+          generation: 'generation-batch',
+          loadedPolicy: { policy: watchdogPolicy },
+        } as unknown as NonNullable<DockerInfrastructure['dockerWorkload']>,
+      };
+      infraState.createReturnValue = builtBundle;
+      const baseConfig = createTestConfig();
+      const resumeSessionId = resuming ? 'retired-workload-session' : undefined;
+      const createdAt = '2026-08-24T12:00:00.000Z';
+      if (resumeSessionId) {
+        mkdirSync(join(getSessionsDir(), resumeSessionId), { recursive: true });
+      }
+      if (mode === 'resume') {
+        if (!resumeSessionId) throw new Error('missing test resume identity');
+        saveSessionMetadata(resumeSessionId, {
+          createdAt,
+          workspacePath: builtBundle.workspaceDir,
+          dockerWorkload: {
+            leaseId: 'retired-lease',
+            generation: 'retired-generation',
+            configuration,
+            watchdogPolicy,
+            backend: 'docker',
+          },
+        });
+      }
+      const session = await createSession({
+        config: { ...baseConfig, userConfig: { ...baseConfig.userConfig, dockerWorkload: configuration } },
+        mode: { kind: 'docker', agent: 'claude-code' as never },
+        agentConversationId: createAgentConversationId(),
+        ...(resumeSessionId ? { resumeSessionId, workspacePath: builtBundle.workspaceDir } : {}),
       });
-    } finally {
-      await session.close();
-    }
-  });
+      try {
+        const metadata = loadSessionMetadata(resumeSessionId ?? session.getInfo().id);
+        expect(metadata?.dockerWorkload).toEqual({
+          leaseId: 'lease-batch',
+          generation: 'generation-batch',
+          configuration,
+          watchdogPolicy,
+          backend: 'docker',
+        });
+        expect(createDockerInfrastructure).toHaveBeenCalledTimes(1);
+        if (resumeSessionId) {
+          if (mode === 'resume') expect(metadata?.createdAt).toBe(createdAt);
+          else expect(metadata?.createdAt).toBeDefined();
+          expect(vi.mocked(createDockerInfrastructure).mock.calls[0][2]).toBe(join(getSessionsDir(), resumeSessionId));
+          expect(vi.mocked(createDockerInfrastructure).mock.calls[0][3]).toBe(builtBundle.workspaceDir);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   it('standalone success path: session.close() destroys the factory-owned bundle', async () => {
     // Complement to the standalone-regression test above (which mocks

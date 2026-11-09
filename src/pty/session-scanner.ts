@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 import { getSessionDir, getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import { isSessionSnapshot, type SessionSnapshot } from '../docker/pty-types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
+import { getConversationStateConfig, hasConversationState } from '../docker/conversation-state.js';
 
 export type { SessionSnapshot } from '../docker/pty-types.js';
 
@@ -28,7 +29,18 @@ function validateParsedResumeSession(
     throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
   }
   if (!parsed.resumable) {
-    throw new Error(`Cannot resume session "${resumeSessionId}": session is not resumable (status: ${parsed.status})`);
+    // Older snapshots rejected all nested Docker sessions. Re-evaluate their
+    // persisted conversation without rewriting files during discovery. This
+    // also recovers sessions whose conversation state was restored later.
+    // Claude's PTY launcher continues via --continue. Codex currently launches
+    // a fresh conversation, so do not expand its legacy resume eligibility.
+    const stateConfig = parsed.agent === 'claude-code' ? getConversationStateConfig(parsed.agent) : undefined;
+    const stateDir = stateConfig ? resolve(getSessionDir(resumeSessionId), stateConfig.hostDirName) : undefined;
+    if (!hasConversationState(stateDir, parsed.agent)) {
+      throw new Error(
+        `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${parsed.status})`,
+      );
+    }
   }
 
   try {
@@ -40,7 +52,7 @@ function validateParsedResumeSession(
     });
   }
 
-  return parsed;
+  return parsed.resumable ? parsed : { ...parsed, resumable: true };
 }
 
 /**

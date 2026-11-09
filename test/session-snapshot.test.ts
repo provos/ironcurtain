@@ -149,23 +149,17 @@ describe('validateResumeSession', () => {
   });
 });
 
-/**
- * A PTY session that ran with an admitted secure nested Docker-workload bundle
- * must never be written as resumable: the nested daemon's state is torn down
- * with the bundle. This mirrors the batch path, which rejects a resume whose
- * session metadata records a Docker workload (`src/session/index.ts`).
- */
-describe('resolveSnapshotResumability (Docker-workload sessions are ephemeral)', () => {
+describe('resolveSnapshotResumability', () => {
   let baseDir: string;
   let conversationStateDir: string;
 
   beforeEach(() => {
     baseDir = mkdtempSync(join(tmpdir(), 'snapshot-workload-'));
     process.env.IRONCURTAIN_HOME = baseDir;
-    // Non-empty conversation state: an ordinary session with this dir resumes.
     conversationStateDir = join(baseDir, 'conversation-state');
-    mkdirSync(conversationStateDir, { recursive: true });
-    writeFileSync(join(conversationStateDir, 'history.jsonl'), '{}\n');
+    const projectDir = join(conversationStateDir, 'projects', '-workspace');
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, 'conversation.jsonl'), '{"type":"user"}\n');
   });
 
   afterEach(() => {
@@ -173,40 +167,33 @@ describe('resolveSnapshotResumability (Docker-workload sessions are ephemeral)',
     rmSync(baseDir, { recursive: true, force: true });
   });
 
-  it('refuses resume for a workload session even with conversation state on disk', () => {
-    const verdict = resolveSnapshotResumability({ conversationStateDir, dockerWorkloadAdmitted: true });
-    expect(verdict.resumable).toBe(false);
-    expect(verdict.reason).toMatch(/ephemeral/u);
-  });
-
-  it('keeps an ordinary session with conversation state resumable', () => {
-    const verdict = resolveSnapshotResumability({ conversationStateDir, dockerWorkloadAdmitted: false });
+  it('allows saved conversations independently of the ephemeral container runtime', () => {
+    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
     expect(verdict).toEqual({ resumable: true, reason: undefined });
   });
 
   it('refuses resume when no conversation state was recorded', () => {
-    const verdict = resolveSnapshotResumability({ conversationStateDir: undefined, dockerWorkloadAdmitted: false });
+    const verdict = resolveSnapshotResumability({ conversationStateDir: undefined, agent: 'claude-code' });
     expect(verdict.resumable).toBe(false);
     expect(verdict.reason).toMatch(/conversation state/u);
   });
 
-  it('rejects the written workload snapshot at resume while the ordinary one is accepted', () => {
+  it('does not mark a seeded state directory without transcripts resumable', () => {
+    rmSync(join(conversationStateDir, 'projects', '-workspace'), { recursive: true });
+    writeFileSync(join(conversationStateDir, 'settings.json'), '{}');
+    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
+    expect(verdict.resumable).toBe(false);
+  });
+
+  it('writes a resumable snapshot that passes direct resume validation', () => {
     const workspaceDir = mkdtempSync(join(tmpdir(), 'snapshot-workload-ws-'));
-
-    for (const [sessionId, dockerWorkloadAdmitted] of [
-      ['workload-session', true],
-      ['ordinary-session', false],
-    ] as const) {
-      const verdict = resolveSnapshotResumability({ conversationStateDir, dockerWorkloadAdmitted });
-      createFakeSessionDir(
-        baseDir,
-        sessionId,
-        makeSnapshot({ sessionId, resumable: verdict.resumable, workspacePath: workspaceDir }),
-      );
-    }
-
-    expect(() => validateResumeSession('workload-session')).toThrow('not resumable');
-    expect(validateResumeSession('ordinary-session').resumable).toBe(true);
+    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
+    createFakeSessionDir(
+      baseDir,
+      'workload-session',
+      makeSnapshot({ sessionId: 'workload-session', resumable: verdict.resumable, workspacePath: workspaceDir }),
+    );
+    expect(validateResumeSession('workload-session').resumable).toBe(true);
 
     rmSync(workspaceDir, { recursive: true, force: true });
   });

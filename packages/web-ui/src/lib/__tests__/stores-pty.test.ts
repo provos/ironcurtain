@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { JobListDto, PtySink, SessionDto } from '../types.js';
 import { deferred, mockSession } from './fixtures.js';
 
@@ -63,6 +63,7 @@ describe('PTY store actions', () => {
   it('attachPty sends sessions.ptyAttach with the label', async () => {
     await attachPty(5);
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyAttach', { label: 5 });
+    await detachPty(5);
   });
 
   it('detachPty sends sessions.ptyDetach with the label', async () => {
@@ -93,6 +94,81 @@ describe('PTY store actions', () => {
 
     expect(mockRequest).toHaveBeenNthCalledWith(1, 'sessions.listResumable');
     expect(mockRequest).toHaveBeenNthCalledWith(2, 'sessions.resume', { sessionId: 'saved-session' });
+  });
+});
+
+describe('PTY subscription reconnects', () => {
+  beforeEach(() => {
+    mockRequest.mockReset();
+    mockRequest.mockImplementation(async (method) => {
+      if (method === 'status') return {};
+      if (method === 'personas.listCompiles') return { active: [], recent: [], queueDepth: 0 };
+      return [];
+    });
+    getWsClient();
+  });
+
+  afterEach(async () => {
+    mockRequest.mockReset();
+    mockRequest.mockResolvedValue(undefined);
+    for (const label of [1, 2]) {
+      await detachPty(label);
+      unregisterPtySink(label);
+    }
+  });
+
+  it('restores desired streams on every reconnect and delivers a fresh replay before new output', async () => {
+    const terminal = { reset: vi.fn(), write: vi.fn() };
+    registerPtySink(1);
+    connectPtyTerminal(1, terminal);
+    await attachPty(1);
+    await attachPty(2);
+
+    for (let reconnect = 0; reconnect < 2; reconnect++) {
+      capturedOnConnectionChange?.(false);
+      mockRequest.mockClear();
+      capturedOnConnectionChange?.(true);
+
+      expect(mockRequest.mock.calls.filter(([method]) => method === 'sessions.ptyAttach')).toEqual([
+        ['sessions.ptyAttach', { label: 1 }],
+        ['sessions.ptyAttach', { label: 2 }],
+      ]);
+      capturedOnEvent?.('session.pty_replay', { label: 1, snapshot: 'ZnJlc2g=' });
+      capturedOnEvent?.('session.pty_output', { label: 1, data: 'bmV3' });
+      expect(terminal.reset).toHaveBeenLastCalledWith('ZnJlc2g=');
+      expect(terminal.write).toHaveBeenLastCalledWith('bmV3');
+      expect(terminal.reset.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        terminal.write.mock.invocationCallOrder.at(-1)!,
+      );
+    }
+  });
+
+  it('remembers a view switch while offline even when detach and the new attach requests fail', async () => {
+    await attachPty(1);
+    capturedOnConnectionChange?.(false);
+    mockRequest.mockRejectedValueOnce(new Error('Not connected'));
+    await expect(detachPty(1)).rejects.toThrow('Not connected');
+    mockRequest.mockRejectedValueOnce(new Error('Not connected'));
+    await expect(attachPty(2)).rejects.toThrow('Not connected');
+
+    mockRequest.mockClear();
+    capturedOnConnectionChange?.(true);
+
+    expect(mockRequest.mock.calls.filter(([method]) => method === 'sessions.ptyAttach')).toEqual([
+      ['sessions.ptyAttach', { label: 2 }],
+    ]);
+  });
+
+  it('does not reattach a terminal whose view was closed while offline', async () => {
+    await attachPty(1);
+    capturedOnConnectionChange?.(false);
+    mockRequest.mockRejectedValueOnce(new Error('Not connected'));
+    await expect(detachPty(1)).rejects.toThrow('Not connected');
+
+    mockRequest.mockClear();
+    capturedOnConnectionChange?.(true);
+
+    expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
   });
 });
 

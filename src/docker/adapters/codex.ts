@@ -26,6 +26,7 @@ import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE, CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-id.js';
+import { CODEX_CONVERSATION_STATE } from '../conversation-state.js';
 import {
   buildAttributionSection,
   buildCheckPtySizeScript,
@@ -320,15 +321,7 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     getConversationStateConfig(): ConversationStateConfig {
-      return {
-        hostDirName: 'codex-state',
-        containerMountPath: '/home/codespace/.codex/',
-        seed: [
-          { path: 'sessions/', content: '' },
-          { path: 'logs/', content: '' },
-        ],
-        resumeFlags: [],
-      };
+      return CODEX_CONVERSATION_STATE;
     },
   };
 }

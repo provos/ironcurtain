@@ -148,8 +148,8 @@ export interface SessionMetadata {
    * Present only for secure nested Docker-workload sessions. Records the
    * host-only lease identity and configuration/policy snapshots for audit
    * and post-hoc inspection. Because a Docker-workload bundle's daemon state
-   * is ephemeral (`daemonState: ephemeral`), a persisted lease can never be
-   * revived, so resume validation refuses any session carrying this field.
+   * is ephemeral, a persisted lease can never be revived. Conversation resume
+   * admits a fresh workload and replaces this tuple with its new identity.
    */
   readonly dockerWorkload?: {
     readonly leaseId: string;

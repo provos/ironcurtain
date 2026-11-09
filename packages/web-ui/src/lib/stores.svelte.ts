@@ -261,6 +261,8 @@ class BufferingPtySink implements PtySink {
 }
 
 const ptySinks = new Map<number, BufferingPtySink>();
+/** Desired terminal streams, retained across WebSocket disconnects until detach. */
+const ptySubscriptions = new Set<number>();
 
 /** Registers a buffering sink for a label. Idempotent — never clobbers a live sink. */
 export function registerPtySink(label: number): void {
@@ -363,6 +365,11 @@ function wireEventHandlers(client: WsClient): void {
       // attempt (e.g. user pasted a bad token, then a good one).
       appState.authError = null;
       refreshAll(client);
+      // Server subscriptions belong to the old socket. Restore only streams
+      // still wanted by mounted views; attach also supplies a fresh replay.
+      for (const label of ptySubscriptions) {
+        attachPty(label).catch((err) => console.error('Failed to reattach PTY:', err));
+      }
     }
   });
 
@@ -631,10 +638,14 @@ export async function endSession(label: number): Promise<void> {
 // Ending a PTY session reuses `endSession` (`sessions.end`).
 
 export async function attachPty(label: number): Promise<void> {
+  ptySubscriptions.add(label);
   await getWsClient().request('sessions.ptyAttach', { label });
 }
 
 export async function detachPty(label: number): Promise<void> {
+  // Forget intent even offline, so switching views while disconnected cannot
+  // resurrect an unwanted subscription on the next connection.
+  ptySubscriptions.delete(label);
   await getWsClient().request('sessions.ptyDetach', { label });
 }
 

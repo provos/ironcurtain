@@ -14,7 +14,7 @@
  */
 
 import { createConnection, createServer } from 'node:net';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -35,6 +35,7 @@ import { getSessionDir, getSessionCapturesDir, getPtyRegistryDir, SESSION_STATE_
 import * as logger from '../logger.js';
 import { acquireProcessLock, ProcessLockBusyError, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
+import { hasConversationState } from './conversation-state.js';
 import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
@@ -165,20 +166,6 @@ function classifyExitStatus(exitCode: number | null): SessionSnapshot['status'] 
   return 'crashed';
 }
 
-/**
- * Checks whether a conversation state directory contains files,
- * indicating the agent wrote conversation data that can be resumed.
- */
-function hasConversationState(stateDir: string): boolean {
-  if (!existsSync(stateDir)) return false;
-  try {
-    const entries = readdirSync(stateDir);
-    return entries.length > 0;
-  } catch {
-    return false;
-  }
-}
-
 /** The resume verdict for an ended PTY session, with the reason when it is refused. */
 export interface SnapshotResumability {
   readonly resumable: boolean;
@@ -189,21 +176,14 @@ export interface SnapshotResumability {
 /**
  * Single decision point for whether an ended PTY session may be resumed.
  *
- * A session that ran with an admitted secure nested Docker-workload bundle is
- * never resumable: the nested daemon, its state root, and its lease are torn
- * down with the bundle, so a resumed conversation would reference daemon state
- * that no longer exists. Forcing `resumable: false` here is what keeps PTY mode
- * in sync with the batch path, which rejects a resume whose session metadata
- * records a Docker workload (`applyResumeMetadata` in `src/session/index.ts`).
+ * Conversation state and the workspace survive teardown independently of the
+ * ephemeral runtime. Resume creates a new container and Docker-workload lease.
  */
 export function resolveSnapshotResumability(input: {
   readonly conversationStateDir: string | undefined;
-  readonly dockerWorkloadAdmitted: boolean;
+  readonly agent: string;
 }): SnapshotResumability {
-  if (input.dockerWorkloadAdmitted) {
-    return { resumable: false, reason: 'nested Docker-workload daemon state is ephemeral' };
-  }
-  if (input.conversationStateDir === undefined || !hasConversationState(input.conversationStateDir)) {
+  if (!hasConversationState(input.conversationStateDir, input.agent)) {
     return { resumable: false, reason: 'no conversation state was recorded' };
   }
   return { resumable: true, reason: undefined };
@@ -472,7 +452,7 @@ async function runPtySessionAttempt(
     // Match standalone batch metadata: persist the admitted lease tuple as
     // soon as preparation returns, before any PTY-specific callback can fail.
     const resolvedDockerWorkload = sessionConfig.userConfig.dockerWorkload;
-    if (dockerWorkload && !isResume && resolvedDockerWorkload?.enabled === true) {
+    if (dockerWorkload && resolvedDockerWorkload?.enabled === true) {
       updateSessionMetadata(effectiveSessionId, {
         dockerWorkload: dockerWorkloadSessionMetadata(dockerWorkload, resolvedDockerWorkload, infra.runtimeKind),
       });
@@ -1124,7 +1104,7 @@ async function runPtySessionAttempt(
 
         const resumability = resolveSnapshotResumability({
           conversationStateDir: conversationStateDirForSnapshot,
-          dockerWorkloadAdmitted: dockerWorkload !== undefined,
+          agent: adapterIdForSnapshot,
         });
 
         const snapshot: SessionSnapshot = {

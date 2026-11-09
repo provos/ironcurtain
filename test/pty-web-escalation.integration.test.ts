@@ -299,8 +299,6 @@ describe.skipIf(!dockerReady)('web-UI PTY escalation forwarding (real container)
       // that pid match.)
       createBridge: (opts) =>
         createPtyBridge({ ...opts, ironcurtainBin: process.execPath, prefixArgs: ['--import', 'tsx', CLI_ENTRY] }),
-      // Disable the idle-TTL backstop so the session is never reaped mid-test.
-      idleTtlMs: 0,
     });
 
     const created = await manager.create();

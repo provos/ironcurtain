@@ -252,21 +252,19 @@ container whose only egress is the mediated MITM. Input is passed as **bytes to 
 in the reused child) — no shell-string concatenation is introduced. Do **not** add per-browser
 isolation or host-adversary controls; that would over-build against the threat model.
 
-## 6. Session lifecycle / orphan reaping — JUDGE OVERRIDE (differs from both A and B)
+## 6. Session lifecycle / browser-independent ownership
 
-The designers split: **A exempts** PTY sessions from the 60s orphan sweep (survive indefinitely);
-**B extends** the 60s sweep to reap PTY sessions after no clients. **Both are wrong for this
-feature.**
+PTY sessions belong to the daemon. The original 30-minute no-subscriber backstop killed valid
+sessions after view switches and browser disconnects, so subscriber-based reaping is removed.
+Subscriptions control terminal delivery only; container count is bounded by the session creation
+limit (§11 D4), and retained sessions remain visible for explicit cleanup.
 
-- B's 60s reap is far too aggressive for a PTY: a browser reload, laptop sleep, or wifi blip all
-  exceed 60s, and reaping would **kill a working Claude Code agent mid-task** — a worse failure
-  than a leaked container, and it violates the mux mental model the user explicitly wants (mux
-  children survive until you close the tab or exit mux).
-- A's indefinite silent survival is a real container leak on a multi-day daemon.
-
-**Ruling — mux-faithful with a guarded backstop:**
-1. PTY sessions are **not** subject to the existing 60s turn-based orphan sweep. A transient
-   disconnect detaches the client only; the child + container keep running and reconnect replays.
+1. PTY sessions are **not** subject to the existing 60s turn-based orphan sweep or any
+   no-subscriber timeout. Switching terminals, leaving the Sessions view, closing the browser,
+   and losing the WebSocket detach viewers only. The child + container keep running until an
+   explicit `sessions.end`, child exit, or daemon shutdown. On reconnect the application store
+   restores desired terminal subscriptions; attach supplies a fresh screen replay. A view that
+   detaches while offline is not resubscribed.
 2. **`sessions.end` is a termination request, not proof of reaping.** It asks the bridge to begin
    shutdown and marks the session as stopping; the session is removed and `session.ended` is emitted
    only after the lifecycle observes the child's `onExit`. The normal **SIGTERM** path receives a
@@ -280,12 +278,7 @@ feature.**
    `PtySessionManager.close()` clears its tracking map first, disposes the sessions, attempts all
    kills, and waits only for a bounded shutdown window. Force-kill may interrupt cleanup, so owned
    resources may require later startup reconciliation or explicit garbage collection.
-3. Add a **generous idle-TTL** as the leak backstop — no-clients-for-N, distinct from the 60s
-   turn-based sweep. **v1: hard-code a named constant (`PTY_IDLE_TTL_MS`, 30 min)** — do NOT wire a
-   config schema / Settings surface for it. A backstop that is rarely tuned does not justify the
-   config surface (trusted-host / right-altitude); promote it to a config knob only if a real need
-   appears. `0`/absence must be expressible as "disabled" in the constant for local testing.
-4. Abandoned PTY sessions remain **visible in the session list** (they're labeled sessions), so the
+3. Unattended PTY sessions remain **visible in the session list** (they're labeled sessions), so the
    operator can end them manually. Surface `alive` + last-attached time in the DTO.
 
 Label recycling: `reserveLabel()` is monotonic with no `releaseLabel()`. At the JS safe-integer
@@ -332,11 +325,11 @@ escalation hangs the agent.
   `serialize` + scrollback cap. (git-move of `src/mux/pty-bridge.ts`.)
 - `src/pty/index.ts` — barrel (optional).
 - `src/web-ui/pty-session-manager.ts` — `PtySessionManager` + `PtyWebSession` (bridge +
-  EscalationWatcher + subscriber set + coalescing streamer + backpressure/resync + idle-TTL hook).
+  EscalationWatcher + subscriber set + coalescing streamer + backpressure/resync).
 - `src/web-ui/dispatch/pty-dispatch.ts` — `sessions.ptyAttach|ptyDetach|ptyInput|ptyResize` (Zod).
 - `packages/web-ui/src/lib/components/features/terminal-console.svelte` — xterm.js + FitAddon.
 - `test/pty/pty-session-manager.test.ts` — attach/replay ordering, detach, escalation routing,
-  idle-TTL, backpressure resync (stubbed `PtyBridge`).
+  survival across view switches/disconnects, backpressure resync (stubbed `PtyBridge`).
 
 **Modified — backend/daemon**
 - `src/mux/mux-app.ts:10`, `src/mux/types.ts:5`, `test/pty-bridge.test.ts:10` — import path →
@@ -351,7 +344,7 @@ escalation hangs the agent.
 - `src/web-ui/dispatch/escalation-dispatch.ts` — `resolve`/`list` compose `ptySessionManager`.
 - `src/web-ui/web-ui-server.ts` — construct `PtySessionManager`, add to dispatch ctx; in
   `ws.on('close')`/`'error'` call `ptySessionManager.removeAllForClient(ws)` (mirrors
-  `tokenStreamBridge?.removeAllForClient`); PTY idle-TTL timer; end PTY sessions in `stop()`.
+  `tokenStreamBridge?.removeAllForClient`); end PTY sessions in `stop()`.
 - `src/session/session-manager.ts:47` — add `{ kind: 'web-pty' }` to `SessionSource` (produced
   only by `toPtySessionDto`/`toEscalationDto`; `SessionManager` never registers it).
 - `src/escalation/escalation-watcher.ts` — immediate first poll on `start()` (§7.2).
@@ -384,7 +377,7 @@ escalation hangs the agent.
 2. **Core additions.** `onData` (post-write fan-out) + `serialize` + scrollback cap; add root dep;
    unit-test ordering + snapshot; re-run mux smoke.
 3. **Daemon PTY manager + protocol.** `PtySessionManager`/`PtyWebSession`, `pty-dispatch.ts`,
-   `session.pty_*` events, coalescing + backpressure/resync, `removeAllForClient`, idle-TTL,
+   `session.pty_*` events, coalescing + backpressure/resync, `removeAllForClient`,
    `sessions.create` mode branch + `list`/`end` merge. Unit tests with a stubbed bridge.
 4. **Escalation bridge.** `EscalationWatcher` in `PtyWebSession` → `escalation.created`;
    `escalations.resolve`/`list` compose the PTY manager; §7.2 immediate-poll fix + test. Temp-dir
@@ -411,7 +404,6 @@ escalation hangs the agent.
   `ownerKind`/`ownerId`/`ownerPid` (see §11, Q1). v1 reuses the mux fields.
 - Forward mouse events to the agent (Fork 7): wire `term.onBinary` + `onData`, resolve the
   selection-vs-mouse-mode conflict. v1 is mux-parity (no mouse forwarding).
-- Promote `PTY_IDLE_TTL_MS` to a config knob (§6) if a real need appears.
 
 ## 11. Integration-contract completeness (independent review — authoritative deltas)
 
@@ -460,8 +452,8 @@ docker branch of `sessions.create` enforces the **same** `maxConcurrentWebSessio
 `ptySessionManager.size` (or a dedicated `maxConcurrentPtySessions` if we want a separate ceiling —
 default: reuse the existing knob).
 
-**D5 (P2) — Idle-TTL wiring.** Resolved in §6: hard-coded `PTY_IDLE_TTL_MS` constant for v1, no
-config schema. The §8 `web-ui-server.ts` line ("PTY idle-TTL timer") is the only wiring needed.
+**D5 (P2) — Session retention.** Resolved in §6: browser subscriptions do not control PTY
+lifetime. No idle-TTL constant or configuration is needed.
 
 **Q1 ruling — registry ownership.** v1 **reuses `muxId`/`muxPid`** with a `webui-<daemonId>` owner
 value (low-risk, no schema change). Generalizing the field names to `ownerKind`/`ownerId`/`ownerPid`
@@ -480,8 +472,7 @@ not v1.
 **Change-list additions (augment §8):**
 - New: `src/pty/resolve-ironcurtain-bin.ts` (extracted; mux import updated in the move commit).
 - `src/web-ui/pty-session-manager.ts` — add `.size`/`.count`; `resolveEscalation` emits
-  `escalation.resolved`; initial-size default + `ptyResize`-on-attach; node-pty/addon preflight;
-  `PTY_IDLE_TTL_MS` timer.
+  `escalation.resolved`; initial-size default + `ptyResize`-on-attach; node-pty/addon preflight.
 - `src/web-ui/dispatch/types.ts` — `buildStatusDto.activeSessions` includes `ptySessionManager.size`.
 - `src/web-ui/dispatch/session-dispatch.ts` — docker `sessions.create` enforces the concurrency cap
   over PTY count; `history/budget/diagnostics/get` return PTY-appropriate results (not throw) for
