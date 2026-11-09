@@ -124,8 +124,6 @@ export interface PtyStreamSender {
 /** Factory seam so tests can inject a stub bridge instead of spawning a child. */
 export type CreateBridge = (options: PtyBridgeOptions) => Promise<PtyBridge>;
 
-type PtyEndReason = 'user_ended';
-
 /**
  * Thrown by `create()` when the PTY runtime is unavailable (node-pty fails to
  * load, or the serialize addon is missing). Surfaced as a clean RPC error so a
@@ -197,8 +195,7 @@ export class PtyWebSession {
   private readonly subscribers = new Set<WsWebSocket>();
   /** Clients skipped due to backpressure; resynced with a fresh snapshot on drain. */
   private readonly desynced = new Set<WsWebSocket>();
-  /** End reason to use once a requested termination is confirmed by onExit. */
-  private pendingEndReason: PtyEndReason | undefined;
+  private endingRequested = false;
   private buffer = '';
   private bufferBytes = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -217,32 +214,24 @@ export class PtyWebSession {
     return this.bridge.alive;
   }
 
-  get subscriberCount(): number {
-    return this.subscribers.size;
-  }
-
   /**
    * Records a termination request without claiming that the child has exited.
    * A bridge may accept a kill request but remain alive, and that live session
    * must stay observable through sessions.list until onExit confirms the
    * transition.
    */
-  requestEnd(reason: PtyEndReason): boolean {
-    if (this.pendingEndReason !== undefined) return false;
-    this.pendingEndReason = reason;
+  requestEnd(): boolean {
+    if (this.endingRequested) return false;
+    this.endingRequested = true;
     return true;
   }
 
-  get endReason(): PtyEndReason | undefined {
-    return this.pendingEndReason;
-  }
-
   get ending(): boolean {
-    return this.pendingEndReason !== undefined;
+    return this.endingRequested;
   }
 
   cancelEnd(): void {
-    this.pendingEndReason = undefined;
+    this.endingRequested = false;
   }
 
   /**
@@ -622,7 +611,24 @@ export class PtySessionManager {
 
   /** Explicitly requests termination; removal waits for the observed PTY exit. */
   end(label: number): void {
-    this.endInternal(label, 'user_ended');
+    const session = this.sessions.get(label);
+    if (!session || !session.requestEnd()) return;
+    logger.info(`[WebUI] PTY session #${label}: user_ended termination requested; waiting for PTY exit`);
+    this.eventBus.emit('session.updated', toPtySessionDto(session));
+    try {
+      session.bridge.kill();
+    } catch (error) {
+      session.cancelEnd();
+      logger.error(
+        `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+      this.eventBus.emit('session.updated', toPtySessionDto(session));
+      return;
+    }
+
+    // Preserve bridges that accept termination without exiting. The fallback
+    // handles a bridge that reports itself dead without invoking onExit.
+    if (!session.bridge.alive) this.handleExit(label);
   }
 
   /** Kills all bridges with a bounded await (mirrors mux doShutdown). */
@@ -752,33 +758,11 @@ export class PtySessionManager {
     this.sessions.delete(label);
     if (session.resumeSessionId) this.activeResumeIds.delete(session.resumeSessionId);
     session.dispose();
-    const reason = session.endReason ?? 'pty_exited';
+    const reason = session.ending ? 'user_ended' : 'pty_exited';
     logger.info(
       `[WebUI] PTY session #${label}: exit observed (pid=${session.bridge.pid}, code=${session.bridge.exitCode ?? 'unknown'}, reason=${reason})`,
     );
     this.eventBus.emit('session.ended', { label, reason });
-  }
-
-  private endInternal(label: number, reason: PtyEndReason): void {
-    const session = this.sessions.get(label);
-    if (!session || !session.requestEnd(reason)) return;
-    logger.info(`[WebUI] PTY session #${label}: ${reason} termination requested; waiting for PTY exit`);
-    this.eventBus.emit('session.updated', toPtySessionDto(session));
-    try {
-      session.bridge.kill();
-    } catch (error) {
-      session.cancelEnd();
-      logger.error(
-        `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
-      );
-      this.eventBus.emit('session.updated', toPtySessionDto(session));
-      return;
-    }
-
-    // A bridge normally reports termination through onExit. Keep this fallback
-    // for a bridge that marks itself dead without invoking its callback; it is
-    // still truthful because the liveness probe has already changed to false.
-    if (!session.bridge.alive) this.handleExit(label);
   }
 
   private waitForPendingCreates(): Promise<void> {

@@ -152,7 +152,9 @@ private or authenticated registries and package sources, or host-published ports
 already-built images with the managed external network below; Compose builds that bypass the supported
 direct/default-Buildx package path, custom/remote BuildKit workers, and alternate Docker contexts are not
 supported. Native Linux Engine and IronCurtain-in-IronCurtain are separate implementation and qualification
-slices. Ended nested sessions are not resumable. See [backend qualification](TESTING.md#nested-docker-release-qualification)
+slices. Ended sessions with saved conversations and a resume-capable agent can resume
+the workspace and conversation with a fresh nested daemon; previous daemon state is not restored.
+See [backend qualification](TESTING.md#nested-docker-release-qualification)
 for repeatable tests and [the acceptance record](docs/designs/linux-nested-docker-implementation-plan.md#acceptance-record)
 for dated evidence and outstanding validation.
 

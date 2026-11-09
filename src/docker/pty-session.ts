@@ -36,6 +36,7 @@ import * as logger from '../logger.js';
 import { acquireProcessLock, ProcessLockBusyError, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { hasConversationState } from './conversation-state.js';
+import type { ConversationStateConfig } from './agent-adapter.js';
 import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
@@ -181,9 +182,12 @@ export interface SnapshotResumability {
  */
 export function resolveSnapshotResumability(input: {
   readonly conversationStateDir: string | undefined;
-  readonly agent: string;
+  readonly conversationStateConfig: ConversationStateConfig | undefined;
 }): SnapshotResumability {
-  if (!hasConversationState(input.conversationStateDir, input.agent)) {
+  if (!input.conversationStateConfig?.supportsPtyResume) {
+    return { resumable: false, reason: 'agent PTY launcher does not support conversation resume' };
+  }
+  if (!hasConversationState(input.conversationStateDir, input.conversationStateConfig)) {
     return { resumable: false, reason: 'no conversation state was recorded' };
   }
   return { resumable: true, reason: undefined };
@@ -400,6 +404,7 @@ async function runPtySessionAttempt(
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
   let conversationStateDirForSnapshot: string | undefined;
+  let conversationStateConfigForSnapshot: ConversationStateConfig | undefined;
   let userExited = false;
   let primaryError: Error | undefined;
   let flushError: Error | undefined;
@@ -531,6 +536,7 @@ async function runPtySessionAttempt(
     adapterIdForSnapshot = adapter.id;
     adapterDisplayNameForSnapshot = adapter.displayName;
     conversationStateDirForSnapshot = conversationStateDir;
+    conversationStateConfigForSnapshot = conversationStateConfig;
 
     // Validate adapter supports PTY mode. Apple Container prefers its native
     // interactive exec because the 1.1.0 host-published socket relay can
@@ -1104,7 +1110,7 @@ async function runPtySessionAttempt(
 
         const resumability = resolveSnapshotResumability({
           conversationStateDir: conversationStateDirForSnapshot,
-          agent: adapterIdForSnapshot,
+          conversationStateConfig: conversationStateConfigForSnapshot,
         });
 
         const snapshot: SessionSnapshot = {

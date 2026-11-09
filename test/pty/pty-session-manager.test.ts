@@ -30,6 +30,7 @@ import type { EscalationDto } from '../../src/web-ui/web-ui-types.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 import { WebEventBus } from '../../src/web-ui/web-event-bus.js';
 import { sessionDispatch } from '../../src/web-ui/dispatch/session-dispatch.js';
+import { writeConversationTranscript } from '../helpers/conversation-state.js';
 import { escalationDispatch } from '../../src/web-ui/dispatch/escalation-dispatch.js';
 import type { DispatchContext } from '../../src/web-ui/dispatch/types.js';
 import type { ControlRequestHandler } from '../../src/daemon/control-socket.js';
@@ -1294,9 +1295,7 @@ describe('sessions resume RPC', () => {
   it('offers a previously non-resumable Claude conversation and passes its identity to a stub bridge', async () => {
     writeSnapshot('legacy-workload', { agent: 'claude-code', resumable: false });
     const sessionDir = join(home, 'sessions', 'legacy-workload');
-    const projectDir = join(sessionDir, 'claude-state', 'projects', '-workspace');
-    mkdirSync(projectDir, { recursive: true });
-    writeFileSync(join(projectDir, 'conversation.jsonl'), '{"type":"user"}\n');
+    writeConversationTranscript(join(sessionDir, 'claude-state'));
     const seen: PtyBridgeOptions[] = [];
     const ctx = makeResumeContext(seen);
 

@@ -11,9 +11,20 @@ import { resolve } from 'node:path';
 import { getSessionDir, getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import { isSessionSnapshot, type SessionSnapshot } from '../docker/pty-types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
-import { getConversationStateConfig, hasConversationState } from '../docker/conversation-state.js';
+import { BUILTIN_CONVERSATION_STATES, hasConversationState } from '../docker/conversation-state.js';
+import { listAgents } from '../docker/agent-registry.js';
+import type { ConversationStateConfig } from '../docker/agent-adapter.js';
 
 export type { SessionSnapshot } from '../docker/pty-types.js';
+
+function resumeStateConfig(agent: string): ConversationStateConfig | undefined {
+  const adapter = listAgents().find((candidate) => candidate.id === agent);
+  if (adapter) return adapter.getConversationStateConfig?.();
+  // Discovery also runs before built-in adapters have been registered.
+  return Object.hasOwn(BUILTIN_CONVERSATION_STATES, agent)
+    ? BUILTIN_CONVERSATION_STATES[agent as keyof typeof BUILTIN_CONVERSATION_STATES]
+    : undefined;
+}
 
 function validateParsedResumeSession(
   parsed: unknown,
@@ -32,11 +43,9 @@ function validateParsedResumeSession(
     // Older snapshots rejected all nested Docker sessions. Re-evaluate their
     // persisted conversation without rewriting files during discovery. This
     // also recovers sessions whose conversation state was restored later.
-    // Claude's PTY launcher continues via --continue. Codex currently launches
-    // a fresh conversation, so do not expand its legacy resume eligibility.
-    const stateConfig = parsed.agent === 'claude-code' ? getConversationStateConfig(parsed.agent) : undefined;
+    const stateConfig = resumeStateConfig(parsed.agent);
     const stateDir = stateConfig ? resolve(getSessionDir(resumeSessionId), stateConfig.hostDirName) : undefined;
-    if (!hasConversationState(stateDir, parsed.agent)) {
+    if (!stateConfig?.supportsPtyResume || !hasConversationState(stateDir, stateConfig)) {
       throw new Error(
         `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${parsed.status})`,
       );
@@ -52,7 +61,7 @@ function validateParsedResumeSession(
     });
   }
 
-  return parsed.resumable ? parsed : { ...parsed, resumable: true };
+  return { ...parsed, resumable: true };
 }
 
 /**

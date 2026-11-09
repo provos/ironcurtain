@@ -1,18 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { mockSession } from '../lib/__tests__/fixtures.js';
+import { createMockWsClient, defaultRpcResponse, mockSession } from '../lib/__tests__/fixtures.js';
 
-const { mockRequest } = vi.hoisted(() => ({
-  mockRequest: vi.fn<(method: string, params?: Record<string, unknown>) => Promise<unknown>>(),
-}));
+const mockClient = createMockWsClient();
+const mockRequest = mockClient.request;
 
-vi.mock('../lib/ws-client.js', () => ({
-  createWsClient: () => ({
-    request: mockRequest,
-    onEvent: () => () => {},
-    onConnectionChange: () => () => {},
-    onAuthError: () => () => {},
-  }),
+vi.mock('../lib/ws-client.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/ws-client.js')>()),
+  createWsClient: () => mockClient,
 }));
 vi.mock('$lib/components/features/terminal-console.svelte', async () => await import('../__test_stubs__/Stub.svelte'));
 
@@ -22,10 +17,7 @@ import Sessions from './Sessions.svelte';
 describe('Sessions terminal viewing lifecycle', () => {
   beforeEach(() => {
     mockRequest.mockReset();
-    mockRequest.mockImplementation(async (method) => {
-      if (method === 'config.getModelProviders') return { profiles: {} };
-      return [];
-    });
+    mockRequest.mockImplementation(async (method) => defaultRpcResponse(method));
     appState.connected = true;
     appState.sessions = new Map([
       [1, mockSession(1, { source: { kind: 'web-pty' } })],

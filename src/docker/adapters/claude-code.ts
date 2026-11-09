@@ -29,7 +29,7 @@ import type { AuthMethod } from '../oauth-credentials.js';
 import type { ResolvedUserConfig } from '../../config/user-config.js';
 import { parseModelId } from '../../config/model-id.js';
 import { CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
-import { CLAUDE_CODE_CONVERSATION_STATE } from '../conversation-state.js';
+import { BUILTIN_CONVERSATION_STATES } from '../conversation-state.js';
 import {
   anthropicProvider,
   claudePlatformProvider,
@@ -451,7 +451,7 @@ exit $STATUS
     },
 
     getConversationStateConfig(): ConversationStateConfig {
-      return CLAUDE_CODE_CONVERSATION_STATE;
+      return BUILTIN_CONVERSATION_STATES['claude-code'];
     },
   };
 }

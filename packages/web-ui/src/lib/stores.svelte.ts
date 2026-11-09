@@ -52,7 +52,7 @@ import type {
   StatisticsDimensionValueDto,
 } from './types.js';
 import { PHASE } from './types.js';
-import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
+import { createWsClient, RpcError, type PreflightResult, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure, SESSION_MUTATION_EVENTS } from './event-handler.js';
 
 export type ViewId =
@@ -212,6 +212,8 @@ export const workflowHistoryGeneration = $state({ value: 0 });
 const PTY_SINK_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 
 class BufferingPtySink implements PtySink {
+  desired = false;
+  attachGeneration = 0;
   private live: PtySink | null = null;
   private buffered: Array<{ reset: boolean; b64: string }> = [];
   private bufferedBytes = 0;
@@ -261,12 +263,19 @@ class BufferingPtySink implements PtySink {
 }
 
 const ptySinks = new Map<number, BufferingPtySink>();
-/** Desired terminal streams, retained across WebSocket disconnects until detach. */
-const ptySubscriptions = new Set<number>();
+
+function getOrCreatePtySink(label: number): BufferingPtySink {
+  let sink = ptySinks.get(label);
+  if (!sink) {
+    sink = new BufferingPtySink();
+    ptySinks.set(label, sink);
+  }
+  return sink;
+}
 
 /** Registers a buffering sink for a label. Idempotent — never clobbers a live sink. */
 export function registerPtySink(label: number): void {
-  if (!ptySinks.has(label)) ptySinks.set(label, new BufferingPtySink());
+  getOrCreatePtySink(label);
 }
 
 export function unregisterPtySink(label: number): void {
@@ -279,12 +288,7 @@ export function unregisterPtySink(label: number): void {
  * terminal mounted before the route registered it).
  */
 export function connectPtyTerminal(label: number, handle: PtySink): void {
-  let sink = ptySinks.get(label);
-  if (!sink) {
-    sink = new BufferingPtySink();
-    ptySinks.set(label, sink);
-  }
-  sink.connect(handle);
+  getOrCreatePtySink(label).connect(handle);
 }
 
 /** Disconnects the live handle (the terminal unmounted); later frames re-buffer. */
@@ -336,7 +340,7 @@ const queuedSessionRefreshes: Array<{ client: WsClient; buffered: BufferedSessio
 let sessionRefreshQueueRunning = false;
 
 function applyWebEvent(client: WsClient, event: string, payload: unknown): void {
-  handleEventPure(
+  const handled = handleEventPure(
     appState,
     {
       refreshJobs: () => refreshJobs(client),
@@ -355,6 +359,9 @@ function applyWebEvent(client: WsClient, event: string, payload: unknown): void 
     event,
     payload,
   );
+  if (handled && event === 'session.ended') {
+    unregisterPtySink((payload as { label: number }).label);
+  }
 }
 
 function wireEventHandlers(client: WsClient): void {
@@ -367,8 +374,8 @@ function wireEventHandlers(client: WsClient): void {
       refreshAll(client);
       // Server subscriptions belong to the old socket. Restore only streams
       // still wanted by mounted views; attach also supplies a fresh replay.
-      for (const label of ptySubscriptions) {
-        attachPty(label).catch((err) => console.error('Failed to reattach PTY:', err));
+      for (const [label, sink] of ptySinks) {
+        if (sink.desired) attachPty(label).catch((err) => console.error('Failed to reattach PTY:', err));
       }
     }
   });
@@ -407,6 +414,11 @@ function completeSessionRefresh(client: WsClient, buffered: BufferedSessionEvent
   activeSessionBuffer = null;
   for (const event of buffered) {
     applyWebEvent(client, event.event, event.payload);
+  }
+  // Reconcile after replaying buffered mutations so a stale list cannot erase
+  // a session created while the refresh was in flight.
+  for (const label of ptySinks.keys()) {
+    if (appState.sessions.get(label)?.source.kind !== 'web-pty') unregisterPtySink(label);
   }
 }
 
@@ -638,14 +650,32 @@ export async function endSession(label: number): Promise<void> {
 // Ending a PTY session reuses `endSession` (`sessions.end`).
 
 export async function attachPty(label: number): Promise<void> {
-  ptySubscriptions.add(label);
-  await getWsClient().request('sessions.ptyAttach', { label });
+  const sink = getOrCreatePtySink(label);
+  sink.desired = true;
+  const generation = ++sink.attachGeneration;
+  try {
+    await getWsClient().request('sessions.ptyAttach', { label });
+  } catch (err) {
+    if (
+      err instanceof RpcError &&
+      err.code === 'SESSION_NOT_FOUND' &&
+      ptySinks.get(label) === sink &&
+      sink.attachGeneration === generation
+    ) {
+      unregisterPtySink(label);
+    }
+    throw err;
+  }
 }
 
 export async function detachPty(label: number): Promise<void> {
   // Forget intent even offline, so switching views while disconnected cannot
   // resurrect an unwanted subscription on the next connection.
-  ptySubscriptions.delete(label);
+  const sink = ptySinks.get(label);
+  if (sink) {
+    sink.desired = false;
+    sink.attachGeneration++;
+  }
   await getWsClient().request('sessions.ptyDetach', { label });
 }
 

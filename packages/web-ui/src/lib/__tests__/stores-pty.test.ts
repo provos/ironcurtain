@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { JobListDto, PtySink, SessionDto } from '../types.js';
-import { deferred, mockSession } from './fixtures.js';
+import { createMockWsClient, defaultRpcResponse, deferred, mockSession } from './fixtures.js';
+import { RpcError } from '../ws-client.js';
 
 // ---------------------------------------------------------------------------
 // Mock the WS client dependency so getWsClient() returns a spyable client.
@@ -10,26 +11,7 @@ import { deferred, mockSession } from './fixtures.js';
 // ---------------------------------------------------------------------------
 
 const mockRequest = vi.fn<(method: string, params?: Record<string, unknown>) => Promise<unknown>>();
-let capturedOnEvent: ((event: string, payload: unknown) => void) | undefined;
-let capturedOnConnectionChange: ((connected: boolean) => void) | undefined;
-
-const mockClient = {
-  request: mockRequest,
-  onEvent: vi.fn((handler: (event: string, payload: unknown) => void) => {
-    capturedOnEvent = handler;
-    return () => {};
-  }),
-  onConnectionChange: vi.fn((handler: (connected: boolean) => void) => {
-    capturedOnConnectionChange = handler;
-    return () => {};
-  }),
-  onAuthError: vi.fn(() => () => {}),
-  get isConnected() {
-    return false;
-  },
-  connect: vi.fn(),
-  disconnect: vi.fn(),
-};
+const mockClient = createMockWsClient(mockRequest);
 
 vi.mock('../ws-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../ws-client.js')>();
@@ -64,6 +46,7 @@ describe('PTY store actions', () => {
     await attachPty(5);
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyAttach', { label: 5 });
     await detachPty(5);
+    unregisterPtySink(5);
   });
 
   it('detachPty sends sessions.ptyDetach with the label', async () => {
@@ -98,23 +81,19 @@ describe('PTY store actions', () => {
 });
 
 describe('PTY subscription reconnects', () => {
+  let listedSessions: SessionDto[];
   beforeEach(() => {
+    listedSessions = [1, 2].map((label) => mockSession(label, { source: { kind: 'web-pty' } }));
+    appState.sessions = new Map(listedSessions.map((session) => [session.label, session]));
     mockRequest.mockReset();
     mockRequest.mockImplementation(async (method) => {
-      if (method === 'status') return {};
-      if (method === 'personas.listCompiles') return { active: [], recent: [], queueDepth: 0 };
-      return [];
+      return method === 'sessions.list' ? listedSessions : defaultRpcResponse(method);
     });
     getWsClient();
   });
 
-  afterEach(async () => {
-    mockRequest.mockReset();
-    mockRequest.mockResolvedValue(undefined);
-    for (const label of [1, 2]) {
-      await detachPty(label);
-      unregisterPtySink(label);
-    }
+  afterEach(() => {
+    for (const label of appState.sessions.keys()) mockClient.emitEvent('session.ended', { label });
   });
 
   it('restores desired streams on every reconnect and delivers a fresh replay before new output', async () => {
@@ -125,16 +104,16 @@ describe('PTY subscription reconnects', () => {
     await attachPty(2);
 
     for (let reconnect = 0; reconnect < 2; reconnect++) {
-      capturedOnConnectionChange?.(false);
+      mockClient.emitConnectionChange(false);
       mockRequest.mockClear();
-      capturedOnConnectionChange?.(true);
+      mockClient.emitConnectionChange(true);
 
       expect(mockRequest.mock.calls.filter(([method]) => method === 'sessions.ptyAttach')).toEqual([
         ['sessions.ptyAttach', { label: 1 }],
         ['sessions.ptyAttach', { label: 2 }],
       ]);
-      capturedOnEvent?.('session.pty_replay', { label: 1, snapshot: 'ZnJlc2g=' });
-      capturedOnEvent?.('session.pty_output', { label: 1, data: 'bmV3' });
+      mockClient.emitEvent('session.pty_replay', { label: 1, snapshot: 'ZnJlc2g=' });
+      mockClient.emitEvent('session.pty_output', { label: 1, data: 'bmV3' });
       expect(terminal.reset).toHaveBeenLastCalledWith('ZnJlc2g=');
       expect(terminal.write).toHaveBeenLastCalledWith('bmV3');
       expect(terminal.reset.mock.invocationCallOrder.at(-1)).toBeLessThan(
@@ -145,14 +124,14 @@ describe('PTY subscription reconnects', () => {
 
   it('remembers a view switch while offline even when detach and the new attach requests fail', async () => {
     await attachPty(1);
-    capturedOnConnectionChange?.(false);
+    mockClient.emitConnectionChange(false);
     mockRequest.mockRejectedValueOnce(new Error('Not connected'));
     await expect(detachPty(1)).rejects.toThrow('Not connected');
     mockRequest.mockRejectedValueOnce(new Error('Not connected'));
     await expect(attachPty(2)).rejects.toThrow('Not connected');
 
     mockRequest.mockClear();
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
 
     expect(mockRequest.mock.calls.filter(([method]) => method === 'sessions.ptyAttach')).toEqual([
       ['sessions.ptyAttach', { label: 2 }],
@@ -161,14 +140,75 @@ describe('PTY subscription reconnects', () => {
 
   it('does not reattach a terminal whose view was closed while offline', async () => {
     await attachPty(1);
-    capturedOnConnectionChange?.(false);
+    mockClient.emitConnectionChange(false);
     mockRequest.mockRejectedValueOnce(new Error('Not connected'));
     await expect(detachPty(1)).rejects.toThrow('Not connected');
 
     mockRequest.mockClear();
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
 
     expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
+  });
+
+  it('does not subscribe just because a sink or mounted terminal exists', () => {
+    registerPtySink(1);
+    connectPtyTerminal(1, { reset: vi.fn(), write: vi.fn() });
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
+  });
+
+  it('retires subscription intent when the session ends', async () => {
+    await attachPty(1);
+    mockClient.emitEvent('session.ended', { label: 1 });
+    mockRequest.mockClear();
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
+  });
+
+  it('retires sessions missing from the authoritative refreshed list', async () => {
+    await attachPty(1);
+    listedSessions = [];
+    mockClient.emitConnectionChange(true);
+    await vi.waitFor(() => expect(appState.sessions.size).toBe(0));
+    mockRequest.mockClear();
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
+  });
+
+  it('retires a definitively missing session without waiting for a list refresh', async () => {
+    mockRequest.mockRejectedValueOnce(new RpcError('SESSION_NOT_FOUND', 'gone'));
+    await expect(attachPty(1)).rejects.toThrow('gone');
+    mockRequest.mockClear();
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest.mock.calls.some(([method]) => method === 'sessions.ptyAttach')).toBe(false);
+  });
+
+  it('does not let an older attach failure erase newer subscription intent', async () => {
+    const oldResponse = deferred<unknown>();
+    mockRequest.mockReturnValueOnce(oldResponse.promise);
+    const oldAttach = attachPty(1);
+    await attachPty(1);
+    oldResponse.reject(new RpcError('SESSION_NOT_FOUND', 'old failure'));
+    await expect(oldAttach).rejects.toThrow('old failure');
+    mockRequest.mockClear();
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest).toHaveBeenCalledWith('sessions.ptyAttach', { label: 1 });
+  });
+
+  it('preserves subscriptions for session-created events replayed over a stale list', async () => {
+    const snapshot = deferred<SessionDto[]>();
+    mockRequest.mockImplementation((method) =>
+      method === 'sessions.list' ? snapshot.promise : Promise.resolve(defaultRpcResponse(method)),
+    );
+    mockClient.emitConnectionChange(true);
+    mockClient.emitEvent('session.created', mockSession(3, { source: { kind: 'web-pty' } }));
+    await attachPty(3);
+    snapshot.resolve([mockSession(1, { source: { kind: 'web-pty' }, turnCount: 99 })]);
+    await vi.waitFor(() => expect(appState.sessions.get(1)?.turnCount).toBe(99));
+    expect(appState.sessions.has(3)).toBe(true);
+    mockRequest.mockClear();
+    mockClient.emitConnectionChange(true);
+    expect(mockRequest).toHaveBeenCalledWith('sessions.ptyAttach', { label: 3 });
   });
 });
 
@@ -192,13 +232,7 @@ describe('connection refresh ordering', () => {
         return sessionLists.shift()?.promise ?? Promise.resolve([]);
       }
       if (method === 'jobs.list') return jobsList;
-      if (method === 'status') return Promise.resolve({});
-      if (method === 'escalations.list') return Promise.resolve([]);
-      if (method === 'workflows.list') return Promise.resolve([]);
-      if (method === 'personas.listCompiles') {
-        return Promise.resolve({ active: [], recent: [], queueDepth: 0 });
-      }
-      return Promise.resolve(undefined);
+      return Promise.resolve(defaultRpcResponse(method));
     });
     return { sessionRequestCount: () => sessionRequestCount };
   }
@@ -210,9 +244,9 @@ describe('connection refresh ordering', () => {
     configureRefresh([sessionsList]);
 
     getWsClient();
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
 
-    capturedOnEvent?.('session.ended', { label: existingSession.label, reason: 'budget_exhausted' });
+    mockClient.emitEvent('session.ended', { label: existingSession.label, reason: 'budget_exhausted' });
     expect(appState.sessions.has(existingSession.label)).toBe(false);
 
     // The response was generated before the ended event and is stale.
@@ -229,14 +263,14 @@ describe('connection refresh ordering', () => {
     configureRefresh([sessionsList], jobsList.promise);
 
     getWsClient();
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
 
     sessionsList.resolve([snapshotSession]);
     await vi.waitFor(() => expect(appState.sessions.has(snapshotSession.label)).toBe(true));
 
     // The snapshot has arrived, but jobs.list is still pending. This event is
     // later on the same socket and must remain authoritative after refreshAll.
-    capturedOnEvent?.('session.created', eventSession);
+    mockClient.emitEvent('session.created', eventSession);
     expect(appState.sessions.has(eventSession.label)).toBe(true);
 
     jobsList.resolve([{} as JobListDto]);
@@ -252,7 +286,7 @@ describe('connection refresh ordering', () => {
     configureRefresh([sessionsList], jobsList.promise);
 
     getWsClient();
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
     jobsList.reject(new Error('jobs unavailable'));
     sessionsList.resolve([snapshotSession]);
 
@@ -268,8 +302,8 @@ describe('connection refresh ordering', () => {
     const refreshes = configureRefresh([firstSessionsList, secondSessionsList]);
 
     getWsClient();
-    capturedOnConnectionChange?.(true);
-    capturedOnConnectionChange?.(true);
+    mockClient.emitConnectionChange(true);
+    mockClient.emitConnectionChange(true);
     await vi.waitFor(() => expect(refreshes.sessionRequestCount()).toBe(1));
 
     firstSessionsList.reject(new Error('stale connection'));
@@ -329,7 +363,7 @@ describe('createSession launch options', () => {
 describe('PTY sink registry seam', () => {
   // NOTE: the WS client is a module singleton wired exactly once, so the
   // event handler is captured on the first getWsClient() call in this file.
-  // We must not clear `capturedOnEvent` between tests.
+  // Keep the mock client's registered listeners between tests.
 
   function makeSink(): PtySink & { writes: string[]; resets: string[] } {
     const writes: string[] = [];
@@ -340,20 +374,20 @@ describe('PTY sink registry seam', () => {
   it('routes pty_output/pty_replay to a connected terminal handle live', () => {
     // Force the client to be built + event handlers wired.
     getWsClient();
-    expect(capturedOnEvent).toBeDefined();
+    expect(mockClient.onEvent).toHaveBeenCalled();
 
     const handle = makeSink();
     registerPtySink(42);
     connectPtyTerminal(42, handle);
 
-    capturedOnEvent?.('session.pty_replay', { label: 42, snapshot: 'c25hcA==' });
-    capturedOnEvent?.('session.pty_output', { label: 42, data: 'ZnJhbWU=' });
+    mockClient.emitEvent('session.pty_replay', { label: 42, snapshot: 'c25hcA==' });
+    mockClient.emitEvent('session.pty_output', { label: 42, data: 'ZnJhbWU=' });
     expect(handle.resets).toEqual(['c25hcA==']);
     expect(handle.writes).toEqual(['ZnJhbWU=']);
 
     // After unregister the event is a no-op (no throw, no delivery).
     unregisterPtySink(42);
-    capturedOnEvent?.('session.pty_output', { label: 42, data: 'YWZ0ZXI=' });
+    mockClient.emitEvent('session.pty_output', { label: 42, data: 'YWZ0ZXI=' });
     expect(handle.writes).toEqual(['ZnJhbWU=']);
   });
 
@@ -364,8 +398,8 @@ describe('PTY sink registry seam', () => {
     getWsClient();
     registerPtySink(43);
 
-    capturedOnEvent?.('session.pty_replay', { label: 43, snapshot: 'c25hcA==' });
-    capturedOnEvent?.('session.pty_output', { label: 43, data: 'ZGVsdGE=' });
+    mockClient.emitEvent('session.pty_replay', { label: 43, snapshot: 'c25hcA==' });
+    mockClient.emitEvent('session.pty_output', { label: 43, data: 'ZGVsdGE=' });
 
     const handle = makeSink();
     // Nothing delivered yet — the terminal was not connected.
@@ -382,8 +416,8 @@ describe('PTY sink registry seam', () => {
     getWsClient();
     registerPtySink(44);
 
-    capturedOnEvent?.('session.pty_output', { label: 44, data: 'c3RhbGU=' });
-    capturedOnEvent?.('session.pty_replay', { label: 44, snapshot: 'ZnJlc2g=' });
+    mockClient.emitEvent('session.pty_output', { label: 44, data: 'c3RhbGU=' });
+    mockClient.emitEvent('session.pty_replay', { label: 44, snapshot: 'ZnJlc2g=' });
 
     const handle = makeSink();
     connectPtyTerminal(44, handle);
@@ -398,12 +432,12 @@ describe('PTY sink registry seam', () => {
     const handle = makeSink();
     // Terminal mounts (connect) before the route registered the sink.
     connectPtyTerminal(45, handle);
-    capturedOnEvent?.('session.pty_output', { label: 45, data: 'bGl2ZQ==' });
+    mockClient.emitEvent('session.pty_output', { label: 45, data: 'bGl2ZQ==' });
     expect(handle.writes).toEqual(['bGl2ZQ==']);
 
     // disconnect re-buffers until the next connect.
     disconnectPtyTerminal(45);
-    capturedOnEvent?.('session.pty_output', { label: 45, data: 'YnVmZg==' });
+    mockClient.emitEvent('session.pty_output', { label: 45, data: 'YnVmZg==' });
     expect(handle.writes).toEqual(['bGl2ZQ==']);
     const handle2 = makeSink();
     connectPtyTerminal(45, handle2);
@@ -417,7 +451,7 @@ describe('PTY sink registry seam', () => {
     const big = 'x'.repeat(200_000); // ~200KB per frame
     const total = 15; // ~3MB total, over the 2MB cap
     for (let i = 0; i < total; i++) {
-      capturedOnEvent?.('session.pty_output', { label: 46, data: `${i}:${big}` });
+      mockClient.emitEvent('session.pty_output', { label: 46, data: `${i}:${big}` });
     }
     const handle = makeSink();
     connectPtyTerminal(46, handle);

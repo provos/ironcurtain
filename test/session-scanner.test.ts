@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
   scanResumableSessions,
@@ -11,6 +11,11 @@ import {
 } from '../src/pty/session-scanner.js';
 import { getSessionSandboxDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 import type { SessionSnapshot } from '../src/pty/session-scanner.js';
+import { BUILTIN_CONVERSATION_STATES } from '../src/docker/conversation-state.js';
+import { registerAgent } from '../src/docker/agent-registry.js';
+import type { AgentId } from '../src/docker/agent-adapter.js';
+import { createMockAdapter } from './helpers/docker-mocks.js';
+import { writeConversationTranscript } from './helpers/conversation-state.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);
@@ -154,9 +159,7 @@ describe('session-scanner', () => {
     const sessionDir = resolve(sessionsDir, sessionId);
     // Old nested-Docker metadata describes the retired runtime only.
     writeFileSync(resolve(sessionDir, 'session-metadata.json'), JSON.stringify({ dockerWorkload: { leaseId: 'old' } }));
-    const transcript = resolve(sessionDir, relativeTranscript);
-    mkdirSync(dirname(transcript), { recursive: true });
-    writeFileSync(transcript, '{"type":"user","message":"persisted conversation"}\n');
+    writeConversationTranscript(sessionDir, relativeTranscript);
     return sessionId;
   }
 
@@ -176,6 +179,23 @@ describe('session-scanner', () => {
     const sessionId = writeLegacySession('codex', 'codex-state/sessions/2026/11/09/rollout.jsonl');
     expect(scanResumableSessions([])).toEqual([]);
     expect(() => validateResumeSession(sessionId)).toThrow('not resumable');
+  });
+
+  it('recovers registered adapters with implicit continuation and custom transcript locations', () => {
+    const id = 'implicit-continuation' as AgentId;
+    registerAgent({
+      ...createMockAdapter(),
+      id,
+      getConversationStateConfig: () => ({
+        ...BUILTIN_CONVERSATION_STATES['claude-code'],
+        hostDirName: 'implicit-state',
+        transcriptsDir: 'history',
+        resumeFlags: [],
+      }),
+    });
+    const sessionId = writeLegacySession(id, 'implicit-state/history/conversation.jsonl');
+    expect(scanResumableSessions([])).toEqual([expect.objectContaining({ sessionId, agent: id, resumable: true })]);
+    expect(validateResumeSession(sessionId).resumable).toBe(true);
   });
 
   it('rechecks conversation state before launching a previously listed legacy session', () => {

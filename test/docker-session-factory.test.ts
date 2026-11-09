@@ -538,8 +538,7 @@ describe('createDockerSession borrow path', () => {
       if (resumeSessionId) {
         mkdirSync(join(getSessionsDir(), resumeSessionId), { recursive: true });
       }
-      if (mode === 'resume') {
-        if (!resumeSessionId) throw new Error('missing test resume identity');
+      if (mode === 'resume' && resumeSessionId) {
         saveSessionMetadata(resumeSessionId, {
           createdAt,
           workspacePath: builtBundle.workspaceDir,

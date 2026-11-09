@@ -6,6 +6,8 @@ import type { SessionSnapshot } from '../src/docker/pty-types.js';
 import { SESSION_STATE_FILENAME } from '../src/config/paths.js';
 import { loadSessionSnapshot, resolveSnapshotResumability } from '../src/docker/pty-session.js';
 import { validateResumeSession } from '../src/pty/session-scanner.js';
+import { BUILTIN_CONVERSATION_STATES } from '../src/docker/conversation-state.js';
+import { writeConversationTranscript } from './helpers/conversation-state.js';
 
 /**
  * These tests verify session snapshot I/O and resume validation
@@ -150,6 +152,7 @@ describe('validateResumeSession', () => {
 });
 
 describe('resolveSnapshotResumability', () => {
+  const conversationStateConfig = BUILTIN_CONVERSATION_STATES['claude-code'];
   let baseDir: string;
   let conversationStateDir: string;
 
@@ -157,9 +160,7 @@ describe('resolveSnapshotResumability', () => {
     baseDir = mkdtempSync(join(tmpdir(), 'snapshot-workload-'));
     process.env.IRONCURTAIN_HOME = baseDir;
     conversationStateDir = join(baseDir, 'conversation-state');
-    const projectDir = join(conversationStateDir, 'projects', '-workspace');
-    mkdirSync(projectDir, { recursive: true });
-    writeFileSync(join(projectDir, 'conversation.jsonl'), '{"type":"user"}\n');
+    writeConversationTranscript(conversationStateDir);
   });
 
   afterEach(() => {
@@ -168,12 +169,12 @@ describe('resolveSnapshotResumability', () => {
   });
 
   it('allows saved conversations independently of the ephemeral container runtime', () => {
-    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
+    const verdict = resolveSnapshotResumability({ conversationStateDir, conversationStateConfig });
     expect(verdict).toEqual({ resumable: true, reason: undefined });
   });
 
   it('refuses resume when no conversation state was recorded', () => {
-    const verdict = resolveSnapshotResumability({ conversationStateDir: undefined, agent: 'claude-code' });
+    const verdict = resolveSnapshotResumability({ conversationStateDir: undefined, conversationStateConfig });
     expect(verdict.resumable).toBe(false);
     expect(verdict.reason).toMatch(/conversation state/u);
   });
@@ -181,13 +182,13 @@ describe('resolveSnapshotResumability', () => {
   it('does not mark a seeded state directory without transcripts resumable', () => {
     rmSync(join(conversationStateDir, 'projects', '-workspace'), { recursive: true });
     writeFileSync(join(conversationStateDir, 'settings.json'), '{}');
-    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
+    const verdict = resolveSnapshotResumability({ conversationStateDir, conversationStateConfig });
     expect(verdict.resumable).toBe(false);
   });
 
   it('writes a resumable snapshot that passes direct resume validation', () => {
     const workspaceDir = mkdtempSync(join(tmpdir(), 'snapshot-workload-ws-'));
-    const verdict = resolveSnapshotResumability({ conversationStateDir, agent: 'claude-code' });
+    const verdict = resolveSnapshotResumability({ conversationStateDir, conversationStateConfig });
     createFakeSessionDir(
       baseDir,
       'workload-session',
@@ -196,5 +197,22 @@ describe('resolveSnapshotResumability', () => {
     expect(validateResumeSession('workload-session').resumable).toBe(true);
 
     rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  it('allows implicit continuation without extra CLI flags', () => {
+    const verdict = resolveSnapshotResumability({
+      conversationStateDir,
+      conversationStateConfig: { ...conversationStateConfig, resumeFlags: [] },
+    });
+    expect(verdict.resumable).toBe(true);
+  });
+
+  it('does not confuse persistence-only configuration with a resumable PTY launcher', () => {
+    const verdict = resolveSnapshotResumability({
+      conversationStateDir,
+      conversationStateConfig: { ...conversationStateConfig, supportsPtyResume: false },
+    });
+    expect(verdict.resumable).toBe(false);
+    expect(verdict.reason).toMatch(/PTY launcher/u);
   });
 });

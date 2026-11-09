@@ -8,6 +8,9 @@ import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.j
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { AgentAdapter, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
+import { BUILTIN_CONVERSATION_STATES } from '../src/docker/conversation-state.js';
+import { writeConversationTranscript } from './helpers/conversation-state.js';
+import { createAgentConversationId } from '../src/session/types.js';
 import type { ContainerRuntime } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
@@ -416,6 +419,37 @@ describe('DockerAgentSession', () => {
     expect(session.getInfo().turnCount).toBe(1);
     expect(session.getInfo().status).toBe('ready');
   });
+
+  it.each([true, false])(
+    'uses the configured layout and exact batch conversation identity (matching=%s)',
+    async (matching) => {
+      const agentConversationId = createAgentConversationId();
+      const stateDir = join(tempDir, 'agent-state');
+      const config = {
+        ...BUILTIN_CONVERSATION_STATES['claude-code'],
+        transcriptsDir: 'custom/history',
+        supportsPtyResume: false,
+      };
+      writeConversationTranscript(
+        stateDir,
+        `${config.transcriptsDir}/${matching ? agentConversationId : 'other'}.jsonl`,
+        '',
+      );
+      const buildCommand = vi.spyOn(deps.infra.adapter, 'buildCommand');
+      session = new DockerAgentSession({
+        ...deps,
+        agentConversationId,
+        infra: { ...deps.infra, conversationStateDir: stateDir, conversationStateConfig: config },
+      });
+      await session.initialize();
+      await session.sendMessage('Continue');
+      expect(buildCommand).toHaveBeenCalledWith(
+        'Continue',
+        expect.any(String),
+        expect.objectContaining({ firstTurn: !matching, sessionId: agentConversationId }),
+      );
+    },
+  );
 
   it.each([
     { maxSeconds: null, timeoutMs: 0 },

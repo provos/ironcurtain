@@ -160,8 +160,9 @@ The exit status can be inferred from:
 - Container exit code != 0 → `crashed`
 - User-initiated close → `user-exit`
 
-The `resumable` field is set by checking for a non-empty transcript in the agent's
-persisted conversation layout (`claude-state/projects/` or `codex-state/sessions/`).
+The `resumable` field requires a PTY launcher with `supportsPtyResume: true` and a
+non-empty transcript in the adapter's configured transcript directory. An adapter
+can continue implicitly with empty `resumeFlags`, or supply explicit CLI flags.
 Seed directories, settings, and command history alone do not establish resumability.
 
 Nested Docker workloads do not prevent conversation resume. The workspace and
@@ -170,10 +171,12 @@ are created under the current configuration. Previous nested containers, images,
 volumes, and running processes are not restored. The new admission replaces the
 workload identity in session metadata; a retired lease is never revived.
 
-Discovery and direct resume validation re-evaluate old Claude `resumable: false`
+Discovery and direct resume validation re-evaluate old `resumable: false`
 snapshots against saved transcripts, including snapshots rejected by the former
-nested-Docker restriction. Codex legacy recovery remains gated until its PTY
-launcher implements conversation continuation. Discovery does not rewrite snapshots. Workspace and
+nested-Docker restriction. Registered adapters supply their own config; discovery
+can also use built-in configs before registration. Codex recovery remains gated by
+its persistence-only config until its PTY launcher supports continuation.
+Discovery does not rewrite snapshots. Workspace and
 snapshot validation still apply, and legacy eligibility is checked again before launch.
 
 ### 3.4 Mux resume support (generic)
