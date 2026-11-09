@@ -5,7 +5,7 @@
  * recording stub sender captures targeted `session.pty_*` deliveries. Covers:
  *  - attach replay-before-output ordering (the reconnect invariant)
  *  - detach / removeAllForClient stop delivery
- *  - idle-TTL reaping of a session with no subscribers (fake timers)
+ *  - session survival without viewers, across view switches and disconnects
  *  - backpressure desync + resync on drain
  *  - `size` tracking create/end
  *  - the docker `sessions.create` concurrency cap (via the real dispatch path)
@@ -30,6 +30,7 @@ import type { EscalationDto } from '../../src/web-ui/web-ui-types.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 import { WebEventBus } from '../../src/web-ui/web-event-bus.js';
 import { sessionDispatch } from '../../src/web-ui/dispatch/session-dispatch.js';
+import { writeConversationTranscript } from '../helpers/conversation-state.js';
 import { escalationDispatch } from '../../src/web-ui/dispatch/escalation-dispatch.js';
 import type { DispatchContext } from '../../src/web-ui/dispatch/types.js';
 import type { ControlRequestHandler } from '../../src/daemon/control-socket.js';
@@ -161,7 +162,7 @@ const ptyOutputs = (calls: SenderCall[]) => calls.filter((c) => c.event === 'ses
 const ptyReplays = (calls: SenderCall[]) => calls.filter((c) => c.event === 'session.pty_replay');
 
 /** Harness whose bridge accepts kill requests but only exits when driven. */
-function makeNonExitingHarness(opts: { idleTtlMs?: number; failFirstKill?: boolean } = {}): {
+function makeNonExitingHarness(opts: { failFirstKill?: boolean } = {}): {
   h: Harness;
   bridge: NonExitingBridge;
 } {
@@ -172,7 +173,6 @@ function makeNonExitingHarness(opts: { idleTtlMs?: number; failFirstKill?: boole
     });
   }
   const h = makeHarness({
-    ...(opts.idleTtlMs !== undefined ? { idleTtlMs: opts.idleTtlMs } : {}),
     createBridge: async () => bridge as unknown as PtyBridge,
   });
   return { h, bridge };
@@ -484,77 +484,90 @@ describe('PtySessionManager', () => {
     });
   });
 
-  describe('idle-TTL backstop', () => {
-    it('reaps a session with no subscribers after the TTL', async () => {
-      const h = makeHarness({ idleTtlMs: 1000 });
-      await h.manager.create();
+  describe('daemon-owned session lifetime', () => {
+    const unattendedMs = 24 * 60 * 60 * 1000; // Well beyond the former 30-minute TTL.
+
+    it('keeps a session that no browser ever attached to', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
       const bridge = h.lastBridge();
 
-      // Never attached -> idle timer armed at create; fire it.
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(unattendedMs);
 
-      expect(bridge.kill).toHaveBeenCalledTimes(1);
-      expect(h.manager.size).toBe(0);
-      const ended = h.events.filter((e) => e.event === 'session.ended');
-      expect(ended).toHaveLength(1);
-      expect((ended[0].payload as { reason: string }).reason).toBe('idle_reaped');
+      expect(bridge.kill).not.toHaveBeenCalled();
+      expect(h.manager.getDto(label)?.status).toBe('ready');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
     });
 
-    it('keeps a live session listed when the idle kill request does not exit the bridge', async () => {
-      const { h, bridge } = makeNonExitingHarness({ idleTtlMs: 1000 });
-      const { label } = await h.manager.create();
+    it('keeps the previous session alive when its viewer switches to another terminal', async () => {
+      const h = makeHarness();
+      const first = await h.manager.create();
+      const bridge = h.lastBridge();
+      const second = await h.manager.create();
+      const ws = fakeWs();
+      h.manager.attach(first.label, ws);
 
-      vi.advanceTimersByTime(1000);
+      h.manager.detach(first.label, ws);
+      h.manager.attach(second.label, ws);
+      vi.advanceTimersByTime(unattendedMs);
 
-      expect(bridge.kill).toHaveBeenCalledTimes(1);
-      expect(bridge.alive).toBe(true);
-      expect(h.manager.has(label)).toBe(true);
-      expect(h.manager.listDtos()[0].status).toBe('stopping');
+      expect(bridge.kill).not.toHaveBeenCalled();
+      expect(h.manager.size).toBe(2);
       expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
 
-      bridge.emitExit(0);
-
-      expect(h.manager.has(label)).toBe(false);
-      const ended = h.events.filter((e) => e.event === 'session.ended');
-      expect(ended).toHaveLength(1);
-      expect((ended[0].payload as { reason: string }).reason).toBe('idle_reaped');
+      bridge.serializeReturn = 'CURRENT SCREEN';
+      h.manager.attach(first.label, ws);
+      expect(ptyReplays(h.sender.calls).at(-1)?.payload).toEqual({
+        label: first.label,
+        snapshot: b64('CURRENT SCREEN'),
+      });
     });
 
-    it('re-arms idle cleanup when an idle kill request throws', async () => {
-      const { h, bridge } = makeNonExitingHarness({ idleTtlMs: 1000, failFirstKill: true });
+    it('keeps a session alive when navigating away from the terminal view', async () => {
+      const h = makeHarness();
       const { label } = await h.manager.create();
-
-      vi.advanceTimersByTime(1000);
-
-      expect(bridge.kill).toHaveBeenCalledTimes(1);
-      expect(h.manager.listDtos()[0].status).toBe('ready');
-
-      vi.advanceTimersByTime(1000);
-
-      expect(bridge.kill).toHaveBeenCalledTimes(2);
-      expect(h.manager.has(label)).toBe(true);
-      expect(h.manager.listDtos()[0].status).toBe('stopping');
-    });
-
-    it('attach cancels the idle timer; detach re-arms it', async () => {
-      const h = makeHarness({ idleTtlMs: 1000 });
-      const { label } = await h.manager.create();
+      const bridge = h.lastBridge();
       const ws = fakeWs();
+      h.manager.attach(label, ws);
+      h.manager.detach(label, ws);
 
-      h.manager.attach(label, ws); // cancels create-armed timer
-      vi.advanceTimersByTime(5000);
-      expect(h.manager.size).toBe(1);
+      vi.advanceTimersByTime(unattendedMs);
 
-      h.manager.detach(label, ws); // re-arms
-      vi.advanceTimersByTime(1000);
-      expect(h.manager.size).toBe(0);
+      expect(bridge.kill).not.toHaveBeenCalled();
+      expect(h.manager.getDto(label)?.status).toBe('ready');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
     });
 
-    it('idleTtlMs = 0 disables reaping', async () => {
-      const h = makeHarness({ idleTtlMs: 0 });
-      await h.manager.create();
-      vi.advanceTimersByTime(60 * 60 * 1000);
-      expect(h.manager.size).toBe(1);
+    it('keeps sessions alive after all browsers disconnect and replays to a new connection', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const bridge = h.lastBridge();
+      const first = fakeWs();
+      const second = fakeWs();
+      h.manager.attach(label, first);
+      h.manager.attach(label, second);
+      h.manager.removeAllForClient(first);
+      h.manager.removeAllForClient(second);
+
+      vi.advanceTimersByTime(unattendedMs);
+
+      expect(bridge.kill).not.toHaveBeenCalled();
+      expect(h.manager.getDto(label)?.status).toBe('ready');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
+
+      const reconnected = fakeWs();
+      bridge.serializeReturn = 'SCREEN AFTER DISCONNECT';
+      h.manager.attach(label, reconnected);
+      expect(ptyReplays(h.sender.calls).at(-1)?.payload).toEqual({
+        label,
+        snapshot: b64('SCREEN AFTER DISCONNECT'),
+      });
+      h.sender.calls.length = 0;
+      bridge.emitData('new output');
+      vi.advanceTimersByTime(20);
+      expect(ptyOutputs(h.sender.calls)).toEqual([
+        { clients: new Set([reconnected]), event: 'session.pty_output', payload: { label, data: b64('new output') } },
+      ]);
     });
   });
 
@@ -1277,6 +1290,24 @@ describe('sessions resume RPC', () => {
     await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toEqual([]);
     ctx.ptySessionManager?.end(1);
     await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toHaveLength(1);
+  });
+
+  it('offers a previously non-resumable Claude conversation and passes its identity to a stub bridge', async () => {
+    writeSnapshot('legacy-workload', { agent: 'claude-code', resumable: false });
+    const sessionDir = join(home, 'sessions', 'legacy-workload');
+    writeConversationTranscript(join(sessionDir, 'claude-state'));
+    const seen: PtyBridgeOptions[] = [];
+    const ctx = makeResumeContext(seen);
+
+    await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toEqual([
+      expect.objectContaining({ sessionId: 'legacy-workload', agent: 'claude-code' }),
+    ]);
+    await expect(sessionDispatch(ctx, 'sessions.resume', { sessionId: 'legacy-workload' })).resolves.toEqual({
+      label: 1,
+    });
+    expect(seen).toEqual([expect.objectContaining({ resumeSessionId: 'legacy-workload', agent: 'claude-code' })]);
+    expect(JSON.parse(readFileSync(join(sessionDir, 'session-state.json'), 'utf8'))).toHaveProperty('resumable', false);
+    ctx.ptySessionManager?.end(1);
   });
 
   it('returns SESSION_NOT_RESUMABLE for a stale or invalid saved session', async () => {

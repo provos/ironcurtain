@@ -133,10 +133,11 @@ export type AgentId = string & { readonly __brand: 'AgentId' };
  * Configuration for persisting an agent's conversation state across
  * container restarts, enabling session resume.
  *
- * Each adapter that supports resume returns this from
+ * Adapters that persist conversation state return this from
  * `getConversationStateConfig()`. The generic infrastructure uses it
  * to create/mount a host-side state directory and to append resume
- * flags on subsequent runs.
+ * flags on subsequent runs. supportsPtyResume distinguishes continuation
+ * capability from persistence alone.
  */
 export interface ConversationStateConfig {
   /** Host-side subdirectory name within sessionDir (e.g., 'claude-state'). */
@@ -144,6 +145,12 @@ export interface ConversationStateConfig {
 
   /** Container-side mount target (e.g., '/root/.claude/'). */
   readonly containerMountPath: string;
+
+  /** Directory beneath the state root that contains conversation transcripts. */
+  readonly transcriptsDir: string;
+
+  /** Whether the PTY launcher can continue saved conversations, explicitly or implicitly. */
+  readonly supportsPtyResume: boolean;
 
   /**
    * Files/directories to pre-populate on first session start.
@@ -162,7 +169,8 @@ export interface ConversationStateConfig {
   /**
    * CLI flag(s) the agent uses to continue a previous conversation.
    * Appended to the PTY command on resume (e.g., ['--continue']).
-   * If empty, the agent handles resume via presence of state files alone.
+   * Empty flags are valid for implicit continuation when supportsPtyResume is
+   * true. A persistence-only adapter can set supportsPtyResume to false.
    */
   readonly resumeFlags: readonly string[];
 }

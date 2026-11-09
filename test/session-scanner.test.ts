@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -7,9 +7,15 @@ import {
   formatRelativeTime,
   shortenHomePath,
   getWorkspaceLabel,
+  validateResumeSession,
 } from '../src/pty/session-scanner.js';
 import { getSessionSandboxDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 import type { SessionSnapshot } from '../src/pty/session-scanner.js';
+import { BUILTIN_CONVERSATION_STATES } from '../src/docker/conversation-state.js';
+import { registerAgent } from '../src/docker/agent-registry.js';
+import type { AgentId } from '../src/docker/agent-adapter.js';
+import { createMockAdapter } from './helpers/docker-mocks.js';
+import { writeConversationTranscript } from './helpers/conversation-state.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);
@@ -136,6 +142,86 @@ describe('session-scanner', () => {
     expect(results).toHaveLength(1);
     expect(results[0].sessionId).toBe('session-1');
     expect(results[0].resumable).toBe(true);
+  });
+
+  function writeLegacySession(agent: string, relativeTranscript: string): string {
+    const sessionId = 'legacy-session';
+    writeSnapshot(sessionId, {
+      sessionId,
+      agent,
+      status: 'user-exit',
+      exitCode: 0,
+      lastActivity: '2026-03-10T12:00:00Z',
+      workspacePath: '/workspace',
+      label: 'Previously non-resumable',
+      resumable: false,
+    });
+    const sessionDir = resolve(sessionsDir, sessionId);
+    // Old nested-Docker metadata describes the retired runtime only.
+    writeFileSync(resolve(sessionDir, 'session-metadata.json'), JSON.stringify({ dockerWorkload: { leaseId: 'old' } }));
+    writeConversationTranscript(sessionDir, relativeTranscript);
+    return sessionId;
+  }
+
+  it('lists and validates legacy Claude conversations without rewriting their snapshot', () => {
+    const sessionId = writeLegacySession('claude-code', 'claude-state/projects/-workspace/conversation.jsonl');
+    const snapshotPath = resolve(sessionsDir, sessionId, SESSION_STATE_FILENAME);
+    const before = readFileSync(snapshotPath, 'utf8');
+
+    expect(scanResumableSessions([])).toEqual([
+      expect.objectContaining({ sessionId, agent: 'claude-code', resumable: true }),
+    ]);
+    expect(validateResumeSession(sessionId)).toMatchObject({ sessionId, agent: 'claude-code', resumable: true });
+    expect(readFileSync(snapshotPath, 'utf8')).toBe(before);
+  });
+
+  it('does not offer legacy Codex sessions until their launcher supports conversation continuation', () => {
+    const sessionId = writeLegacySession('codex', 'codex-state/sessions/2026/11/09/rollout.jsonl');
+    expect(scanResumableSessions([])).toEqual([]);
+    expect(() => validateResumeSession(sessionId)).toThrow('not resumable');
+  });
+
+  it('recovers registered adapters with implicit continuation and custom transcript locations', () => {
+    const id = 'implicit-continuation' as AgentId;
+    registerAgent({
+      ...createMockAdapter(),
+      id,
+      getConversationStateConfig: () => ({
+        ...BUILTIN_CONVERSATION_STATES['claude-code'],
+        hostDirName: 'implicit-state',
+        transcriptsDir: 'history',
+        resumeFlags: [],
+      }),
+    });
+    const sessionId = writeLegacySession(id, 'implicit-state/history/conversation.jsonl');
+    expect(scanResumableSessions([])).toEqual([expect.objectContaining({ sessionId, agent: id, resumable: true })]);
+    expect(validateResumeSession(sessionId).resumable).toBe(true);
+  });
+
+  it('rechecks conversation state before launching a previously listed legacy session', () => {
+    const sessionId = writeLegacySession('claude-code', 'claude-state/projects/-workspace/conversation.jsonl');
+    expect(scanResumableSessions([])).toHaveLength(1);
+    rmSync(resolve(sessionsDir, sessionId, 'claude-state'), { recursive: true });
+
+    expect(() => validateResumeSession(sessionId)).toThrow('not resumable');
+    expect(scanResumableSessions([])).toEqual([]);
+  });
+
+  it('still rejects unsafe workspaces when recovering a legacy conversation', () => {
+    const sessionId = writeLegacySession('claude-code', 'claude-state/projects/-workspace/conversation.jsonl');
+    const snapshotPath = resolve(sessionsDir, sessionId, SESSION_STATE_FILENAME);
+    const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8')) as SessionSnapshot;
+    writeFileSync(snapshotPath, JSON.stringify({ ...snapshot, workspacePath: '/' }));
+
+    expect(scanResumableSessions([])).toEqual([]);
+    expect(() => validateResumeSession(sessionId)).toThrow('workspace path is unsafe');
+  });
+
+  it("does not recover an unsupported agent from another agent's transcript directory", () => {
+    const sessionId = writeLegacySession('goose', 'claude-state/projects/-workspace/conversation.jsonl');
+
+    expect(scanResumableSessions([])).toEqual([]);
+    expect(() => validateResumeSession(sessionId)).toThrow('not resumable');
   });
 
   it('sorts by lastActivity descending (most recent first)', () => {

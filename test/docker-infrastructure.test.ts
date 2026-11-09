@@ -431,6 +431,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [
         { path: 'data/', content: '' },
         { path: 'config.json', content: '{"key": "value"}' },
@@ -449,6 +451,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [
         { path: 'present.json', content: () => '{"present": true}' },
         { path: 'absent.json', content: () => undefined },
@@ -466,6 +470,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [{ path: 'config.json', content: '{"original": true}' }],
       resumeFlags: [],
     };
@@ -486,6 +492,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [],
       resumeFlags: [],
     };
@@ -506,6 +514,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'codex-state',
       containerMountPath: '/home/codespace/.codex/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [],
       resumeFlags: [],
     };
@@ -525,6 +535,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [],
       resumeFlags: [],
     };
@@ -537,6 +549,8 @@ describe('prepareConversationStateDir', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'test-state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [{ path: 'deep/nested/file.txt', content: 'hello' }],
       resumeFlags: [],
     };

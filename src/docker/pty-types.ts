@@ -48,7 +48,7 @@ export interface SessionSnapshot {
   readonly agent: string;
   /** Human-readable session label. */
   readonly label: string;
-  /** True if the agent supports resume AND conversation state exists. */
+  /** Cached resume eligibility; older false values are rechecked against persisted transcripts. */
   readonly resumable: boolean;
 }
 

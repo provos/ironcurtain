@@ -131,13 +131,6 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
   if (!options.resumeSessionId) return options;
   const metadata = loadSessionMetadata(options.resumeSessionId);
   if (!metadata) return options;
-  if (metadata.dockerWorkload !== undefined) {
-    throw new SessionError(
-      `Cannot resume session "${options.resumeSessionId}": secure nested Docker-workload sessions have ephemeral ` +
-        `daemon state and are not resumable`,
-      'SESSION_INIT_FAILED',
-    );
-  }
   return {
     ...options,
     // Only spread defined metadata fields so undefined doesn't overwrite
@@ -330,14 +323,11 @@ async function createDockerSession(
       builtInfra = true;
 
       // §8.4: persist the Docker-workload lease identity + watchdog-policy binding
-      // for audit/inspection. Merged into the metadata `buildSessionConfig`
-      // already wrote — the lease tuple is only known after admission, which
-      // runs inside `createDockerInfrastructure`. Inert for ordinary sessions
-      // (handle present only for an admitted variant); a Docker-workload
-      // bundle is ephemeral and never resumed, so overwriting here is safe.
+      // for audit/inspection. Resume admits a fresh lease instead of reviving
+      // the previous runtime, so replace the recorded tuple on every admission.
       const resolvedDockerWorkload = sessionConfig.config.userConfig.dockerWorkload;
-      if (infra.dockerWorkload && !options.resumeSessionId && resolvedDockerWorkload?.enabled === true) {
-        updateSessionMetadata(sessionId, {
+      if (infra.dockerWorkload && resolvedDockerWorkload?.enabled === true) {
+        updateSessionMetadata(effectiveSessionId, {
           dockerWorkload: dockerWorkloadSessionMetadata(
             infra.dockerWorkload,
             resolvedDockerWorkload,
@@ -709,33 +699,28 @@ export function buildSessionConfig(
   // Patch MCP server args to use the session-specific sandbox directory
   applyAllowedDirectoryToMcpArgs(sessionConfig.mcpServers, sandboxDir);
 
-  // Persist session settings so --resume can restore them.
-  // Only write on initial creation (not when resuming).
-  if (!resumeSessionId) {
-    // Persist the RESOLVED active-profile name (not the raw flag) so a
-    // resumed Docker session keeps its original profile even if
-    // `modelProviders.default` later changes. Docker mode only: builtin
-    // sessions never route through a provider profile (§9.7 F3/F4).
-    const resolvedProfileName =
-      opts.mode?.kind === 'docker' ? (opts.providerProfileName ?? config.userConfig.modelProviders.default) : undefined;
-    const metadata = {
-      createdAt: new Date().toISOString(),
-      ...(opts.persona ? { persona: opts.persona } : {}),
-      ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
-      ...(resolvedProfileName ? { providerProfileName: resolvedProfileName } : {}),
-      // Only store policyDir when no persona is set (persona derives its own)
-      ...(!opts.persona && policyDir ? { policyDir } : {}),
-      ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
-      // Persist the agent-CLI conversation id so `ironcurtain --resume`
-      // can continue the same Claude conversation rather than starting
-      // fresh. Docker-mode sessions only; builtin has no agent CLI.
-      ...(opts.agentConversationId ? { agentConversationId: opts.agentConversationId } : {}),
-    };
-    if (artifactDir) {
-      saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);
-    } else {
-      saveSessionMetadata(effectiveSessionId, metadata);
-    }
+  // Create-once writes preserve existing settings and initialize legacy
+  // sessions whose metadata is missing, including on resume. Fresh workload
+  // admission can then merge its new lease identity into this record.
+  // Persist the RESOLVED profile name so changes to the default do not reroute
+  // subsequent Docker resumes. Builtin sessions do not use provider profiles.
+  const resolvedProfileName =
+    opts.mode?.kind === 'docker' ? (opts.providerProfileName ?? config.userConfig.modelProviders.default) : undefined;
+  const metadata = {
+    createdAt: new Date().toISOString(),
+    ...(opts.persona ? { persona: opts.persona } : {}),
+    ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+    ...(resolvedProfileName ? { providerProfileName: resolvedProfileName } : {}),
+    // Only store policyDir when no persona is set (persona derives its own).
+    ...(!opts.persona && policyDir ? { policyDir } : {}),
+    ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
+    // Builtin sessions do not have an agent-CLI conversation ID.
+    ...(opts.agentConversationId ? { agentConversationId: opts.agentConversationId } : {}),
+  };
+  if (artifactDir) {
+    saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);
+  } else {
+    saveSessionMetadata(effectiveSessionId, metadata);
   }
 
   // Borrow-mode: re-stage the bundle in-place so per-state persona skills

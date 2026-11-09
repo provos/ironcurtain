@@ -3,6 +3,58 @@
 // ---------------------------------------------------------------------------
 
 import type { BudgetSummaryDto, SessionDto } from '../types.js';
+import { vi } from 'vitest';
+
+export function createMockWsClient(
+  request = vi.fn<(method: string, params?: Record<string, unknown>) => Promise<unknown>>(),
+) {
+  const events = new Set<(event: string, payload: unknown) => void>();
+  const connections = new Set<(connected: boolean) => void>();
+  let connected = false;
+  return {
+    request,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    get isConnected() {
+      return connected;
+    },
+    onEvent: vi.fn((handler: (event: string, payload: unknown) => void) => {
+      events.add(handler);
+      return () => events.delete(handler);
+    }),
+    onConnectionChange: vi.fn((handler: (value: boolean) => void) => {
+      connections.add(handler);
+      return () => connections.delete(handler);
+    }),
+    onAuthError: vi.fn(() => () => {}),
+    emitEvent(event: string, payload: unknown) {
+      for (const handler of events) handler(event, payload);
+    },
+    emitConnectionChange(value: boolean) {
+      connected = value;
+      for (const handler of connections) handler(value);
+    },
+  };
+}
+
+export function defaultRpcResponse(method: string): unknown {
+  switch (method) {
+    case 'status':
+      return {};
+    case 'config.getModelProviders':
+      return { profiles: {} };
+    case 'personas.listCompiles':
+      return { active: [], recent: [], queueDepth: 0 };
+    case 'sessions.list':
+    case 'jobs.list':
+    case 'escalations.list':
+    case 'workflows.list':
+    case 'personas.list':
+      return [];
+    default:
+      return undefined;
+  }
+}
 
 /** A zeroed BudgetSummaryDto with all limits disabled. */
 export function mockBudget(): BudgetSummaryDto {

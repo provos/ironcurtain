@@ -175,7 +175,8 @@ Implement the shared Linux/amd64 Docker path and qualify it on the available WSL
 Docker Desktop installation. Deliver Disabled, Offline, Images, Packages, batch,
 PTY, deterministic workflows, bounded outer resources, rollback, watchdog cleanup
 and subsequent clean admission. Keep `enabled` / `networkAccess` settings and the
-existing ephemeral daemon model; ended nested sessions remain non-resumable.
+existing ephemeral daemon model. Ended sessions can resume saved conversations and
+workspace files with a fresh nested daemon and lease; retired daemon state is not restored.
 
 The release gate runs on WSL/Desktop amd64. It does not require native Linux,
 native arm64 or macOS hardware to become available. Record actual WSL kernel,
@@ -505,7 +506,7 @@ criterion is listed here.
 
    Run the complete WSL target with zero required skips, including all supported
    adapters, real CLI/settings configuration, batch/PTY, workflow reuse/destruction,
-   Disabled, Offline, Images, Packages, resume refusal and recovery. Injected
+   Disabled, Offline, Images, Packages, conversation resume with fresh admission and recovery. Injected
    constructor tests complement these gates, not replace them.
 
    Provide one repeatable qualification command and retain its report. It can run

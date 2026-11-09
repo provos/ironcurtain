@@ -222,6 +222,8 @@ describe('credential cleanup on resume', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [],
       resumeFlags: [],
     };
@@ -242,6 +244,8 @@ describe('credential cleanup on resume', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [{ path: 'config.json', content: '{}' }],
       resumeFlags: [],
     };
@@ -274,6 +278,8 @@ describe('seed file path traversal', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [{ path: '../escape.txt', content: 'should-fail' }],
       resumeFlags: [],
     };
@@ -287,6 +293,8 @@ describe('seed file path traversal', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [{ path: targetPath, content: 'escaped!' }],
       resumeFlags: [],
     };
@@ -390,6 +398,8 @@ describe('resume flags safety', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'claude-state',
       containerMountPath: '/root/.claude/',
+      transcriptsDir: 'data',
+      supportsPtyResume: true,
       seed: [],
       resumeFlags: ['--continue'],
     };

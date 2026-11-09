@@ -13,8 +13,9 @@
  * have no Session/Transport); they only borrow a label via
  * `sessionManager.reserveLabel()`. Lifecycle: created via `sessions.create` in
  * docker mode, removed after child exit for natural or requested termination,
- * requested for termination by explicit `sessions.end` or the idle-TTL
- * backstop ({@link PTY_IDLE_TTL_MS}), or shut down by `close()`.
+ * requested for termination by explicit `sessions.end`, or shut down by
+ * `close()`. Browser subscriptions only control terminal delivery: sessions
+ * survive view changes, disconnects, and closing the browser.
  *
  * Escalation bridging (Phase 4): once `bridge.onSessionDiscovered` yields an
  * `escalationDir`, an {@link EscalationWatcher} (the same file-watch primitive
@@ -41,16 +42,8 @@ import * as logger from '../logger.js';
 import { toPtySessionDto } from './dispatch/types.js';
 
 // ---------------------------------------------------------------------------
-// Constants (hard-coded per design §6/§11 -- no config schema for v1)
+// Constants
 // ---------------------------------------------------------------------------
-
-/**
- * Idle-TTL leak backstop: a PTY session with no subscribers for this long is
- * reaped (kills the child + container). Generous by design so a browser reload,
- * laptop sleep, or wifi blip does not kill a working agent. Set to `0` to
- * disable (local testing). Not a config knob for v1 (§6).
- */
-export const PTY_IDLE_TTL_MS = 30 * 60 * 1000;
 
 /** Initial PTY size; the first attaching browser re-sizes via ptyResize (§11 D1). */
 const PTY_INITIAL_COLS = 80;
@@ -131,8 +124,6 @@ export interface PtyStreamSender {
 /** Factory seam so tests can inject a stub bridge instead of spawning a child. */
 export type CreateBridge = (options: PtyBridgeOptions) => Promise<PtyBridge>;
 
-type PtyEndReason = 'user_ended' | 'idle_reaped';
-
 /**
  * Thrown by `create()` when the PTY runtime is unavailable (node-pty fails to
  * load, or the serialize addon is missing). Surfaced as a clean RPC error so a
@@ -160,8 +151,6 @@ export interface PtySessionManagerOptions {
   readonly createBridge?: CreateBridge;
   /** Injected for tests: probes node-pty + serialize addon (default: real import). */
   readonly preflight?: () => Promise<void>;
-  /** Idle-TTL override for tests; defaults to {@link PTY_IDLE_TTL_MS}. */
-  readonly idleTtlMs?: number;
 }
 
 interface FreshPtySessionOptions {
@@ -206,8 +195,7 @@ export class PtyWebSession {
   private readonly subscribers = new Set<WsWebSocket>();
   /** Clients skipped due to backpressure; resynced with a fresh snapshot on drain. */
   private readonly desynced = new Set<WsWebSocket>();
-  /** End reason to use once a requested termination is confirmed by onExit. */
-  private pendingEndReason: PtyEndReason | undefined;
+  private endingRequested = false;
   private buffer = '';
   private bufferBytes = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,36 +214,24 @@ export class PtyWebSession {
     return this.bridge.alive;
   }
 
-  get subscriberCount(): number {
-    return this.subscribers.size;
-  }
-
   /**
    * Records a termination request without claiming that the child has exited.
    * A bridge may accept a kill request but remain alive, and that live session
    * must stay observable through sessions.list until onExit confirms the
    * transition.
    */
-  requestEnd(reason: PtyEndReason): boolean {
-    if (this.pendingEndReason !== undefined) return false;
-    this.pendingEndReason = reason;
+  requestEnd(): boolean {
+    if (this.endingRequested) return false;
+    this.endingRequested = true;
     return true;
   }
 
-  get endReason(): PtyEndReason | undefined {
-    return this.pendingEndReason;
-  }
-
   get ending(): boolean {
-    return this.pendingEndReason !== undefined;
+    return this.endingRequested;
   }
 
   cancelEnd(): void {
-    this.pendingEndReason = undefined;
-  }
-
-  hasSubscribers(): boolean {
-    return this.subscribers.size > 0;
+    this.endingRequested = false;
   }
 
   /**
@@ -419,7 +395,6 @@ export class PtySessionManager {
   private readonly activeResumeIds = new Set<string>();
   /** Exit waits for bridges that spawned after close() began and were never registered. */
   private readonly closingBridgeExits = new Set<Promise<void>>();
-  private readonly idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly sender: PtyStreamSender;
   private readonly sessionManager: SessionManager;
   private readonly eventBus: WebEventBus;
@@ -429,7 +404,6 @@ export class PtySessionManager {
   private readonly captureTracesDefault: boolean;
   private readonly createBridge: CreateBridge;
   private readonly runPreflight: () => Promise<void>;
-  private readonly idleTtlMs: number;
   private preflightPromise: Promise<void> | undefined;
   private pendingCreates = 0;
   private closing = false;
@@ -445,7 +419,6 @@ export class PtySessionManager {
     this.captureTracesDefault = options.captureTracesDefault ?? false;
     this.createBridge = options.createBridge ?? createPtyBridge;
     this.runPreflight = options.preflight ?? defaultPreflight;
-    this.idleTtlMs = options.idleTtlMs ?? PTY_IDLE_TTL_MS;
   }
 
   /** Number of live PTY sessions (for the status DTO + create cap, §11 D4). */
@@ -524,14 +497,12 @@ export class PtySessionManager {
       // Register + announce the session BEFORE wiring the bridge handlers. A child
       // that already exited by now makes `bridge.onExit` fire its callback
       // synchronously; if the session were not yet in the map, `handleExit` would
-      // no-op and leak the entry (armed idle timer, `session.created` with no
+      // no-op and leak the entry (`session.created` with no
       // matching `session.ended`). Registering first makes that a clean
-      // created -> ended. A freshly created session has no subscribers yet, so the
-      // idle backstop guards against a browser that crashes between create and
-      // attach; the first attach cancels it.
+      // created -> ended. Registration owns the child independently of whether
+      // a browser ever attaches to its terminal stream.
       this.sessions.set(label, session);
       claimTransferredToSession = true;
-      this.startIdleTimer(label);
       try {
         this.eventBus.emit('session.created', toPtySessionDto(session));
       } catch (error) {
@@ -566,29 +537,25 @@ export class PtySessionManager {
 
   /**
    * Attaches a client to a session's terminal stream: a synchronous
-   * snapshot-then-subscribe (see {@link PtyWebSession.attach}). Cancels the
-   * session's idle-TTL timer.
+   * snapshot-then-subscribe (see {@link PtyWebSession.attach}).
    */
   attach(label: number, client: WsWebSocket): void {
     const session = this.sessions.get(label);
     if (!session) throw new SessionNotFoundError(label);
     session.attach(client);
-    this.clearIdleTimer(label);
   }
 
-  /** Detaches a client; starts the idle-TTL timer if the session is now empty. */
+  /** Detaches a viewer without changing the session's lifetime. */
   detach(label: number, client: WsWebSocket): void {
     const session = this.sessions.get(label);
     if (!session) return;
     session.removeSubscriber(client);
-    if (!session.hasSubscribers()) this.startIdleTimer(label);
   }
 
   /** Removes a disconnecting client from every session (mirrors the token bridge). */
   removeAllForClient(client: WsWebSocket): void {
-    for (const [label, session] of this.sessions) {
+    for (const session of this.sessions.values()) {
       session.removeSubscriber(client);
-      if (!session.hasSubscribers()) this.startIdleTimer(label);
     }
   }
 
@@ -644,7 +611,24 @@ export class PtySessionManager {
 
   /** Explicitly requests termination; removal waits for the observed PTY exit. */
   end(label: number): void {
-    this.endInternal(label, 'user_ended');
+    const session = this.sessions.get(label);
+    if (!session || !session.requestEnd()) return;
+    logger.info(`[WebUI] PTY session #${label}: user_ended termination requested; waiting for PTY exit`);
+    this.eventBus.emit('session.updated', toPtySessionDto(session));
+    try {
+      session.bridge.kill();
+    } catch (error) {
+      session.cancelEnd();
+      logger.error(
+        `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+      this.eventBus.emit('session.updated', toPtySessionDto(session));
+      return;
+    }
+
+    // Preserve bridges that accept termination without exiting. The fallback
+    // handles a bridge that reports itself dead without invoking onExit.
+    if (!session.bridge.alive) this.handleExit(label);
   }
 
   /** Kills all bridges with a bounded await (mirrors mux doShutdown). */
@@ -653,8 +637,6 @@ export class PtySessionManager {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.activeResumeIds.clear();
-    for (const timer of this.idleTimers.values()) clearTimeout(timer);
-    this.idleTimers.clear();
 
     const pendingCreateExits = (async (): Promise<void> => {
       await this.waitForPendingCreates();
@@ -775,57 +757,12 @@ export class PtySessionManager {
     if (!session) return;
     this.sessions.delete(label);
     if (session.resumeSessionId) this.activeResumeIds.delete(session.resumeSessionId);
-    this.clearIdleTimer(label);
     session.dispose();
-    const reason = session.endReason ?? 'pty_exited';
+    const reason = session.ending ? 'user_ended' : 'pty_exited';
     logger.info(
       `[WebUI] PTY session #${label}: exit observed (pid=${session.bridge.pid}, code=${session.bridge.exitCode ?? 'unknown'}, reason=${reason})`,
     );
     this.eventBus.emit('session.ended', { label, reason });
-  }
-
-  private endInternal(label: number, reason: PtyEndReason): void {
-    const session = this.sessions.get(label);
-    if (!session || !session.requestEnd(reason)) return;
-    this.clearIdleTimer(label);
-    logger.info(`[WebUI] PTY session #${label}: ${reason} termination requested; waiting for PTY exit`);
-    this.eventBus.emit('session.updated', toPtySessionDto(session));
-    try {
-      session.bridge.kill();
-    } catch (error) {
-      session.cancelEnd();
-      logger.error(
-        `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
-      );
-      this.eventBus.emit('session.updated', toPtySessionDto(session));
-      if (!session.hasSubscribers()) this.startIdleTimer(label);
-      return;
-    }
-
-    // A bridge normally reports termination through onExit. Keep this fallback
-    // for a bridge that marks itself dead without invoking its callback; it is
-    // still truthful because the liveness probe has already changed to false.
-    if (!session.bridge.alive) this.handleExit(label);
-  }
-
-  private startIdleTimer(label: number): void {
-    if (this.idleTtlMs <= 0) return; // disabled
-    this.clearIdleTimer(label);
-    this.idleTimers.set(
-      label,
-      setTimeout(() => {
-        this.idleTimers.delete(label);
-        this.endInternal(label, 'idle_reaped');
-      }, this.idleTtlMs),
-    );
-  }
-
-  private clearIdleTimer(label: number): void {
-    const timer = this.idleTimers.get(label);
-    if (timer) {
-      clearTimeout(timer);
-      this.idleTimers.delete(label);
-    }
   }
 
   private waitForPendingCreates(): Promise<void> {
