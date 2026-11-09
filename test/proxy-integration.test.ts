@@ -261,7 +261,7 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
       );
       expect(result).toEqual({
         status: 'already_accessible',
-        message: 'Domain is already accessible (built-in provider)',
+        message: 'Domain is already accessible (built-in provider or registry)',
       });
     });
 
