@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertResourceWatchdogSupervisorFresh,
   loadResourceWatchdogSupervisorStatus,
@@ -18,9 +18,11 @@ import {
   type CreateDockerWorkloadLeaseOptions,
 } from '../../src/docker-workload/bundle-lease.js';
 import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
+import * as cleanupOwnership from '../../src/docker-workload/cleanup-ownership.js';
 import type { ResourceWatchdogPolicy } from '../../src/docker/resource-watchdog.js';
 import { createMockDocker } from '../helpers/docker-mocks.js';
 import { createLegacyDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
+import { writeStableJsonAtomic } from '../../src/hardened-fs.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -29,6 +31,55 @@ afterEach(() => {
 });
 
 describe('detached resource-watchdog supervisor core', () => {
+  it('publishes startup and subsequent samples before releasing lifecycle ownership', async () => {
+    const fixture = supervisorFixture('publication-order');
+    mkdirSync(join(fixture.stateRoot, 'daemon'));
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+      sampleIntervalMs: 5_000,
+      sampleTimeoutMs: 5_000,
+      staleAfterMs: 30_000,
+    });
+    createLease(fixture, policy.policy);
+    let currentMs = Date.parse('2026-07-20T12:00:00.000Z');
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => currentMs);
+    const published: Array<{ state: string; sampleAt: number | undefined; now: number }> = [];
+    const acquire = cleanupOwnership.tryAcquireDockerWorkloadLifecycleClaim;
+    const spy = vi.spyOn(cleanupOwnership, 'tryAcquireDockerWorkloadLifecycleClaim').mockImplementation((options) => {
+      const claim = acquire(options);
+      return {
+        release() {
+          const status = loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath);
+          published.push({ state: status.state, sampleAt: status.lastSample?.sampledAtMs, now: currentMs });
+          if (published.length === 2) {
+            revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation, new Date(currentMs));
+          }
+          claim.release();
+        },
+      };
+    });
+    try {
+      await runResourceWatchdogSupervisor({
+        ...fixture.paths,
+        runtime: emptyRuntime(),
+        now: () => new Date(currentMs),
+        sleep: async (milliseconds) => {
+          currentMs += milliseconds;
+        },
+      });
+    } finally {
+      spy.mockRestore();
+      dateNow.mockRestore();
+    }
+
+    expect(published.slice(0, 2)).toEqual([
+      { state: 'ready', sampleAt: Date.parse('2026-07-20T12:00:00.000Z'), now: Date.parse('2026-07-20T12:00:00.000Z') },
+      { state: 'ready', sampleAt: Date.parse('2026-07-20T12:00:05.000Z'), now: Date.parse('2026-07-20T12:00:05.000Z') },
+    ]);
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
+  });
+
   it('revokes and closes independently when the initial sample crosses the hard threshold', async () => {
     const fixture = supervisorFixture('trip');
     mkdirSync(join(fixture.stateRoot, 'daemon'));
@@ -314,6 +365,62 @@ describe('detached resource-watchdog supervisor core', () => {
         new Date('2026-07-20T12:00:00.100Z'),
       ),
     ).toThrow(/stale/u);
+  });
+
+  it.each([1, 2] as const)('rejects a ready status with a trip at every v%i status-reader boundary', (version) => {
+    const fixture = supervisorFixture('ready-trip');
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+    });
+    const binding =
+      version === 1
+        ? { schemaVersion: 1 as const, policySha256: policy.sha256 }
+        : { schemaVersion: 2 as const, policy: policy.policy };
+    const status = {
+      ...binding,
+      leaseId: fixture.leaseOptions.leaseId,
+      generation: fixture.leaseOptions.generation,
+      supervisorPid: process.pid,
+      state: 'ready' as const,
+      policyId: policy.policy.policyId,
+      startedAt: '2026-07-20T12:00:00.000Z',
+      updatedAt: '2026-07-20T12:00:00.000Z',
+      lastSample: null,
+      trip: {
+        code: 'hard-state-threshold' as const,
+        atMs: Date.parse('2026-07-20T12:00:00.000Z'),
+        detail: 'test trip',
+        overshootBytes: 1,
+        overshootWithinFrozenMaximum: true,
+      },
+      detail: null,
+    };
+
+    writeStableJsonAtomic(fixture.paths.statusPath, { ...status, trip: null });
+    expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+      state: 'ready',
+      trip: null,
+    });
+
+    writeStableJsonAtomic(fixture.paths.statusPath, status);
+    expect(() => loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toThrow(/ready.*resource trip/u);
+    expect(() =>
+      assertResourceWatchdogSupervisorFresh(
+        status,
+        { leaseId: status.leaseId, generation: status.generation, ...binding },
+        1_000,
+        new Date(status.updatedAt),
+      ),
+    ).toThrow(/ready.*resource trip/u);
+
+    for (const state of ['revoking', 'closed', 'incident'] as const) {
+      writeStableJsonAtomic(fixture.paths.statusPath, { ...status, state });
+      expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+        state,
+        trip: status.trip,
+      });
+    }
   });
 
   it('keeps its control plane outside the state tree it may delete', async () => {

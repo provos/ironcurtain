@@ -154,6 +154,19 @@ const dockerWorkloadAuditEventSchema = z.union([
   z
     .object({
       ...baseEventShape,
+      kind: z.literal('watchdog-health'),
+      outcome: z.enum(['stale', 'recovered', 'revoking']),
+      observedStatusAt: timestampSchema,
+      observedSampleAtMs: z.number().int().nonnegative().nullable(),
+      statusAt: timestampSchema.nullable(),
+      sampleAtMs: z.number().int().nonnegative().nullable(),
+      coordinatorHeartbeatAt: timestampSchema,
+      decisionElapsedMs: z.number().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      ...baseEventShape,
       kind: z.literal('private-docker-bootstrap'),
       attestation: z.literal(DAEMON_READY_ATTESTATION),
       toolchain: z

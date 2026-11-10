@@ -33,7 +33,6 @@ import {
 import {
   resourceWatchdogPolicySchema,
   ResourceWatchdog,
-  type ResourceWatchdogAttestation,
   type ResourceWatchdogSample,
   type ResourceWatchdogTrip,
 } from '../docker/resource-watchdog.js';
@@ -86,10 +85,25 @@ const supervisorStatusSchema = z
     if (status.schemaVersion === 2 && status.policyId !== status.policy.policyId) {
       context.addIssue({ code: 'custom', message: 'watchdog supervisor policy ID does not match its snapshot' });
     }
+    if (status.state === 'ready' && status.trip !== null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['trip'],
+        message: 'ready watchdog supervisor cannot report a resource trip',
+      });
+    }
   });
 
 export type ResourceWatchdogSupervisorStatus = z.infer<typeof supervisorStatusSchema>;
 export type ResourceWatchdogSupervisorStopRequest = z.infer<typeof stopRequestSchema>;
+
+/** A valid, bound status whose publication has fallen behind the health deadline. */
+export class WatchdogSupervisorStaleError extends Error {
+  constructor(readonly status: ResourceWatchdogSupervisorStatus) {
+    super('watchdog supervisor heartbeat is stale');
+    this.name = 'WatchdogSupervisorStaleError';
+  }
+}
 
 export interface RunResourceWatchdogSupervisorOptions {
   readonly leasePath: string;
@@ -154,7 +168,6 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
   });
   writeStrictJsonAtomic(options.statusPath, lastStatus);
 
-  let attestation: ResourceWatchdogAttestation | undefined;
   let tripped: ResourceWatchdogTrip | undefined;
   let sampleClaim: DockerWorkloadLifecycleClaimHandle | undefined;
   const watchdog = new ResourceWatchdog(loadedPolicy.policy, {
@@ -241,7 +254,13 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
       writeStrictJsonAtomic(options.statusPath, lastStatus);
       return;
     }
-    attestation = await watchdog.start();
+    const attestation = await watchdog.start();
+    lastStatus = statusUpdate(lastStatus, now(), {
+      state: 'ready',
+      lastSample: compactSample(attestation.firstSample),
+      detail: 'watchdog startup attestation passed',
+    });
+    writeStrictJsonAtomic(options.statusPath, lastStatus);
   } catch (error) {
     // A startup resource trip closes through onTrip and then makes start()
     // reject because no ready attestation exists. Only that proven terminal
@@ -252,13 +271,6 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
     sampleClaim?.release();
     sampleClaim = undefined;
   }
-  lastStatus = statusUpdate(lastStatus, now(), {
-    state: 'ready',
-    lastSample: compactSample(attestation.firstSample),
-    detail: 'watchdog startup attestation passed',
-  });
-  writeStrictJsonAtomic(options.statusPath, lastStatus);
-
   for (;;) {
     await sleep(loadedPolicy.policy.sampleIntervalMs);
     lease = loadDockerWorkloadLease(options.leasePath);
@@ -378,21 +390,22 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
       return true;
     });
     if (sampleClaim === undefined) continue;
-    let sample: ResourceWatchdogSample | undefined;
     const tickClaim = sampleClaim;
     try {
       lease = loadDockerWorkloadLease(options.leasePath);
       if (lease.status !== 'admitting' && lease.status !== 'active') continue;
-      sample = await watchdog.tick();
+      const sample = await watchdog.tick();
+      if (sample !== undefined) {
+        // Publish the successful sample before handing lifecycle ownership to
+        // a coordinator deciding whether an earlier stale observation still holds.
+        lastStatus = statusUpdate(lastStatus, now(), { lastSample: compactSample(sample) });
+        writeStrictJsonAtomic(options.statusPath, lastStatus);
+      }
     } finally {
       // onTrip may already release this handle before taking cleanup ownership;
       // process-lock release is deliberately idempotent.
       tickClaim.release();
       sampleClaim = undefined;
-    }
-    if (sample !== undefined) {
-      lastStatus = statusUpdate(lastStatus, now(), { lastSample: compactSample(sample) });
-      writeStrictJsonAtomic(options.statusPath, lastStatus);
     }
     if (tripped !== undefined) return;
   }
@@ -537,7 +550,7 @@ export function assertResourceWatchdogSupervisorFresh(
   }
   if (validated.state !== 'ready') throw new Error(`watchdog supervisor is not ready: ${validated.state}`);
   if (now.getTime() - Date.parse(validated.updatedAt) >= staleAfterMs) {
-    throw new Error('watchdog supervisor heartbeat is stale');
+    throw new WatchdogSupervisorStaleError(validated);
   }
 }
 
