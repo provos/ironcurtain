@@ -250,17 +250,70 @@ describe('Docker-workload teardown (§8.3 order)', () => {
     expect(runtime.events).toContain(`remove:${containerId}`);
   });
 
-  it.each([
-    'wrong PID',
-    'dead PID',
-    'wrong generation',
-    'wrong policy',
-    'resource trip',
-    'stale sample',
-    'unchanged sample',
-    'missing sample',
-    'future sample',
-  ])('does not cancel cleanup for a newer publication with %s', async (failure) => {
+  const unsafeRecoveryCases = [
+    {
+      label: 'wrong PID',
+      transform: (status) => ({ ...status, supervisorPid: status.supervisorPid + 1 }),
+    },
+    {
+      label: 'dead PID',
+      transform: (status, { supervisor }) => {
+        supervisor.isAlive = () => false;
+        return status;
+      },
+    },
+    {
+      label: 'wrong generation',
+      transform: (status) => ({ ...status, generation: 'wrong-generation' }),
+    },
+    {
+      label: 'wrong policy',
+      transform: (status) =>
+        status.schemaVersion === 2
+          ? { ...status, policy: { ...status.policy, hardSafetyBytes: status.policy.hardSafetyBytes + 1 } }
+          : { ...status, policySha256: '0'.repeat(64) },
+    },
+    {
+      label: 'resource trip',
+      transform: (status, { now }) => ({
+        ...status,
+        trip: {
+          code: 'hard-state-threshold',
+          atMs: now,
+          detail: 'test trip',
+          overshootBytes: 1,
+          overshootWithinFrozenMaximum: true,
+        },
+      }),
+    },
+    {
+      label: 'stale sample',
+      transform: (status, { now }) => ({ ...status, lastSample: { ...status.lastSample!, sampledAtMs: now - 30_000 } }),
+    },
+    {
+      label: 'unchanged sample',
+      transform: (status, { initialAt }) => ({
+        ...status,
+        lastSample: { ...status.lastSample!, sampledAtMs: initialAt },
+      }),
+    },
+    {
+      label: 'missing sample',
+      transform: (status) => ({ ...status, lastSample: null }),
+    },
+    {
+      label: 'future sample',
+      transform: (status, { now }) => ({ ...status, lastSample: { ...status.lastSample!, sampledAtMs: now + 1_000 } }),
+    },
+  ] satisfies Array<{
+    label: string;
+    transform: (
+      status: ResourceWatchdogSupervisorStatus,
+      context: { now: number; initialAt: number; supervisor: FakeSupervisor },
+    ) => ResourceWatchdogSupervisorStatus;
+  }>;
+
+  it.each(unsafeRecoveryCases)('does not cancel cleanup for a newer publication with $label', async ({ transform }) => {
     const clock = createFakeClock();
     const initialAt = clock.clock().getTime();
     let releaseSample = (): void => {};
@@ -268,46 +321,7 @@ describe('Docker-workload teardown (§8.3 order)', () => {
       clock: clock.clock,
       sleep: async (milliseconds) => {
         clock.advance(milliseconds);
-        publication.publish((status) => {
-          switch (failure) {
-            case 'wrong PID':
-              return { ...status, supervisorPid: status.supervisorPid + 1 };
-            case 'wrong generation':
-              return { ...status, generation: 'wrong-generation' };
-            case 'wrong policy':
-              return status.schemaVersion === 2
-                ? { ...status, policy: { ...status.policy, hardSafetyBytes: status.policy.hardSafetyBytes + 1 } }
-                : { ...status, policySha256: '0'.repeat(64) };
-            case 'dead PID':
-              supervisor.isAlive = () => false;
-              return status;
-            case 'resource trip':
-              return {
-                ...status,
-                trip: {
-                  code: 'hard-state-threshold',
-                  atMs: clock.clock().getTime(),
-                  detail: 'test trip',
-                  overshootBytes: 1,
-                  overshootWithinFrozenMaximum: true,
-                },
-              };
-            case 'stale sample':
-              return {
-                ...status,
-                lastSample: { ...status.lastSample!, sampledAtMs: clock.clock().getTime() - 30_000 },
-              };
-            case 'unchanged sample':
-              return { ...status, lastSample: { ...status.lastSample!, sampledAtMs: initialAt } };
-            case 'missing sample':
-              return { ...status, lastSample: null };
-            default:
-              return {
-                ...status,
-                lastSample: { ...status.lastSample!, sampledAtMs: clock.clock().getTime() + 1_000 },
-              };
-          }
-        });
+        publication.publish((status) => transform(status, { now: clock.clock().getTime(), initialAt, supervisor }));
         releaseSample();
       },
     };

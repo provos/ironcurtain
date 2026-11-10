@@ -85,6 +85,13 @@ const supervisorStatusSchema = z
     if (status.schemaVersion === 2 && status.policyId !== status.policy.policyId) {
       context.addIssue({ code: 'custom', message: 'watchdog supervisor policy ID does not match its snapshot' });
     }
+    if (status.state === 'ready' && status.trip !== null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['trip'],
+        message: 'ready watchdog supervisor cannot report a resource trip',
+      });
+    }
   });
 
 export type ResourceWatchdogSupervisorStatus = z.infer<typeof supervisorStatusSchema>;
@@ -542,7 +549,6 @@ export function assertResourceWatchdogSupervisorFresh(
     throw new Error('watchdog supervisor status binding mismatch');
   }
   if (validated.state !== 'ready') throw new Error(`watchdog supervisor is not ready: ${validated.state}`);
-  if (validated.trip !== null) throw new Error('watchdog supervisor reported a resource trip');
   if (now.getTime() - Date.parse(validated.updatedAt) >= staleAfterMs) {
     throw new WatchdogSupervisorStaleError(validated);
   }

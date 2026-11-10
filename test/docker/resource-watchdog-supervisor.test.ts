@@ -22,6 +22,7 @@ import * as cleanupOwnership from '../../src/docker-workload/cleanup-ownership.j
 import type { ResourceWatchdogPolicy } from '../../src/docker/resource-watchdog.js';
 import { createMockDocker } from '../helpers/docker-mocks.js';
 import { createLegacyDockerWorkloadLease } from '../helpers/legacy-docker-workload-lease.js';
+import { writeStableJsonAtomic } from '../../src/hardened-fs.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -364,6 +365,62 @@ describe('detached resource-watchdog supervisor core', () => {
         new Date('2026-07-20T12:00:00.100Z'),
       ),
     ).toThrow(/stale/u);
+  });
+
+  it.each([1, 2] as const)('rejects a ready status with a trip at every v%i status-reader boundary', (version) => {
+    const fixture = supervisorFixture('ready-trip');
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+    });
+    const binding =
+      version === 1
+        ? { schemaVersion: 1 as const, policySha256: policy.sha256 }
+        : { schemaVersion: 2 as const, policy: policy.policy };
+    const status = {
+      ...binding,
+      leaseId: fixture.leaseOptions.leaseId,
+      generation: fixture.leaseOptions.generation,
+      supervisorPid: process.pid,
+      state: 'ready' as const,
+      policyId: policy.policy.policyId,
+      startedAt: '2026-07-20T12:00:00.000Z',
+      updatedAt: '2026-07-20T12:00:00.000Z',
+      lastSample: null,
+      trip: {
+        code: 'hard-state-threshold' as const,
+        atMs: Date.parse('2026-07-20T12:00:00.000Z'),
+        detail: 'test trip',
+        overshootBytes: 1,
+        overshootWithinFrozenMaximum: true,
+      },
+      detail: null,
+    };
+
+    writeStableJsonAtomic(fixture.paths.statusPath, { ...status, trip: null });
+    expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+      state: 'ready',
+      trip: null,
+    });
+
+    writeStableJsonAtomic(fixture.paths.statusPath, status);
+    expect(() => loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toThrow(/ready.*resource trip/u);
+    expect(() =>
+      assertResourceWatchdogSupervisorFresh(
+        status,
+        { leaseId: status.leaseId, generation: status.generation, ...binding },
+        1_000,
+        new Date(status.updatedAt),
+      ),
+    ).toThrow(/ready.*resource trip/u);
+
+    for (const state of ['revoking', 'closed', 'incident'] as const) {
+      writeStableJsonAtomic(fixture.paths.statusPath, { ...status, state });
+      expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+        state,
+        trip: status.trip,
+      });
+    }
   });
 
   it('keeps its control plane outside the state tree it may delete', async () => {

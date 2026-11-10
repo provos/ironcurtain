@@ -98,11 +98,17 @@ export interface SerializedDockerWorkloadCleanupOptions {
   readonly waitForOwner: boolean;
   readonly timeoutMs?: number;
   readonly processIdentityForPid?: ProcessIdentityResolver;
-  /** Recheck a stale observation after ownership is acquired, before mutation or runtime I/O. */
+  /**
+   * Recheck a stale observation after ownership is acquired, before mutation or runtime I/O.
+   * May be re-invoked after lease-lock contention; implementations must be safe to repeat.
+   */
   readonly revalidate?: (lease: DockerWorkloadLease) => void;
   /** Synchronous audit hook after the durable transition and before runtime I/O. */
   readonly onRevoking?: (from: 'admitting' | 'active' | 'incident') => void;
-  /** Deterministic concurrency seam after stale revalidation and before revocation. */
+  /**
+   * Deterministic concurrency seam after stale revalidation and before revocation.
+   * May be re-invoked after lease-lock contention; implementations must be safe to repeat.
+   */
   readonly afterRevalidate?: () => void;
 }
 

@@ -559,7 +559,7 @@ export class DockerWorkloadBundleHandle {
     const poll = this.checkSupervisorHealth();
     this.supervisorHealthPromise = poll;
     const clear = (): void => {
-      this.supervisorHealthPromise = undefined;
+      if (this.supervisorHealthPromise === poll) this.supervisorHealthPromise = undefined;
     };
     void poll.then(clear, clear);
     return poll;
@@ -701,8 +701,7 @@ export class DockerWorkloadBundleHandle {
 
   /** §8.3 teardown in the frozen order; idempotent and tolerant of transient lock contention. */
   teardown(): Promise<DockerWorkloadTeardownResult> {
-    this.rejecting = true;
-    this.clearSupervisorMonitor();
+    this.enterRejecting();
     return (this.teardownPromise ??= this.runTeardown().finally(() => {
       this.teardownPromise = undefined;
     }));
@@ -725,14 +724,12 @@ export class DockerWorkloadBundleHandle {
         processIdentityForPid: this.context.processIdentityForPid,
         revalidate: options.revalidate,
         onRevoking: (from) => {
-          this.rejecting = true;
-          this.clearSupervisorMonitor();
+          this.enterRejecting();
           options.onRevoking?.(from);
           this.emit({ kind: 'lease-transition', from, to: 'revoking' });
         },
       });
-      this.rejecting = true;
-      this.clearSupervisorMonitor();
+      this.enterRejecting();
       if (result.alreadyClosed) return { alreadyClosed: true, supervisorLost: false };
       if (result.revocation !== undefined) {
         this.emit({
@@ -750,11 +747,16 @@ export class DockerWorkloadBundleHandle {
         cleanup: result.cleanup,
       };
     } finally {
-      // Preserve ownership throughout cleanup, but never leave an errored
-      // coordinator heartbeating forever; the supervisor/reconciler must then
-      // be able to take over after the stale bound.
+      // Provisional health checks retain ownership, including after recovery.
+      // Explicit or committed teardown stops heartbeats even on failure so
+      // the supervisor/reconciler can take over after the stale bound.
       if (this.rejecting) this.clearHeartbeatTimer();
     }
+  }
+
+  private enterRejecting(): void {
+    this.rejecting = true;
+    this.clearSupervisorMonitor();
   }
 
   private async stopWatchdogAfterCleanup(cleanup: DockerWorkloadCleanupProof): Promise<boolean> {
