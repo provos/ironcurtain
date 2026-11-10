@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import type { ProcessLockHandle } from '../../src/docker-workload/process-lock.js';
 import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
+import type { ResourceWatchdogSupervisorStatus } from '../../src/docker-workload/resource-watchdog-supervisor.js';
 import {
   createRecordingDockerWorkloadAuditSink,
   type DockerWorkloadAuditSink,
@@ -34,6 +35,7 @@ async function bringUp(
   runtime: EventRuntime,
   supervisor: FakeSupervisor,
   sink?: DockerWorkloadAuditSink,
+  startHeartbeat = false,
 ) {
   const handle = await admitDockerWorkloadBundle({
     runtime: runtime.runtime,
@@ -48,7 +50,7 @@ async function bringUp(
     sleep: timing.sleep,
     pidAlive: () => true,
     supervisor,
-    startHeartbeat: false,
+    startHeartbeat,
   });
   runtime.setLeasePath(handle.leasePath);
   await handle.attestWatchdog();
@@ -66,6 +68,30 @@ async function bringUp(
   grant.observed(containerId);
   await handle.activate();
   return { handle, containerId, requestedName };
+}
+
+/** Hold publication steady until the simulated sampling owner publishes again. */
+function controlPublication(supervisor: FakeSupervisor, leasePath: string, timing: Timing) {
+  const readStatus = supervisor.readStatus.bind(supervisor);
+  const initial = readStatus(join(dirname(leasePath), 'status.json'));
+  if (initial === undefined || initial.lastSample === null) throw new Error('missing test attestation');
+  const initialSample = initial.lastSample;
+  let published = initial;
+  supervisor.readStatus = (path) => {
+    const current = readStatus(path);
+    return current?.state === 'closed' ? current : published;
+  };
+  return {
+    publish(
+      update: (status: ResourceWatchdogSupervisorStatus) => ResourceWatchdogSupervisorStatus = (status) => status,
+    ) {
+      published = update({
+        ...initial,
+        updatedAt: timing.clock().toISOString(),
+        lastSample: { ...initialSample, sampledAtMs: timing.clock().getTime() },
+      });
+    },
+  };
 }
 
 describe('Docker-workload teardown (§8.3 order)', () => {
@@ -163,6 +189,232 @@ describe('Docker-workload teardown (§8.3 order)', () => {
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
     expect(runtime.containers.some((container) => container.id === containerId)).toBe(false);
     expect(runtime.events.filter((event) => event === `remove:${containerId}`)).toHaveLength(1);
+  });
+
+  it('cancels stale cleanup after recovery and refreshes coordinator ownership under the claim', async () => {
+    const clock = createFakeClock();
+    let releaseSample = (): void => {};
+    const timing: Timing = {
+      clock: clock.clock,
+      sleep: async (milliseconds) => {
+        clock.advance(milliseconds);
+        publication.publish();
+        releaseSample();
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const { handle, requestedName } = await bringUp(timing, runtime, supervisor, sink);
+    const publication = controlPublication(supervisor, handle.leasePath, timing);
+    clock.advance(31_000);
+    const sample = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+    releaseSample = () => sample.release();
+    const emit = sink.emit.bind(sink);
+    sink.emit = (event) => {
+      if (event.kind === 'watchdog-health' && event.outcome === 'recovered') {
+        expect(() => tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath })).toThrow(/busy/u);
+        expect(event.coordinatorHeartbeatAt).toBe(timing.clock().toISOString());
+      }
+      emit(event);
+    };
+
+    const health = handle.pollSupervisorHealth();
+    expect(handle.pollSupervisorHealth()).toBe(health);
+    await health;
+
+    expect(loadDockerWorkloadLease(handle.leasePath)).toMatchObject({ status: 'active', incident: null });
+    expect(sink.events.some((event) => event.kind === 'incident')).toBe(false);
+    expect(runtime.events).toEqual([`create:${requestedName}`]);
+    expect(sink.events.filter((event) => event.kind === 'watchdog-health').map((event) => event.outcome)).toEqual([
+      'stale',
+      'recovered',
+    ]);
+    clock.advance(1_000);
+    await expect(handle.refreshCoordinatorHeartbeat()).resolves.toBe(true);
+    await handle.pollSupervisorHealth();
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
+  });
+
+  it('still revokes a persistently stale supervisor', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const { handle, containerId } = await bringUp(clock, runtime, supervisor);
+    controlPublication(supervisor, handle.leasePath, clock);
+    clock.advance(31_000);
+
+    await handle.pollSupervisorHealth();
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    expect(runtime.events).toContain(`remove:${containerId}`);
+  });
+
+  it.each([
+    'wrong PID',
+    'dead PID',
+    'wrong generation',
+    'wrong policy',
+    'resource trip',
+    'stale sample',
+    'unchanged sample',
+    'missing sample',
+    'future sample',
+  ])('does not cancel cleanup for a newer publication with %s', async (failure) => {
+    const clock = createFakeClock();
+    const initialAt = clock.clock().getTime();
+    let releaseSample = (): void => {};
+    const timing: Timing = {
+      clock: clock.clock,
+      sleep: async (milliseconds) => {
+        clock.advance(milliseconds);
+        publication.publish((status) => {
+          switch (failure) {
+            case 'wrong PID':
+              return { ...status, supervisorPid: status.supervisorPid + 1 };
+            case 'wrong generation':
+              return { ...status, generation: 'wrong-generation' };
+            case 'wrong policy':
+              return status.schemaVersion === 2
+                ? { ...status, policy: { ...status.policy, hardSafetyBytes: status.policy.hardSafetyBytes + 1 } }
+                : { ...status, policySha256: '0'.repeat(64) };
+            case 'dead PID':
+              supervisor.isAlive = () => false;
+              return status;
+            case 'resource trip':
+              return {
+                ...status,
+                trip: {
+                  code: 'hard-state-threshold',
+                  atMs: clock.clock().getTime(),
+                  detail: 'test trip',
+                  overshootBytes: 1,
+                  overshootWithinFrozenMaximum: true,
+                },
+              };
+            case 'stale sample':
+              return {
+                ...status,
+                lastSample: { ...status.lastSample!, sampledAtMs: clock.clock().getTime() - 30_000 },
+              };
+            case 'unchanged sample':
+              return { ...status, lastSample: { ...status.lastSample!, sampledAtMs: initialAt } };
+            case 'missing sample':
+              return { ...status, lastSample: null };
+            default:
+              return {
+                ...status,
+                lastSample: { ...status.lastSample!, sampledAtMs: clock.clock().getTime() + 1_000 },
+              };
+          }
+        });
+        releaseSample();
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const { handle, containerId } = await bringUp(timing, runtime, supervisor);
+    const publication = controlPublication(supervisor, handle.leasePath, timing);
+    clock.advance(31_000);
+    const sample = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+    releaseSample = () => sample.release();
+
+    await handle.pollSupervisorHealth();
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    expect(runtime.events).toContain(`remove:${containerId}`);
+  });
+
+  it('lets explicit teardown win while stale-health cleanup waits for sampling', async () => {
+    const clock = createFakeClock();
+    const timing: Timing = {
+      clock: clock.clock,
+      sleep: async (milliseconds) => {
+        clock.advance(milliseconds);
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const { handle, containerId } = await bringUp(timing, runtime, supervisor);
+    const publication = controlPublication(supervisor, handle.leasePath, timing);
+    clock.advance(31_000);
+    const sample = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+
+    const health = handle.pollSupervisorHealth();
+    const teardown = handle.teardown();
+    publication.publish();
+    sample.release();
+    await Promise.all([health, teardown]);
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    expect(runtime.events.filter((event) => event === `remove:${containerId}`)).toHaveLength(1);
+  });
+
+  it('rechecks recovery after lease-lock contention without recording a cleanup incident', async () => {
+    const clock = createFakeClock();
+    let releaseLease = (): void => {};
+    const timing: Timing = {
+      clock: clock.clock,
+      sleep: async (milliseconds) => {
+        clock.advance(milliseconds);
+        releaseLease();
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const { handle, requestedName } = await bringUp(timing, runtime, supervisor);
+    const publication = controlPublication(supervisor, handle.leasePath, timing);
+    clock.advance(31_000);
+    const lock = holdLeaseLock(handle.leasePath);
+    let reads = 0;
+    const readStatus = supervisor.readStatus.bind(supervisor);
+    supervisor.readStatus = (path) => {
+      if (++reads > 1) publication.publish();
+      return readStatus(path);
+    };
+    releaseLease = () => lock.release();
+
+    await handle.pollSupervisorHealth();
+
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(loadDockerWorkloadLease(handle.leasePath)).toMatchObject({ status: 'active', incident: null });
+    expect(runtime.events).toEqual([`create:${requestedName}`]);
+  });
+
+  it('keeps automatic heartbeats and health monitoring running after recovery', async () => {
+    vi.useFakeTimers();
+    let handle: Awaited<ReturnType<typeof bringUp>>['handle'] | undefined;
+    try {
+      const timing: Timing = {
+        clock: () => new Date(Date.now()),
+        sleep: async (milliseconds) => {
+          vi.setSystemTime(Date.now() + milliseconds);
+          publication.publish();
+          releaseSample();
+        },
+      };
+      let releaseSample = (): void => {};
+      const runtime = createEventRuntime();
+      const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+      ({ handle } = await bringUp(timing, runtime, supervisor, undefined, true));
+      const publication = controlPublication(supervisor, handle.leasePath, timing);
+      vi.setSystemTime(Date.now() + 31_000);
+      const sample = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+      releaseSample = () => sample.release();
+      await handle.pollSupervisorHealth();
+      const recoveredAt = loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt;
+      const healthReads = vi.spyOn(supervisor, 'readStatus');
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
+      expect(loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt).not.toBe(recoveredAt);
+      expect(healthReads).toHaveBeenCalled();
+    } finally {
+      await handle?.teardown();
+      vi.useRealTimers();
+    }
   });
 
   it('defers teardown while a watchdog sample owns the lifecycle claim', async () => {

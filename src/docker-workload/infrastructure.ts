@@ -44,6 +44,7 @@ import {
   returnDockerWorkloadLeaseRecoveryToIncident,
   requestDockerWorkloadOuterResource,
   type DockerWorkloadCleanupProof,
+  type DockerWorkloadLease,
   type DockerWorkloadOuterResource,
 } from './bundle-lease.js';
 import type { DockerWorkloadRevocationResult } from './bundle-revocation.js';
@@ -53,6 +54,7 @@ import {
   performSerializedDockerWorkloadCleanup,
   tryHeartbeatDockerWorkloadLease,
   withDockerWorkloadLifecycleClaim,
+  type SerializedDockerWorkloadCleanupOptions,
 } from './cleanup-ownership.js';
 import {
   DOCKER_WORKLOAD_HEARTBEAT_INTERVAL_MS,
@@ -69,6 +71,7 @@ import {
   loadResourceWatchdogSupervisorStatus,
   requestResourceWatchdogSupervisorStop,
   watchdogSupervisorPolicyBinding,
+  WatchdogSupervisorStaleError,
   type LaunchDetachedResourceWatchdogSupervisorOptions,
   type ResourceWatchdogSupervisorStatus,
 } from './resource-watchdog-supervisor.js';
@@ -225,6 +228,8 @@ class DockerWorkloadPostCloseAuditError extends Error {
   }
 }
 
+class WatchdogSupervisorRecoveredError extends DockerWorkloadCleanupPreconditionError {}
+
 export interface DockerWorkloadTeardownResult {
   readonly alreadyClosed: boolean;
   readonly supervisorLost: boolean;
@@ -364,6 +369,7 @@ export class DockerWorkloadBundleHandle {
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private heartbeatRefreshPromise: Promise<boolean> | undefined;
   private supervisorMonitorTimer: NodeJS.Timeout | undefined;
+  private supervisorHealthPromise: Promise<void> | undefined;
   private teardownPromise: Promise<DockerWorkloadTeardownResult> | undefined;
   private readonly localCreateOperations = new Set<symbol>();
 
@@ -545,14 +551,82 @@ export class DockerWorkloadBundleHandle {
   }
 
   /** One deterministic health-monitor iteration; the interval uses the same path. */
-  async pollSupervisorHealth(): Promise<void> {
-    if (this.rejecting || this.supervisorPid === undefined || this.localCreateOperations.size !== 0) return;
+  pollSupervisorHealth(): Promise<void> {
+    if (this.supervisorHealthPromise !== undefined) return this.supervisorHealthPromise;
+    if (this.rejecting || this.supervisorPid === undefined || this.localCreateOperations.size !== 0) {
+      return Promise.resolve();
+    }
+    const poll = this.checkSupervisorHealth();
+    this.supervisorHealthPromise = poll;
+    const clear = (): void => {
+      this.supervisorHealthPromise = undefined;
+    };
+    void poll.then(clear, clear);
+    return poll;
+  }
+
+  private async checkSupervisorHealth(): Promise<void> {
     try {
       this.assertWatchdogFresh();
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.emit({ kind: 'incident', code: 'watchdog-supervisor-unhealthy', detail });
-      await this.teardown();
+      if (error instanceof WatchdogSupervisorStaleError) await this.revokeStaleSupervisor(error.status);
+      else {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.emit({ kind: 'incident', code: 'watchdog-supervisor-unhealthy', detail });
+        await this.teardown();
+      }
+    }
+  }
+
+  private async revokeStaleSupervisor(observed: ResourceWatchdogSupervisorStatus): Promise<void> {
+    const startedAt = performance.now();
+    let status: ResourceWatchdogSupervisorStatus | undefined = observed;
+    const recordHealth = (outcome: 'stale' | 'recovered' | 'revoking', lease: DockerWorkloadLease): void => {
+      this.emit({
+        kind: 'watchdog-health',
+        outcome,
+        observedStatusAt: observed.updatedAt,
+        observedSampleAtMs: observed.lastSample?.sampledAtMs ?? null,
+        statusAt: status?.updatedAt ?? null,
+        sampleAtMs: status?.lastSample?.sampledAtMs ?? null,
+        coordinatorHeartbeatAt: lease.coordinator.heartbeatAt,
+        decisionElapsedMs: performance.now() - startedAt,
+      });
+    };
+    recordHealth('stale', loadDockerWorkloadLease(this.leasePath));
+    try {
+      await this.runTeardown({
+        revalidate: (lease) => {
+          // Explicit teardown and an already committed revocation/incident win.
+          if (this.rejecting || (lease.status !== 'active' && lease.status !== 'admitting')) return;
+          status = this.context.supervisor.readStatus(this.context.statusPath);
+          if (status === undefined) return;
+          try {
+            this.assertSupervisorStatus(status);
+          } catch {
+            return;
+          }
+          const sampleAt = status.lastSample?.sampledAtMs;
+          const now = this.context.clock().getTime();
+          if (
+            sampleAt === undefined ||
+            sampleAt <= (observed.lastSample?.sampledAtMs ?? -1) ||
+            sampleAt > now ||
+            now - sampleAt >= this.loadedPolicy.policy.staleAfterMs ||
+            lease.coordinator.pid !== process.pid
+          )
+            return;
+
+          // The supervisor must see fresh coordinator ownership when it next
+          // acquires the claim, even if our heartbeat was blocked by sampling.
+          const refreshed = heartbeatDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
+          recordHealth('recovered', refreshed);
+          throw new WatchdogSupervisorRecoveredError('watchdog supervisor recovered before revocation');
+        },
+        onRevoking: () => recordHealth('revoking', loadDockerWorkloadLease(this.leasePath)),
+      });
+    } catch (error) {
+      if (!(error instanceof WatchdogSupervisorRecoveredError)) throw error;
     }
   }
 
@@ -629,13 +703,15 @@ export class DockerWorkloadBundleHandle {
   teardown(): Promise<DockerWorkloadTeardownResult> {
     this.rejecting = true;
     this.clearSupervisorMonitor();
-    return (this.teardownPromise ??= this.runTeardown());
+    return (this.teardownPromise ??= this.runTeardown().finally(() => {
+      this.teardownPromise = undefined;
+    }));
   }
 
-  private async runTeardown(): Promise<DockerWorkloadTeardownResult> {
+  private async runTeardown(
+    options: Pick<SerializedDockerWorkloadCleanupOptions, 'revalidate' | 'onRevoking'> = {},
+  ): Promise<DockerWorkloadTeardownResult> {
     try {
-      const startLease = loadDockerWorkloadLease(this.leasePath);
-      if (startLease.status === 'closed') return { alreadyClosed: true, supervisorLost: false };
       const result = await performSerializedDockerWorkloadCleanup({
         runtime: this.context.runtime,
         leasePath: this.leasePath,
@@ -647,8 +723,17 @@ export class DockerWorkloadBundleHandle {
         sleep: this.context.sleep,
         waitForOwner: true,
         processIdentityForPid: this.context.processIdentityForPid,
-        onRevoking: (from) => this.emit({ kind: 'lease-transition', from, to: 'revoking' }),
+        revalidate: options.revalidate,
+        onRevoking: (from) => {
+          this.rejecting = true;
+          this.clearSupervisorMonitor();
+          options.onRevoking?.(from);
+          this.emit({ kind: 'lease-transition', from, to: 'revoking' });
+        },
       });
+      this.rejecting = true;
+      this.clearSupervisorMonitor();
+      if (result.alreadyClosed) return { alreadyClosed: true, supervisorLost: false };
       if (result.revocation !== undefined) {
         this.emit({
           kind: 'revocation-result',
@@ -668,8 +753,7 @@ export class DockerWorkloadBundleHandle {
       // Preserve ownership throughout cleanup, but never leave an errored
       // coordinator heartbeating forever; the supervisor/reconciler must then
       // be able to take over after the stale bound.
-      this.clearHeartbeatTimer();
-      this.teardownPromise = undefined;
+      if (this.rejecting) this.clearHeartbeatTimer();
     }
   }
 
@@ -748,18 +832,18 @@ export class DockerWorkloadBundleHandle {
   }
 
   private assertSupervisorStatus(status: ResourceWatchdogSupervisorStatus): void {
-    assertResourceWatchdogSupervisorFresh(
-      status,
-      { leaseId: this.leaseId, generation: this.generation, policy: this.loadedPolicy.policy },
-      this.loadedPolicy.policy.staleAfterMs,
-      this.context.clock(),
-    );
     if (this.supervisorPid === undefined || status.supervisorPid !== this.supervisorPid) {
       throw new Error('watchdog supervisor process ID binding mismatch');
     }
     if (!this.context.supervisor.isAlive(this.supervisorPid)) {
       throw new Error('watchdog supervisor process is not alive');
     }
+    assertResourceWatchdogSupervisorFresh(
+      status,
+      { leaseId: this.leaseId, generation: this.generation, policy: this.loadedPolicy.policy },
+      this.loadedPolicy.policy.staleAfterMs,
+      this.context.clock(),
+    );
   }
 
   private clearSupervisorMonitor(): void {

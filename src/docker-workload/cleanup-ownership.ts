@@ -155,13 +155,14 @@ export async function performSerializedDockerWorkloadCleanup(
       return { alreadyClosed: true, cleanup: current.cleanup };
     }
     assertBudget();
-    options.revalidate?.(current);
-    options.afterRevalidate?.();
-
     try {
       for (;;) {
         try {
           const beforeRevocation = loadDockerWorkloadLease(options.leasePath);
+          // Retry the decision as well as the mutation after lease-lock
+          // contention. A benign cancellation must never become an incident.
+          options.revalidate?.(beforeRevocation);
+          options.afterRevalidate?.();
           if (beforeRevocation.status === 'incident') {
             recoverDockerWorkloadLeaseIncident(options.leasePath, options.generation, options.clock());
             options.onRevoking?.('incident');
@@ -202,6 +203,7 @@ export async function performSerializedDockerWorkloadCleanup(
         }
       }
     } catch (error) {
+      if (error instanceof DockerWorkloadCleanupPreconditionError) throw error;
       const failed = loadDockerWorkloadLease(options.leasePath);
       const detail = error instanceof Error ? error.message : String(error);
       if (failed.incident !== null && failed.status === 'revoking') {
