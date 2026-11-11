@@ -116,11 +116,18 @@ describe('resolveReadonlyMounts', () => {
   });
 
   it('rejects socket-bearing system directories', () => {
-    // /dev and /var exist on both Linux and macOS (/proc and /run are Linux-only).
-    expect(() => resolveReadonlyMounts(['/dev'])).toThrow(/system directory/);
-    expect(() => resolveReadonlyMounts(['/var'])).toThrow(/system directory/);
-    expect(() => resolveReadonlyMounts(['/tmp'])).toThrow();
-    expect(() => resolveReadonlyMounts(['/var/tmp'])).toThrow(/host sockets/);
+    // The fake IronCurtain home lives in the OS temp dir, which may sit under
+    // the path being tested (/tmp on Linux, /var/folders on macOS). Then the
+    // credentials guard rejects first -- still refused, different reason.
+    const expectRejected = (path: string, reason: RegExp): void => {
+      const homeInside = realpathSync(fakeHome).startsWith(`${realpathSync(path)}/`);
+      expect(() => resolveReadonlyMounts([path])).toThrow(homeInside ? /IronCurtain credentials or state/ : reason);
+    };
+    // These exist on both Linux and macOS (/proc and /run are Linux-only).
+    expectRejected('/dev', /system directory/);
+    expectRejected('/var', /system directory/);
+    expectRejected('/tmp', /host sockets/);
+    expectRejected('/var/tmp', /host sockets/);
   });
 
   it('allows mounting the current directory or its parent when no .env exists there', () => {
