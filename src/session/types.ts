@@ -487,8 +487,9 @@ export interface SessionOptions {
 
   /**
    * Host directories to mount read-only under `/mnt/ro/` (Docker Agent Mode
-   * only). Validated by `buildSessionConfig` via `resolveReadonlyMounts()`;
-   * ignored on resume, where the persisted mounts are restored instead.
+   * only). Validated by `buildSessionConfig`: a fresh session uses exactly
+   * these; on resume they are added to the persisted mounts (saved for later
+   * resumes) via `restoreReadonlyMounts()`.
    */
   readonlyMounts?: readonly string[];
 

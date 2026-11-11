@@ -113,6 +113,11 @@ describe('buildSpawnArgs', () => {
     expect(buildSpawnArgs(baseOptions())).not.toContain('--mount-ro');
   });
 
+  it('passes --mount-ro alongside --resume so resumed sessions can add folders', () => {
+    const args = buildSpawnArgs(baseOptions({ resumeSessionId: 'abc', readonlyMounts: ['/data/ref'] }));
+    expect(args).toEqual(expect.arrayContaining(['--resume', 'abc', '--mount-ro', '/data/ref']));
+  });
+
   it('appends --persona <name> when set, omits when unset', () => {
     const args = buildSpawnArgs(baseOptions({ persona: 'exec-assistant' }));
     expect(args[args.indexOf('--persona') + 1]).toBe('exec-assistant');

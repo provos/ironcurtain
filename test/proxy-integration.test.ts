@@ -30,12 +30,13 @@ import {
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { CompiledPolicyFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
+import { findTsxBin } from './helpers/tsx-bin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..');
 const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
-const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
+const tsxBin = findTsxBin(projectRoot);
 
 // ---------------------------------------------------------------------------
 // Test helpers

@@ -61,6 +61,8 @@ export interface ResumableSessionDto {
   readonly workspaceLabel?: string;
   readonly persona?: string;
   readonly providerProfileName?: string;
+  /** Host folders this session already mounts read-only (kept on resume). */
+  readonly readonlyMounts?: readonly string[];
 }
 
 export interface ConversationTurn {

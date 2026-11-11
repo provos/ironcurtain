@@ -47,8 +47,10 @@ import {
   resolveReadonlyMounts,
   restoreReadonlyMounts,
   type ReadonlyMountResolution,
+  type ReadonlyMountRestore,
   type ReadonlyMountSpec,
 } from './readonly-mounts.js';
+import { errorMessage } from '../utils/error-message.js';
 import { SessionError } from '../types/errors.js';
 import {
   saveSessionMetadata,
@@ -715,12 +717,12 @@ export function buildSessionConfig(
   applyAllowedDirectoryToMcpArgs(sessionConfig.mcpServers, sandboxDir);
 
   // Read-only extra mounts (standalone Docker sessions only). This is the
-  // validation boundary: resume restores and re-validates the persisted set,
-  // a fresh session validates the caller's raw paths.
-  let readonlyMountResolution: ReadonlyMountResolution = { mounts: [], warnings: [] };
+  // validation boundary: resume restores and re-validates the persisted set
+  // and adds the caller's raw paths; a fresh session validates them alone.
+  let readonlyMountResolution: ReadonlyMountResolution & Partial<ReadonlyMountRestore> = { mounts: [], warnings: [] };
   if (opts.mode?.kind === 'docker' && !borrowInfra) {
     readonlyMountResolution = resumeSessionId
-      ? restoreReadonlyMounts(loadSessionMetadata(resumeSessionId)?.readonlyMounts)
+      ? restoreReadonlyMounts(loadSessionMetadata(resumeSessionId)?.readonlyMounts, opts.readonlyMounts ?? [])
       : resolveReadonlyMounts(opts.readonlyMounts ?? []);
   }
   const { mounts: readonlyMounts, warnings: readonlyMountWarnings } = readonlyMountResolution;
@@ -757,6 +759,17 @@ export function buildSessionConfig(
     saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);
   } else {
     saveSessionMetadata(effectiveSessionId, metadata);
+    // Folders added on resume become part of the session for later resumes.
+    // Best-effort: unreadable metadata (which the create-once save above
+    // leaves in place) must not fail a resume whose mounts already validated;
+    // the additions then simply apply to this run only.
+    if (readonlyMountResolution.persist) {
+      try {
+        updateSessionMetadata(effectiveSessionId, { readonlyMounts: readonlyMountResolution.persist });
+      } catch (err) {
+        logger.warn(`Could not save added read-only folders for later resumes: ${errorMessage(err)}`);
+      }
+    }
   }
 
   // Borrow-mode: re-stage the bundle in-place so per-state persona skills

@@ -222,11 +222,19 @@ describe('createLanguageModel', () => {
   });
 
   it('passes undefined baseURL when not configured', async () => {
-    const config = createTestUserConfig();
-    await createLanguageModel('anthropic:claude-sonnet-4-6', config);
+    // The Anthropic base falls back to ANTHROPIC_BASE_URL, which the host may
+    // set (Claude Code does), so clear it for this case.
+    const previous = process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_BASE_URL;
+    try {
+      const config = createTestUserConfig();
+      await createLanguageModel('anthropic:claude-sonnet-4-6', config);
 
-    const { createAnthropic } = await import('@ai-sdk/anthropic');
-    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: undefined }));
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
+      expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: undefined }));
+    } finally {
+      if (previous !== undefined) process.env.ANTHROPIC_BASE_URL = previous;
+    }
   });
 
   it('passes proxy fetch when HTTPS_PROXY is set', async () => {

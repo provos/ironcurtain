@@ -14,12 +14,13 @@ import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findTsxBin } from './helpers/tsx-bin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..');
 const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
-const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
+const tsxBin = findTsxBin(projectRoot);
 
 const MISSING_VAR = 'IRONCURTAIN_TEST_DEFINITELY_NOT_SET_VAR';
 

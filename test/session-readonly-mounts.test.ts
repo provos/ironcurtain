@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as loggerModule from '../src/logger.js';
 import { REAL_TMP, TEST_SANDBOX_DIR } from './fixtures/test-policy.js';
@@ -13,6 +13,7 @@ import { buildSessionConfig } from '../src/session/index.js';
 import { loadSessionMetadata } from '../src/session/session-metadata.js';
 import { createSessionId, type SessionMode } from '../src/session/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
+import { getSessionDir, SESSION_METADATA_FILENAME } from '../src/config/paths.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 
 const TEST_ROOT = `${REAL_TMP}/ironcurtain-ro-mounts-session-test-${process.pid}`;
@@ -85,14 +86,74 @@ describe('buildSessionConfig read-only mounts', () => {
     const result = buildSessionConfig(createTestConfig(), sessionId, resumedId, {
       mode: DOCKER_MODE,
       resumeSessionId: sessionId,
-      // Ignored on resume: the persisted set wins (this path would fail validation).
-      readonlyMounts: [TEST_ROOT],
     });
 
     expect(result.readonlyMounts).toEqual([{ hostPath: kept, containerPath: '/mnt/ro/kept' }]);
     expect(result.readonlyMountWarnings).toHaveLength(1);
     expect(result.readonlyMountWarnings[0]).toContain(gone);
     expect(result.systemPromptAugmentation).toContain('no longer available');
+  });
+
+  it('adds folders on resume and saves them for later resumes', () => {
+    const first = resolve(TEST_ROOT, 'first');
+    const second = resolve(TEST_ROOT, 'second');
+    mkdirSync(first, { recursive: true });
+    mkdirSync(second, { recursive: true });
+    const sessionId = createSessionId();
+    buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE, readonlyMounts: [first] });
+    loggerModule.teardown();
+
+    const resumed = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+      readonlyMounts: [second],
+    });
+    loggerModule.teardown();
+
+    const expected = [
+      { hostPath: first, containerPath: '/mnt/ro/first' },
+      { hostPath: second, containerPath: '/mnt/ro/second' },
+    ];
+    expect(resumed.readonlyMounts).toEqual(expected);
+    expect(resumed.systemPromptAugmentation).toContain('`/mnt/ro/second`');
+    expect(loadSessionMetadata(sessionId)?.readonlyMounts).toEqual(expected);
+
+    // A later resume without additions keeps both.
+    const again = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+    });
+    expect(again.readonlyMounts).toEqual(expected);
+  });
+
+  it('still resumes with added folders when the saved metadata is unreadable', () => {
+    const extra = resolve(TEST_ROOT, 'extra');
+    mkdirSync(extra, { recursive: true });
+    const sessionId = createSessionId();
+    mkdirSync(getSessionDir(sessionId), { recursive: true });
+    writeFileSync(resolve(getSessionDir(sessionId), SESSION_METADATA_FILENAME), '{not json');
+
+    const resumed = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+      readonlyMounts: [extra],
+    });
+
+    expect(resumed.readonlyMounts).toEqual([{ hostPath: extra, containerPath: '/mnt/ro/extra' }]);
+  });
+
+  it('rejects an unsafe folder added on resume', () => {
+    const sessionId = createSessionId();
+    buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE });
+    loggerModule.teardown();
+    // TEST_ROOT contains the IronCurtain home used by these tests.
+    expect(() =>
+      buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+        mode: DOCKER_MODE,
+        resumeSessionId: sessionId,
+        readonlyMounts: [TEST_ROOT],
+      }),
+    ).toThrow(/IronCurtain credentials or state/);
   });
 
   it('rejects an unsafe path at the session boundary', () => {

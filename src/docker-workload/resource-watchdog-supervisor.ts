@@ -423,6 +423,15 @@ export async function launchDetachedResourceWatchdogSupervisor(
   ) {
     throw new Error('watchdog supervisor startup timeout is invalid');
   }
+  // The supervisor always runs from the built package, even when IronCurtain
+  // itself runs from source; a missing build would otherwise surface only as a
+  // silent startup timeout (its stdio is ignored).
+  if (!existsSync(options.entrypointPath)) {
+    throw new Error(
+      `watchdog supervisor entrypoint not found: ${options.entrypointPath}. ` +
+        'Build IronCurtain first (`npm run build`); this is required even when running from source.',
+    );
+  }
   const child = spawn(
     process.execPath,
     [
@@ -448,6 +457,9 @@ export async function launchDetachedResourceWatchdogSupervisor(
     const deadline = Date.now() + options.startupTimeoutMs;
     for (;;) {
       if (startupError !== undefined) throw new Error('watchdog supervisor failed to start', { cause: startupError });
+      // Observe exit BEFORE reading status, so a terminal status the child
+      // published just before exiting is still honored by the read below.
+      const exitedBeforeRead = childHasExited(child);
       let status: ResourceWatchdogSupervisorStatus | undefined;
       try {
         status = loadResourceWatchdogSupervisorStatus(options.statusPath);
@@ -465,6 +477,11 @@ export async function launchDetachedResourceWatchdogSupervisor(
         if (status.state === 'incident') {
           throw new Error(`watchdog supervisor startup incident: ${status.detail ?? 'unknown'}`);
         }
+      }
+      if (exitedBeforeRead) {
+        // Fail fast instead of waiting out the startup deadline.
+        const exit = child.signalCode !== null ? `signal ${child.signalCode}` : `exit code ${child.exitCode}`;
+        throw new Error(`watchdog supervisor exited before attesting (${exit})`);
       }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }

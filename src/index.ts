@@ -41,7 +41,8 @@ const startSpec: CommandSpec = {
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
     {
       flag: 'mount-ro',
-      description: 'Mount a host directory read-only at /mnt/ro/<name> (repeatable; container mode only)',
+      description:
+        'Mount a host directory read-only at /mnt/ro/<name> (repeatable; container mode only; with --resume, adds to the saved folders)',
       placeholder: '<path>',
     },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
@@ -67,6 +68,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a non-mux session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --mount-ro /mnt/d/Training "task" # Read-only reference folder',
+    'ironcurtain start -r <id> --mount-ro /mnt/d/Data # Resume and add a read-only folder',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
     'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
@@ -144,11 +146,6 @@ export async function main(args?: string[]): Promise<void> {
   if (resumeSessionId && rawWorkspace) {
     process.stderr.write(chalk.yellow('Note: --workspace is ignored when resuming; original workspace is restored.\n'));
   }
-  if (resumeSessionId && rawReadonlyMounts.length > 0) {
-    process.stderr.write(
-      chalk.yellow('Note: --mount-ro is ignored when resuming; original read-only mounts are restored.\n'),
-    );
-  }
   if (resumeSessionId && personaName) {
     process.stderr.write(chalk.yellow('Note: --persona is ignored when resuming; original persona is restored.\n'));
   }
@@ -170,16 +167,16 @@ export async function main(args?: string[]): Promise<void> {
   }
 
   // Fail fast before image preparation; buildSessionConfig re-validates as the
-  // authoritative boundary (and PTY mode prints its warnings from there).
-  const readonlyMounts = rawReadonlyMounts.length > 0 && !resumeSessionId ? rawReadonlyMounts : undefined;
-  // Resume re-validates the persisted mounts the same way (a vanished folder
-  // only warns).
+  // authoritative boundary (and PTY mode prints its warnings from there). On
+  // resume, --mount-ro folders are added to the saved ones (a saved folder
+  // that vanished only warns).
+  const readonlyMounts = rawReadonlyMounts.length > 0 ? rawReadonlyMounts : undefined;
   const persistedMounts = resumeSessionId ? loadSessionMetadata(resumeSessionId)?.readonlyMounts : undefined;
   if (readonlyMounts || persistedMounts) {
     try {
-      const { warnings } = readonlyMounts
-        ? resolveReadonlyMounts(readonlyMounts)
-        : restoreReadonlyMounts(persistedMounts);
+      const { warnings } = resumeSessionId
+        ? restoreReadonlyMounts(persistedMounts, readonlyMounts)
+        : resolveReadonlyMounts(readonlyMounts ?? []);
       if (!values.pty) for (const warning of warnings) process.stderr.write(chalk.yellow(`Warning: ${warning}\n`));
     } catch (error) {
       process.stderr.write(chalk.red(`Invalid read-only mount: ${errorMessage(error)}\n`));

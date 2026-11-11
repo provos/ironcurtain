@@ -16,7 +16,8 @@ import { writeTrustedUserContext } from '../escalation/trusted-input.js';
 import { createPasteInterceptor, type PasteInterceptor } from './paste-interceptor.js';
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
-import { resolveReadonlyMounts } from '../session/readonly-mounts.js';
+import { resolveReadonlyMounts, restoreReadonlyMounts } from '../session/readonly-mounts.js';
+import { loadSessionMetadata } from '../session/session-metadata.js';
 import { errorMessage } from '../utils/error-message.js';
 import { scanResumableSessions } from '../pty/session-scanner.js';
 import { scanPersonas } from './persona-scanner.js';
@@ -287,14 +288,26 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         break;
 
       case 'picker-add-readonly': {
-        // Validate together with the folders chosen so far (dedupe + cap).
-        const existing = inputHandler.pickerState?.readonlyMounts ?? [];
+        // Validate together with the folders chosen so far (dedupe + cap). On
+        // resume, also against the session's saved folders, which it keeps.
+        const existing = inputHandler.readonlyMounts;
         try {
-          const { mounts, warnings } = resolveReadonlyMounts([...existing, action.path]);
-          inputHandler.setReadonlyMounts(
-            mounts.map((m) => m.hostPath),
-            warnings.join(' ') || undefined,
-          );
+          if (action.resumeSessionId) {
+            const saved = loadSessionMetadata(action.resumeSessionId)?.readonlyMounts ?? [];
+            const { added, warnings } = restoreReadonlyMounts(saved, [...existing, action.path]);
+            // No new entry means the path was already chosen or saved.
+            const duplicate = added.length === existing.length;
+            inputHandler.setReadonlyMounts(
+              added.map((m) => m.hostPath),
+              [duplicate ? `Already included: ${action.path}` : '', ...warnings].filter(Boolean).join(' ') || undefined,
+            );
+          } else {
+            const { mounts, warnings } = resolveReadonlyMounts([...existing, action.path]);
+            inputHandler.setReadonlyMounts(
+              mounts.map((m) => m.hostPath),
+              warnings.join(' ') || undefined,
+            );
+          }
         } catch (err) {
           inputHandler.enterBrowseWithError(action.path, errorMessage(err), undefined, 'readonly-mount');
         }
@@ -343,9 +356,13 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         const resumeTab = await spawnSession({
           resumeSessionId: action.sessionId,
           agentOverride: action.agent,
+          readonlyMounts: action.readonlyMounts,
         });
         activeTabIndex = tabs.length - 1;
-        showMessage(`Resuming session ${action.sessionId.substring(0, 8)} as tab #${resumeTab.number}`);
+        const added = action.readonlyMounts?.length ?? 0;
+        const addedSuffix =
+          added === 0 ? '' : added === 1 ? ' with 1 added read-only folder' : ` with ${added} added read-only folders`;
+        showMessage(`Resuming session ${action.sessionId.substring(0, 8)} as tab #${resumeTab.number}${addedSuffix}`);
         renderer.fullRedraw();
         break;
       }

@@ -5,12 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { stripHtmlFallback } from '../src/servers/fetch-server.js';
+import { findTsxBin } from './helpers/tsx-bin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..');
 const fetchServerPath = resolve(projectRoot, 'src/servers/fetch-server.ts');
-const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
+const tsxBin = findTsxBin(projectRoot);
 
 const TEST_HTML = `<!DOCTYPE html>
 <html><head><title>Test Page</title></head>

@@ -28,7 +28,13 @@ import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
-import { MAX_READONLY_MOUNTS, resolveReadonlyMounts } from '../../session/readonly-mounts.js';
+import {
+  MAX_READONLY_MOUNTS,
+  resolveReadonlyMounts,
+  restoreReadonlyMounts,
+  savedReadonlyMountHostPaths,
+} from '../../session/readonly-mounts.js';
+import { loadSessionMetadata } from '../../session/session-metadata.js';
 import { errorMessage } from '../../utils/error-message.js';
 import { getWorkspaceLabel, scanResumableSessions, validateResumeSession } from '../../pty/session-scanner.js';
 import { createStandaloneSession } from '../../session/index.js';
@@ -72,6 +78,8 @@ const sessionResumeSchema = z.object({
     .min(1)
     .max(128)
     .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid session ID'),
+  /** Host folders to add read-only to the resumed session (kept for later resumes). */
+  readonlyMounts: z.array(z.string().min(1).max(4096)).max(MAX_READONLY_MOUNTS).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -122,8 +130,8 @@ export async function sessionDispatch(
       return createWebSession(ctx, opts.persona, opts.captureTraces);
     }
     case 'sessions.resume': {
-      const { sessionId } = validateParams(sessionResumeSchema, params);
-      return resumePtySession(ctx, sessionId);
+      const { sessionId, readonlyMounts } = validateParams(sessionResumeSchema, params);
+      return resumePtySession(ctx, sessionId, readonlyMounts);
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
@@ -211,6 +219,7 @@ function listResumableSessions(ctx: DispatchContext): ResumableSessionDto[] {
   for (const snapshot of scanResumableSessions(protectedPaths)) {
     if (ctx.ptySessionManager?.isResuming(snapshot.sessionId)) continue;
     const workspaceLabel = getWorkspaceLabel(snapshot);
+    const savedFolders = savedReadonlyMountHostPaths(loadSessionMetadata(snapshot.sessionId)?.readonlyMounts);
     result.push({
       sessionId: snapshot.sessionId,
       displayName: snapshot.label,
@@ -220,6 +229,7 @@ function listResumableSessions(ctx: DispatchContext): ResumableSessionDto[] {
       ...(workspaceLabel ? { workspaceLabel } : {}),
       ...(snapshot.persona ? { persona: snapshot.persona } : {}),
       ...(snapshot.providerProfileName ? { providerProfileName: snapshot.providerProfileName } : {}),
+      ...(savedFolders.length > 0 ? { readonlyMounts: savedFolders } : {}),
     });
   }
   return result;
@@ -269,7 +279,11 @@ async function createPtySession(
   });
 }
 
-async function resumePtySession(ctx: DispatchContext, sessionId: string): Promise<{ label: number }> {
+async function resumePtySession(
+  ctx: DispatchContext,
+  sessionId: string,
+  rawReadonlyMounts?: readonly string[],
+): Promise<{ label: number }> {
   if (ctx.mode.kind !== 'docker') {
     throw new RpcError('SESSION_NOT_RESUMABLE', 'Session resume requires container mode');
   }
@@ -282,12 +296,25 @@ async function resumePtySession(ctx: DispatchContext, sessionId: string): Promis
     throw new RpcError('SESSION_NOT_RESUMABLE', error instanceof Error ? error.message : String(error));
   }
 
+  // Check additions against the session's saved folders now for an immediate
+  // error; the child re-validates and saves the merged list.
+  let readonlyMounts: string[] | undefined;
+  if (rawReadonlyMounts && rawReadonlyMounts.length > 0) {
+    const saved = loadSessionMetadata(snapshot.sessionId)?.readonlyMounts ?? [];
+    try {
+      readonlyMounts = restoreReadonlyMounts(saved, rawReadonlyMounts).added.map((m) => m.hostPath);
+    } catch (err) {
+      throw new RpcError('INVALID_PARAMS', errorMessage(err));
+    }
+  }
+
   return manager.create({
     resume: {
       sessionId: snapshot.sessionId,
       agent: snapshot.agent,
       ...(snapshot.persona ? { persona: snapshot.persona } : {}),
     },
+    ...(readonlyMounts && readonlyMounts.length > 0 ? { readonlyMounts } : {}),
   });
 }
 

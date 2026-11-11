@@ -36,11 +36,12 @@ import { MCPClientManager } from '../src/trusted-process/mcp-client-manager.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
 import type { MCPServerConfig } from '../src/config/types.js';
+import { findTsxBin } from './helpers/tsx-bin.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
-const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
+const tsxBin = findTsxBin(projectRoot);
 
 /** Writes a minimal compiled-policy + tool-annotations pair into a directory. */
 function writePolicyArtifacts(

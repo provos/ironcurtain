@@ -553,6 +553,82 @@ describe('MuxInputHandler', () => {
       });
     });
 
+    function typeBrowsePath(handler: ReturnType<typeof createMuxInputHandler>, path: string): void {
+      while ((handler.pickerState?.cursorPos ?? 0) > 0) handler.handleKey('BACKSPACE');
+      for (const c of path) handler.handleKey(c);
+    }
+
+    it('adds read-only folders with r and passes them to resume-spawn', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('DOWN');
+
+      handler.handleKey('r');
+      expect(handler.mode).toBe('picker');
+      expect(handler.pickerState?.browseTarget).toBe('readonly-mount');
+      typeBrowsePath(handler, '/data/ref/');
+      // The add is validated by the orchestrator against session-bbb's saved folders.
+      expect(handler.handleKey('ENTER')).toEqual({
+        kind: 'picker-add-readonly',
+        path: '/data/ref',
+        resumeSessionId: 'session-bbb',
+      });
+
+      handler.setReadonlyMounts(['/data/ref'], 'note');
+      expect(handler.mode).toBe('resume-picker');
+      expect(handler.resumePickerState?.selectedIndex).toBe(1);
+      expect(handler.resumePickerState?.readonlyMounts).toEqual(['/data/ref']);
+      expect(handler.resumePickerState?.notice).toBe('note');
+
+      expect(handler.handleKey('ENTER')).toEqual({
+        kind: 'resume-spawn',
+        sessionId: 'session-bbb',
+        agent: 'claude-code',
+        readonlyMounts: ['/data/ref'],
+      });
+    });
+
+    it('returns to the resume picker when the folder browser is cancelled or errors', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('r');
+      handler.handleKey('ESCAPE');
+      expect(handler.mode).toBe('resume-picker');
+      expect(handler.resumePickerState?.readonlyMounts).toEqual([]);
+
+      handler.handleKey('r');
+      handler.enterBrowseWithError('/dev', 'bad folder', undefined, 'readonly-mount');
+      expect(handler.pickerState?.error).toBe('bad folder');
+      handler.handleKey('ESCAPE');
+      expect(handler.mode).toBe('resume-picker');
+    });
+
+    it('drops added folders when a different session is selected', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('r');
+      handler.setReadonlyMounts(['/data/ref']);
+      handler.handleKey('UP'); // already at the top: selection unchanged
+      expect(handler.resumePickerState?.readonlyMounts).toEqual(['/data/ref']);
+
+      handler.handleKey('DOWN');
+      expect(handler.resumePickerState?.readonlyMounts).toEqual([]);
+      expect(handler.resumePickerState?.notice).toMatch(/cleared/);
+      expect(handler.handleKey('ENTER')).toEqual({
+        kind: 'resume-spawn',
+        sessionId: 'session-bbb',
+        agent: 'claude-code',
+      });
+    });
+
+    it('removes the last added folder with x and resets on a new /resume', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('r');
+      handler.setReadonlyMounts(['/a', '/b']);
+      handler.handleKey('x');
+      expect(handler.resumePickerState?.readonlyMounts).toEqual(['/a']);
+
+      handler.enterResumePickerMode(sessions);
+      expect(handler.resumePickerState?.readonlyMounts).toEqual([]);
+    });
+
     it('Escape cancels resume picker', () => {
       const handler = enterResumePicker();
       const action = handler.handleKey('ESCAPE');

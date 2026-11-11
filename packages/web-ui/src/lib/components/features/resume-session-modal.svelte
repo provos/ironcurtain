@@ -6,6 +6,8 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Modal } from '$lib/components/ui/modal/index.js';
   import { Spinner } from '$lib/components/ui/spinner/index.js';
+  import ReadonlyFoldersInput from './readonly-folders-input.svelte';
+  import { folderName, withFolder } from '../../readonly-folders.js';
 
   let {
     open,
@@ -26,19 +28,50 @@
     resumingId: string | null;
     onclose: () => void;
     onretry: () => void;
-    onresume: (sessionId: string) => void;
+    /** `readonlyMounts` are added to the session's saved read-only folders. */
+    onresume: (sessionId: string, readonlyMounts?: string[]) => void;
   } = $props();
+
+  // Folders to add on resume. This component stays mounted while the dialog
+  // is closed, so clear them each time it opens: choices for one resume must
+  // not carry over to the next. (A failed resume keeps the dialog open, so the
+  // folders survive a retry.)
+  let addedFolders = $state<string[]>([]);
+  let folderDraft = $state('');
+  $effect(() => {
+    if (open) {
+      addedFolders = [];
+      folderDraft = '';
+    }
+  });
 
   function close(): void {
     if (resumingId === null) onclose();
+  }
+
+  function resume(sessionId: string): void {
+    // A typed-but-not-added folder still counts.
+    const folders = withFolder(addedFolders, folderDraft);
+    onresume(sessionId, folders.length > 0 ? folders : undefined);
   }
 </script>
 
 <Modal {open} onclose={close} title="Resume a session" class="max-w-3xl">
   <div class="flex max-h-[80dvh] min-h-56 flex-col">
     <div class="border-b border-border px-5 py-3 text-sm text-muted-foreground">
-      Continue a previous container session with its original agent, workspace, profile, and persona.
+      Continue a previous container session with its original agent, workspace, profile, persona, and read-only folders.
     </div>
+    {#if sessions.length > 0}
+      <div class="border-b border-border px-5 py-3">
+        <ReadonlyFoldersInput
+          bind:folders={addedFolders}
+          bind:draft={folderDraft}
+          disabled={resumingId !== null}
+          testIdPrefix="resume-readonly"
+          label="Add read-only folders (optional) · kept with the session"
+        />
+      </div>
+    {/if}
 
     <div class="min-h-0 flex-1 overflow-y-auto p-4" aria-busy={loading || resumingId !== null}>
       {#if actionError}
@@ -104,6 +137,15 @@
                   >
                     {session.workspaceLabel ?? 'Session sandbox'}
                   </div>
+                  {#if session.readonlyMounts && session.readonlyMounts.length > 0}
+                    <div
+                      data-testid="resume-saved-folders"
+                      class="mt-1 truncate text-xs text-muted-foreground"
+                      title={session.readonlyMounts.join('\n')}
+                    >
+                      Read-only: {session.readonlyMounts.map(folderName).join(', ')}
+                    </div>
+                  {/if}
                 </div>
                 <Button
                   variant="outline"
@@ -111,7 +153,7 @@
                   loading={resumingId === session.sessionId}
                   disabled={resumingId !== null}
                   aria-label={`Resume ${session.displayName}`}
-                  onclick={() => onresume(session.sessionId)}
+                  onclick={() => resume(session.sessionId)}
                 >
                   {resumingId === session.sessionId ? 'Resuming…' : 'Resume'}
                 </Button>

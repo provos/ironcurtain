@@ -56,6 +56,10 @@ export interface ResumePickerState {
   sessions: SessionSnapshot[];
   selectedIndex: number;
   scrollOffset: number;
+  /** Validated host directories to add read-only to the resumed session. */
+  readonlyMounts: readonly string[];
+  /** Non-error notice (e.g. whole-drive mount warning). */
+  notice: string | null;
 }
 
 export interface PersonaPickerState {
@@ -109,6 +113,9 @@ export interface MuxInputHandler {
   /** Current picker state (null when not in picker mode). */
   readonly pickerState: PickerState | null;
 
+  /** Read-only folders chosen so far in the current /new or /resume flow. */
+  readonly readonlyMounts: readonly string[];
+
   /** Current resume picker state (null when not in resume picker mode). */
   readonly resumePickerState: ResumePickerState | null;
 
@@ -136,7 +143,7 @@ export interface MuxInputHandler {
 
   /**
    * Records the validated read-only folder list (after a `picker-add-readonly`
-   * action) and returns to the /new menu, optionally showing a notice.
+   * action) and returns to /resume or the /new menu, optionally with a notice.
    */
   setReadonlyMounts(paths: readonly string[], notice?: string): void;
 
@@ -299,8 +306,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
   let _cachedPersonas: PersonaSnapshot[] = [];
   let _cachedProfiles: ProviderProfileSnapshot[] = [];
-  /** Read-only mounts chosen in the current /new flow (validated host paths). */
+  /** Read-only mounts chosen in the current /new or /resume flow (validated host paths). */
   let _readonlyMounts: readonly string[] = [];
+  /**
+   * The /resume picker, parked while its read-only folder browser is open.
+   * Non-null means the browser returns to /resume instead of the /new menu.
+   */
+  let _parkedResumePicker: ResumePickerState | null = null;
 
   function newPickerState(fields: Partial<PickerState> & Pick<PickerState, 'phase'>): PickerState {
     return {
@@ -329,13 +341,41 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
   function setReadonlyMounts(paths: readonly string[], notice?: string): void {
     _readonlyMounts = paths;
-    showPickerMenu(notice ?? null);
+    leaveReadonlyBrowse(notice ?? null);
+  }
+
+  /** Returns from the read-only folder browser to /resume (if parked) or the /new menu. */
+  function leaveReadonlyBrowse(notice: string | null = null): void {
+    const parked = _parkedResumePicker;
+    if (parked) {
+      _parkedResumePicker = null;
+      _pickerState = null;
+      _mode = 'resume-picker';
+      _resumePickerState = { ...parked, readonlyMounts: _readonlyMounts, notice };
+      return;
+    }
+    showPickerMenu(notice);
+  }
+
+  /** Opens the folder browser for adding a read-only mount. */
+  function openReadonlyBrowse(): void {
+    _mode = 'picker';
+    if (!_pickerState) _pickerState = newPickerState({ phase: 'browse' });
+    initBrowsePhase(isWslHost() ? '/mnt/' : undefined);
+    _pickerState.browseTarget = 'readonly-mount';
+  }
+
+  /** The session whose saved read-only mounts an addition joins (resume flow only). */
+  function readonlyMountResumeSessionId(): string | undefined {
+    const parked = _parkedResumePicker;
+    return parked ? parked.sessions[parked.selectedIndex]?.sessionId : undefined;
   }
 
   function enterPickerMode(personas?: PersonaSnapshot[], profiles?: ProviderProfileSnapshot[]): void {
     _cachedPersonas = personas ?? [];
     _cachedProfiles = profiles ?? [];
     _readonlyMounts = [];
+    _parkedResumePicker = null;
     showPickerMenu();
   }
 
@@ -383,10 +423,14 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
   function enterResumePickerMode(sessions: SessionSnapshot[]): void {
     _mode = 'resume-picker';
+    _readonlyMounts = [];
+    _parkedResumePicker = null;
     _resumePickerState = {
       sessions,
       selectedIndex: 0,
       scrollOffset: 0,
+      readonlyMounts: _readonlyMounts,
+      notice: null,
     };
   }
 
@@ -572,7 +616,31 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === ENTER) {
       const selected = rps.sessions[rps.selectedIndex];
       exitResumePickerMode();
-      return { kind: 'resume-spawn', sessionId: selected.sessionId, agent: selected.agent };
+      return {
+        kind: 'resume-spawn',
+        sessionId: selected.sessionId,
+        agent: selected.agent,
+        ...(_readonlyMounts.length > 0 ? { readonlyMounts: _readonlyMounts } : {}),
+      };
+    }
+
+    // Read-only folders to add to the resumed session (same hotkeys as /new).
+    if (key === PICKER_ADD_READONLY_KEY) {
+      if (_readonlyMounts.length >= MAX_READONLY_MOUNTS) {
+        rps.notice = `At most ${MAX_READONLY_MOUNTS} read-only folders`;
+        return { kind: 'redraw-picker' };
+      }
+      _parkedResumePicker = rps;
+      _resumePickerState = null;
+      _pickerState = null;
+      openReadonlyBrowse();
+      return { kind: 'redraw-picker' };
+    }
+    if (key === PICKER_REMOVE_READONLY_KEY && _readonlyMounts.length > 0) {
+      _readonlyMounts = _readonlyMounts.slice(0, -1);
+      rps.readonlyMounts = _readonlyMounts;
+      rps.notice = null;
+      return { kind: 'redraw-picker' };
     }
 
     if (key === UP) {
@@ -581,6 +649,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         if (rps.selectedIndex < rps.scrollOffset) {
           rps.scrollOffset = rps.selectedIndex;
         }
+        dropResumeAdditions(rps);
       }
       return { kind: 'redraw-picker' };
     }
@@ -588,11 +657,24 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === DOWN) {
       if (rps.selectedIndex < rps.sessions.length - 1) {
         rps.selectedIndex++;
+        dropResumeAdditions(rps);
       }
       return { kind: 'redraw-picker' };
     }
 
     return { kind: 'none' };
+  }
+
+  /**
+   * Added folders were validated against the session highlighted when they
+   * were added (its saved folders, cap); moving to another session drops them
+   * so they are never applied to a session they were not checked against.
+   */
+  function dropResumeAdditions(rps: ResumePickerState): void {
+    if (_readonlyMounts.length === 0) return;
+    _readonlyMounts = [];
+    rps.readonlyMounts = _readonlyMounts;
+    rps.notice = 'Added read-only folders cleared (different session selected)';
   }
 
   function executeMenuSelection(selection: number): MuxAction {
@@ -625,8 +707,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         ps.notice = `At most ${MAX_READONLY_MOUNTS} read-only folders`;
         return { kind: 'redraw-picker' };
       }
-      initBrowsePhase(isWslHost() ? '/mnt/' : undefined);
-      ps.browseTarget = 'readonly-mount';
+      openReadonlyBrowse();
       return { kind: 'redraw-picker' };
     }
     if (key === PICKER_REMOVE_READONLY_KEY && _readonlyMounts.length > 0) {
@@ -666,8 +747,10 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         ps.inList = false;
         return { kind: 'redraw-picker' };
       }
-      // Return to menu phase, restoring persona menu item if available
-      showPickerMenu();
+      // Back to where the browser was opened from: /resume, or the /new menu
+      // (restoring the persona menu item if available).
+      if (ps.browseTarget === 'readonly-mount') leaveReadonlyBrowse();
+      else showPickerMenu();
       return { kind: 'redraw-picker' };
     }
 
@@ -744,7 +827,10 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       if (ps.inputPath.trim()) {
         const path = ps.inputPath.replace(/\/+$/, '') || '/';
         // Read-only folders are validated by the orchestrator, like workspaces.
-        if (ps.browseTarget === 'readonly-mount') return { kind: 'picker-add-readonly', path };
+        if (ps.browseTarget === 'readonly-mount') {
+          const resumeSessionId = readonlyMountResumeSessionId();
+          return { kind: 'picker-add-readonly', path, ...(resumeSessionId ? { resumeSessionId } : {}) };
+        }
         return finishSelection(ps.persona ? { workspacePath: path, persona: ps.persona } : { workspacePath: path });
       }
       return { kind: 'redraw-picker' };
@@ -1037,6 +1123,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     },
     get resumePickerState() {
       return _resumePickerState;
+    },
+    get readonlyMounts() {
+      return _readonlyMounts;
     },
     get personaPickerState() {
       return _personaPickerState;

@@ -314,20 +314,28 @@ export function resolveReadonlyMounts(rawPaths: readonly string[]): ReadonlyMoun
   return { mounts, warnings };
 }
 
+/** Result of restoring mounts on resume, possibly with folders added. */
+export interface ReadonlyMountRestore extends ReadonlyMountResolution {
+  /** The folders newly added on this resume (empty when none were). */
+  readonly added: ReadonlyMountSpec[];
+  /**
+   * Updated list to persist when folders were added: every saved entry
+   * (including ones currently unavailable, so they return on a later resume)
+   * followed by the additions. Undefined when nothing was added.
+   */
+  readonly persist?: ReadonlyMountSpec[];
+}
+
 /**
- * Re-validates mounts persisted with a session before resume. Persisted data
- * is untrusted on-disk JSON, so the shape is checked at runtime. A directory
- * that no longer exists is dropped with a warning (the session continues);
- * any other validation failure throws, as does a malformed record.
+ * Shape-checks mounts persisted in session metadata (untrusted on-disk JSON).
+ * Throws on a malformed record; `undefined` means none were saved.
  */
-export function restoreReadonlyMounts(persisted: unknown): ReadonlyMountResolution {
-  if (persisted === undefined) return { mounts: [], warnings: [] };
+function parsePersistedMounts(persisted: unknown): ReadonlyMountSpec[] {
+  if (persisted === undefined) return [];
   if (!Array.isArray(persisted) || persisted.length > MAX_READONLY_MOUNTS) {
     throw new Error('Persisted read-only mounts are malformed');
   }
-  const guards = buildMountGuards();
-  const mounts: ReadonlyMountSpec[] = [];
-  const warnings: string[] = [];
+  const specs: ReadonlyMountSpec[] = [];
   const used = new Set<string>();
   for (const entry of persisted as unknown[]) {
     const spec = entry as Partial<ReadonlyMountSpec> | null;
@@ -340,21 +348,89 @@ export function restoreReadonlyMounts(persisted: unknown): ReadonlyMountResoluti
     ) {
       throw new Error('Persisted read-only mounts are malformed');
     }
-    let exists: boolean;
-    try {
-      exists = statSync(spec.hostPath).isDirectory();
-    } catch {
-      exists = false;
-    }
-    if (!exists) {
+    used.add(spec.containerPath);
+    specs.push({ hostPath: spec.hostPath, containerPath: spec.containerPath });
+  }
+  return specs;
+}
+
+/**
+ * Host paths of the mounts saved with a session, for display (e.g. the web
+ * UI's resume list). Malformed metadata yields an empty list here; resume
+ * itself rejects it via {@link restoreReadonlyMounts}.
+ */
+export function savedReadonlyMountHostPaths(persisted: unknown): string[] {
+  try {
+    return parsePersistedMounts(persisted).map((spec) => spec.hostPath);
+  } catch {
+    return [];
+  }
+}
+
+function isExistingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-validates mounts persisted with a session before resume, optionally
+ * adding new folders. A saved directory that no longer exists is skipped with
+ * a warning (the session continues); any other validation failure throws, as
+ * does a malformed record. Saved mounts keep their container paths so the
+ * agent's earlier references stay valid; additions get paths that avoid every
+ * saved one. The saved and added folders together are capped at
+ * {@link MAX_READONLY_MOUNTS}.
+ */
+export function restoreReadonlyMounts(
+  persisted: unknown,
+  additionalRawPaths: readonly string[] = [],
+): ReadonlyMountRestore {
+  const saved = parsePersistedMounts(persisted);
+  const guards = buildMountGuards();
+  const mounts: ReadonlyMountSpec[] = [];
+  const warnings: string[] = [];
+  for (const spec of saved) {
+    if (!isExistingDirectory(spec.hostPath)) {
       warnings.push(`Read-only mount ${spec.hostPath} is no longer available; continuing without it.`);
       continue;
     }
-    used.add(spec.containerPath);
-    // Keep the original container path so the agent's earlier references stay valid.
     mounts.push({ hostPath: validateHostDirectory(spec.hostPath, guards), containerPath: spec.containerPath });
   }
-  return { mounts, warnings };
+  if (additionalRawPaths.length === 0) return { mounts, warnings, added: [] };
+
+  const savedHostPaths = new Set(saved.map((spec) => spec.hostPath));
+  const known = new Set([...savedHostPaths, ...mounts.map((spec) => spec.hostPath)]);
+  const used = new Set(saved.map((spec) => spec.containerPath));
+  const added: ReadonlyMountSpec[] = [];
+  for (const raw of additionalRawPaths) {
+    // Already saved with the session: nothing to add. Checked before
+    // validation so a saved folder that is missing right now (e.g. an
+    // unplugged drive) is skipped like any other duplicate instead of
+    // failing the resume.
+    if (savedHostPaths.has(resolve(expandTilde(normalizeHostPathInput(raw))))) continue;
+    const hostPath = validateHostDirectory(raw, guards);
+    if (known.has(hostPath)) continue;
+    known.add(hostPath);
+    added.push({ hostPath, containerPath: assignContainerPath(hostPath, used) });
+  }
+  if (saved.length + added.length > MAX_READONLY_MOUNTS) {
+    throw new Error(
+      `At most ${MAX_READONLY_MOUNTS} read-only mounts are allowed (session has ${saved.length}, adding ${added.length})`,
+    );
+  }
+  for (const spec of added) {
+    const warning = driveRootWarning(spec.hostPath);
+    if (warning) warnings.push(warning);
+  }
+  return {
+    mounts: [...mounts, ...added],
+    warnings,
+    added,
+    ...(added.length > 0 ? { persist: [...saved, ...added] } : {}),
+  };
 }
 
 /**
