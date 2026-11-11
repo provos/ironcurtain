@@ -98,7 +98,7 @@ describe('buildSessionConfig read-only mounts', () => {
   it('rejects an unsafe path at the session boundary', () => {
     const sessionId = createSessionId();
     expect(() =>
-      buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE, readonlyMounts: ['/proc'] }),
+      buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE, readonlyMounts: ['/dev'] }),
     ).toThrow(/system directory/);
   });
 

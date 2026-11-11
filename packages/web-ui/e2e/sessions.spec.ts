@@ -59,6 +59,25 @@ test.describe('Sessions', () => {
     await expect(page.locator('[data-testid^="session-item-"]').first()).toBeVisible({ timeout: 5_000 });
   });
 
+  test('keeps Start session reachable on a small screen with many folder chips', async ({ page }) => {
+    // Navigate at desktop width (the nav moves into a drawer on phones), then shrink.
+    await navigateTo(page, 'Sessions');
+    await page.setViewportSize({ width: 375, height: 667 });
+    await openNewSessionDialog(page);
+
+    const input = page.getByTestId('launch-readonly-input');
+    for (let i = 1; i <= 8; i++) {
+      await input.fill(`/mnt/d/datasets/folder-with-a-long-name-${i}`);
+      await input.press('Enter');
+    }
+    await expect(page.getByTestId('launch-readonly-chip')).toHaveCount(8);
+
+    const start = page.getByTestId('launch-start');
+    await expect(start).toBeInViewport();
+    await start.click();
+    await expect(page.getByRole('dialog', { name: 'New session' })).toBeHidden();
+  });
+
   test('collapses the session list to a rail', async ({ page }) => {
     await createDefaultSession(page);
     await page.getByTestId('sidebar-collapse').click();

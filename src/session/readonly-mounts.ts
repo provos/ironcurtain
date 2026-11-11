@@ -136,6 +136,54 @@ function overlaps(a: string, b: string): boolean {
   return isEqualOrInside(a, b) || isEqualOrInside(b, a);
 }
 
+/** Device + inode of an existing path (following symlinks), else undefined. */
+function identityOf(path: string): string | undefined {
+  try {
+    const stat = statSync(path, { bigint: true });
+    return `${stat.dev}:${stat.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Identities of `path` and each existing ancestor (walks up, never into the tree). */
+function ancestorIdentities(path: string): Set<string> {
+  const ids = new Set<string>();
+  for (let current = path; ; current = dirname(current)) {
+    const id = identityOf(current);
+    if (id !== undefined) ids.add(id);
+    if (dirname(current) === current) return ids;
+  }
+}
+
+/**
+ * A path plus its filesystem identity chain. Comparing identities as well as
+ * strings catches aliases that string checks miss: case variants on
+ * case-insensitive filesystems that keep the typed case (WSL DrvFS `/mnt/d`),
+ * and bind-mounted views of the same directory.
+ */
+interface IdentifiedPath {
+  readonly path: string;
+  /** Identity of the path itself; undefined when it does not exist. */
+  readonly id: string | undefined;
+  /** Identities of the path and all its existing ancestors. */
+  readonly chain: ReadonlySet<string>;
+}
+
+function identify(path: string): IdentifiedPath {
+  return { path, id: identityOf(path), chain: ancestorIdentities(path) };
+}
+
+/** True when `inner` is equal to or inside `outer`, by path or by identity. */
+function isWithin(inner: IdentifiedPath, outer: IdentifiedPath): boolean {
+  return isEqualOrInside(inner.path, outer.path) || (outer.id !== undefined && inner.chain.has(outer.id));
+}
+
+/** True when either path is equal to or inside the other, by path or by identity. */
+function overlapsIdentified(a: IdentifiedPath, b: IdentifiedPath): boolean {
+  return isWithin(a, b) || isWithin(b, a);
+}
+
 /**
  * Canonical path using the OS realpath, which also normalizes letter case on
  * case-insensitive filesystems (macOS) -- the JS realpath keeps the typed case,
@@ -150,13 +198,17 @@ function canonicalPath(path: string): string {
   }
 }
 
-/** Canonical guard paths, computed once per validation batch. */
+/** Canonical guard paths with identities, computed once per validation batch. */
 interface MountGuards {
-  readonly home: string;
+  readonly home: IdentifiedPath;
   /** IronCurtain-held secrets that must never be visible inside the container. */
-  readonly secretRoots: readonly string[];
-  readonly systemRoots: readonly string[];
-  readonly socketParentRoots: readonly string[];
+  readonly secretRoots: readonly IdentifiedPath[];
+  readonly systemRoots: readonly IdentifiedPath[];
+  readonly socketParentRoots: readonly IdentifiedPath[];
+}
+
+function identifyGuard(path: string): IdentifiedPath {
+  return identify(canonicalPath(path));
 }
 
 function buildMountGuards(): MountGuards {
@@ -164,7 +216,7 @@ function buildMountGuards(): MountGuards {
   // absent file does not block mounting the directory the user is in.
   const envFile = resolve('.env');
   return {
-    home: canonicalPath(homedir()),
+    home: identifyGuard(homedir()),
     secretRoots: [
       getIronCurtainHome(),
       getUserConfigPath(),
@@ -172,9 +224,9 @@ function buildMountGuards(): MountGuards {
       resolve(homedir(), '.claude'),
       dirname(dirname(getAnthropicCredentialsFilePath())),
       dirname(getCodexAuthFilePath()),
-    ].map(canonicalPath),
-    systemRoots: SYSTEM_ROOTS.map(canonicalPath),
-    socketParentRoots: SOCKET_PARENT_ROOTS.map(canonicalPath),
+    ].map(identifyGuard),
+    systemRoots: SYSTEM_ROOTS.map(identifyGuard),
+    socketParentRoots: SOCKET_PARENT_ROOTS.map(identifyGuard),
   };
 }
 
@@ -201,21 +253,24 @@ function validateHostDirectory(raw: string, guards: MountGuards): string {
   // Docker's `-v src:dst:ro` format has no escaping for ':'.
   if (canonical.includes(':')) throw new Error(`Read-only mount path must not contain ':': ${canonical}`);
   if (canonical === '/') throw new Error('Cannot mount the root directory');
-  if (canonical === guards.home) {
+  const candidate = identify(canonical);
+  if (candidate.path === guards.home.path || (candidate.id !== undefined && candidate.id === guards.home.id)) {
     throw new Error('Cannot mount the home directory (it contains IronCurtain and agent credentials)');
   }
 
-  const secret = guards.secretRoots.find((root) => overlaps(canonical, root));
-  if (secret) throw new Error(`Read-only mount ${canonical} would expose IronCurtain credentials or state (${secret})`);
-  const system = guards.systemRoots.find((root) => overlaps(canonical, root));
-  if (system) throw new Error(`Read-only mount ${canonical} overlaps system directory ${system}`);
+  const secret = guards.secretRoots.find((root) => overlapsIdentified(candidate, root));
+  if (secret) {
+    throw new Error(`Read-only mount ${canonical} would expose IronCurtain credentials or state (${secret.path})`);
+  }
+  const system = guards.systemRoots.find((root) => overlapsIdentified(candidate, root));
+  if (system) throw new Error(`Read-only mount ${canonical} overlaps system directory ${system.path}`);
   for (const root of guards.socketParentRoots) {
-    if (isEqualOrInside(root, canonical)) {
-      throw new Error(`Read-only mount ${canonical} contains ${root}, which may hold host sockets`);
+    if (isWithin(root, candidate)) {
+      throw new Error(`Read-only mount ${canonical} contains ${root.path}, which may hold host sockets`);
     }
-    const entry = isEqualOrInside(canonical, root) ? canonical.slice(root.length + 1).split('/')[0] : '';
+    const entry = isEqualOrInside(canonical, root.path) ? canonical.slice(root.path.length + 1).split('/')[0] : '';
     if (TMP_SOCKET_ENTRY.test(entry)) {
-      throw new Error(`Read-only mount ${canonical} is inside ${root}/${entry}, which holds host sockets`);
+      throw new Error(`Read-only mount ${canonical} is inside ${root.path}/${entry}, which holds host sockets`);
     }
   }
   return canonical;

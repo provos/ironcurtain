@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildReadonlyMounts } from '../src/docker/container-workspace.js';
@@ -116,8 +116,8 @@ describe('resolveReadonlyMounts', () => {
   });
 
   it('rejects socket-bearing system directories', () => {
-    expect(() => resolveReadonlyMounts(['/run'])).toThrow(/system directory/);
-    expect(() => resolveReadonlyMounts(['/proc'])).toThrow(/system directory/);
+    // /dev and /var exist on both Linux and macOS (/proc and /run are Linux-only).
+    expect(() => resolveReadonlyMounts(['/dev'])).toThrow(/system directory/);
     expect(() => resolveReadonlyMounts(['/var'])).toThrow(/system directory/);
     expect(() => resolveReadonlyMounts(['/tmp'])).toThrow();
     expect(() => resolveReadonlyMounts(['/var/tmp'])).toThrow(/host sockets/);
@@ -146,6 +146,14 @@ describe('resolveReadonlyMounts', () => {
       rmSync(socketDir, { recursive: true, force: true });
     }
     expect(() => resolveReadonlyMounts([dir('dataset')])).not.toThrow();
+  });
+
+  // DrvFS keeps the typed letter case, so only identity comparison catches
+  // `/mnt/c/WINDOWS` aliasing a `/mnt/c/Windows` guard. Runs only under WSL.
+  it.skipIf(!existsSync('/mnt/c/Windows'))('rejects case-variant aliases of a guard on case-insensitive DrvFS', () => {
+    process.env.IRONCURTAIN_HOME = '/mnt/c/Windows';
+    expect(() => resolveReadonlyMounts(['/mnt/c/WINDOWS'])).toThrow(/IronCurtain credentials or state/);
+    expect(() => resolveReadonlyMounts(['/mnt/c'])).toThrow(/IronCurtain credentials or state/);
   });
 
   it('enforces the mount count limit', () => {
@@ -191,7 +199,7 @@ describe('restoreReadonlyMounts', () => {
   });
 
   it('rejects a persisted path that is now unsafe', () => {
-    expect(() => restoreReadonlyMounts([{ hostPath: '/run', containerPath: '/mnt/ro/run' }])).toThrow(
+    expect(() => restoreReadonlyMounts([{ hostPath: '/dev', containerPath: '/mnt/ro/dev' }])).toThrow(
       /system directory/,
     );
   });

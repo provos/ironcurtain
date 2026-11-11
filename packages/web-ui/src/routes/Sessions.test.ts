@@ -173,19 +173,41 @@ describe('Sessions create flow guards', () => {
   });
 
   it('collapses the session list to a rail and remembers it', async () => {
-    localStorage.removeItem('ic-sessions-sidebar-collapsed');
-    const rendered = render(Sessions);
+    // In-memory storage: Node 26 shadows jsdom's localStorage with its own
+    // global, which is undefined without --localstorage-file.
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    });
+    try {
+      const rendered = render(Sessions);
 
-    await fireEvent.click(screen.getByTestId('sidebar-collapse'));
-    expect(screen.getByTestId('session-rail')).toBeTruthy();
-    expect(localStorage.getItem('ic-sessions-sidebar-collapsed')).toBe('1');
+      await fireEvent.click(screen.getByTestId('sidebar-collapse'));
+      expect(screen.getByTestId('session-rail')).toBeTruthy();
+      expect(store.get('ic-sessions-sidebar-collapsed')).toBe('1');
 
-    rendered.unmount();
-    render(Sessions);
-    expect(screen.getByTestId('session-rail')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('sidebar-expand'));
-    expect(screen.getByTestId('session-sidebar')).toBeTruthy();
-    localStorage.removeItem('ic-sessions-sidebar-collapsed');
+      rendered.unmount();
+      render(Sessions);
+      expect(screen.getByTestId('session-rail')).toBeTruthy();
+      await fireEvent.click(screen.getByTestId('sidebar-expand'));
+      expect(screen.getByTestId('session-sidebar')).toBeTruthy();
+      expect(store.get('ic-sessions-sidebar-collapsed')).toBe('0');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('still collapses when storage is unavailable', async () => {
+    vi.stubGlobal('localStorage', undefined);
+    try {
+      render(Sessions);
+      await fireEvent.click(screen.getByTestId('sidebar-collapse'));
+      expect(screen.getByTestId('session-rail')).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows an upgrade/restart message when daemon status omits sessionMode', async () => {

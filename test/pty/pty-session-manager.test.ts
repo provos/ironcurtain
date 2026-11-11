@@ -1385,7 +1385,7 @@ describe('sessions.create (docker) read-only mounts', () => {
       async () => new StubBridge() as unknown as PtyBridge,
     );
     await expect(
-      sessionDispatch(makeCtx(createBridge), 'sessions.create', { readonlyMounts: ['/proc'] }),
+      sessionDispatch(makeCtx(createBridge), 'sessions.create', { readonlyMounts: ['/dev'] }),
     ).rejects.toThrow(/system directory/);
     expect(createBridge).not.toHaveBeenCalled();
   });

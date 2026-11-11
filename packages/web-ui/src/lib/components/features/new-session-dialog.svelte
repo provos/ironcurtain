@@ -101,9 +101,11 @@
     'mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring';
 </script>
 
-<Modal {open} {onclose} title="New session" class="max-w-xl">
-  <form data-testid="session-launch-form" onsubmit={handleSubmit}>
-    <div class="space-y-4 px-5 py-4">
+<!-- Height-capped with a scrolling body so Start session stays reachable on
+     small screens (e.g. 375x667 with many folder chips). -->
+<Modal {open} {onclose} title="New session" class="flex max-h-[85dvh] max-w-xl flex-col">
+  <form data-testid="session-launch-form" class="flex min-h-0 flex-1 flex-col" onsubmit={handleSubmit}>
+    <div data-testid="launch-body" class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <label class="block min-w-0">
           <span class="text-xs text-muted-foreground">Persona</span>
@@ -206,7 +208,7 @@
       {/if}
     </div>
 
-    <div class="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+    <div class="flex shrink-0 items-center justify-end gap-2 border-t border-border px-5 py-3">
       <Button type="button" variant="ghost" size="sm" onclick={onclose}>Cancel</Button>
       <Button data-testid="launch-start" type="submit" size="sm" loading={creating}>
         {creating ? 'Starting...' : 'Start session'}
