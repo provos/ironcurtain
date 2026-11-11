@@ -601,6 +601,23 @@ describe('MuxInputHandler', () => {
       expect(handler.mode).toBe('resume-picker');
     });
 
+    it('drops added folders when a different session is selected', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('r');
+      handler.setReadonlyMounts(['/data/ref']);
+      handler.handleKey('UP'); // already at the top: selection unchanged
+      expect(handler.resumePickerState?.readonlyMounts).toEqual(['/data/ref']);
+
+      handler.handleKey('DOWN');
+      expect(handler.resumePickerState?.readonlyMounts).toEqual([]);
+      expect(handler.resumePickerState?.notice).toMatch(/cleared/);
+      expect(handler.handleKey('ENTER')).toEqual({
+        kind: 'resume-spawn',
+        sessionId: 'session-bbb',
+        agent: 'claude-code',
+      });
+    });
+
     it('removes the last added folder with x and resets on a new /resume', () => {
       const handler = enterResumePicker();
       handler.handleKey('r');

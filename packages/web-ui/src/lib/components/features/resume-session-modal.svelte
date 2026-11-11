@@ -32,10 +32,18 @@
     onresume: (sessionId: string, readonlyMounts?: string[]) => void;
   } = $props();
 
-  // Folders to add on resume. The modal body unmounts when closed, so these
-  // reset each time the dialog opens.
+  // Folders to add on resume. This component stays mounted while the dialog
+  // is closed, so clear them each time it opens: choices for one resume must
+  // not carry over to the next. (A failed resume keeps the dialog open, so the
+  // folders survive a retry.)
   let addedFolders = $state<string[]>([]);
   let folderDraft = $state('');
+  $effect(() => {
+    if (open) {
+      addedFolders = [];
+      folderDraft = '';
+    }
+  });
 
   function close(): void {
     if (resumingId === null) onclose();

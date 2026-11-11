@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as loggerModule from '../src/logger.js';
 import { REAL_TMP, TEST_SANDBOX_DIR } from './fixtures/test-policy.js';
@@ -13,6 +13,7 @@ import { buildSessionConfig } from '../src/session/index.js';
 import { loadSessionMetadata } from '../src/session/session-metadata.js';
 import { createSessionId, type SessionMode } from '../src/session/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
+import { getSessionDir, SESSION_METADATA_FILENAME } from '../src/config/paths.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 
 const TEST_ROOT = `${REAL_TMP}/ironcurtain-ro-mounts-session-test-${process.pid}`;
@@ -123,6 +124,22 @@ describe('buildSessionConfig read-only mounts', () => {
       resumeSessionId: sessionId,
     });
     expect(again.readonlyMounts).toEqual(expected);
+  });
+
+  it('still resumes with added folders when the saved metadata is unreadable', () => {
+    const extra = resolve(TEST_ROOT, 'extra');
+    mkdirSync(extra, { recursive: true });
+    const sessionId = createSessionId();
+    mkdirSync(getSessionDir(sessionId), { recursive: true });
+    writeFileSync(resolve(getSessionDir(sessionId), SESSION_METADATA_FILENAME), '{not json');
+
+    const resumed = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+      readonlyMounts: [extra],
+    });
+
+    expect(resumed.readonlyMounts).toEqual([{ hostPath: extra, containerPath: '/mnt/ro/extra' }]);
   });
 
   it('rejects an unsafe folder added on resume', () => {

@@ -196,6 +196,7 @@ describe('restoreReadonlyMounts', () => {
         { hostPath: added, containerPath: '/mnt/ro/data-2' },
       ]);
       expect(result.persist).toEqual(result.mounts);
+      expect(result.added).toEqual([{ hostPath: added, containerPath: '/mnt/ro/data-2' }]);
     });
 
     it('avoids the container path of a saved folder that is currently missing, and keeps it saved', () => {
@@ -215,6 +216,22 @@ describe('restoreReadonlyMounts', () => {
       const result = restoreReadonlyMounts([{ hostPath: saved, containerPath: '/mnt/ro/data' }], [`${saved}/`]);
       expect(result.mounts).toEqual([{ hostPath: saved, containerPath: '/mnt/ro/data' }]);
       expect(result.persist).toBeUndefined();
+      expect(result.added).toEqual([]);
+    });
+
+    it('skips re-adding a saved folder that is currently missing instead of failing', () => {
+      const gone = join(tempDir, 'unplugged');
+      const extra = mkdir('extra');
+      const result = restoreReadonlyMounts([{ hostPath: gone, containerPath: '/mnt/ro/unplugged' }], [gone, extra]);
+      expect(result.added).toEqual([{ hostPath: extra, containerPath: '/mnt/ro/extra' }]);
+      expect(result.mounts).toEqual([{ hostPath: extra, containerPath: '/mnt/ro/extra' }]);
+      expect(result.warnings[0]).toMatch(/no longer available/);
+    });
+
+    it('adds a folder given twice only once', () => {
+      const extra = mkdir('extra');
+      const result = restoreReadonlyMounts(undefined, [extra, `${extra}/`]);
+      expect(result.added).toEqual([{ hostPath: extra, containerPath: '/mnt/ro/extra' }]);
     });
 
     it('counts saved folders, including missing ones, toward the limit', () => {
@@ -231,7 +248,7 @@ describe('restoreReadonlyMounts', () => {
   });
 
   it('returns nothing when no mounts were persisted', () => {
-    expect(restoreReadonlyMounts(undefined)).toEqual({ mounts: [], warnings: [] });
+    expect(restoreReadonlyMounts(undefined)).toEqual({ mounts: [], warnings: [], added: [] });
   });
 
   it('keeps existing mounts with their original container path', () => {

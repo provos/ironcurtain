@@ -649,6 +649,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         if (rps.selectedIndex < rps.scrollOffset) {
           rps.scrollOffset = rps.selectedIndex;
         }
+        dropResumeAdditions(rps);
       }
       return { kind: 'redraw-picker' };
     }
@@ -656,11 +657,24 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === DOWN) {
       if (rps.selectedIndex < rps.sessions.length - 1) {
         rps.selectedIndex++;
+        dropResumeAdditions(rps);
       }
       return { kind: 'redraw-picker' };
     }
 
     return { kind: 'none' };
+  }
+
+  /**
+   * Added folders were validated against the session highlighted when they
+   * were added (its saved folders, cap); moving to another session drops them
+   * so they are never applied to a session they were not checked against.
+   */
+  function dropResumeAdditions(rps: ResumePickerState): void {
+    if (_readonlyMounts.length === 0) return;
+    _readonlyMounts = [];
+    rps.readonlyMounts = _readonlyMounts;
+    rps.notice = 'Added read-only folders cleared (different session selected)';
   }
 
   function executeMenuSelection(selection: number): MuxAction {

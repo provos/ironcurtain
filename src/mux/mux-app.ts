@@ -294,11 +294,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         try {
           if (action.resumeSessionId) {
             const saved = loadSessionMetadata(action.resumeSessionId)?.readonlyMounts ?? [];
-            const { persist, warnings } = restoreReadonlyMounts(saved, [...existing, action.path]);
-            const additions = (persist ?? []).slice(saved.length).map((m) => m.hostPath);
-            const duplicate = additions.length === existing.length;
+            const { added, warnings } = restoreReadonlyMounts(saved, [...existing, action.path]);
+            // No new entry means the path was already chosen or saved.
+            const duplicate = added.length === existing.length;
             inputHandler.setReadonlyMounts(
-              additions,
+              added.map((m) => m.hostPath),
               [duplicate ? `Already included: ${action.path}` : '', ...warnings].filter(Boolean).join(' ') || undefined,
             );
           } else {

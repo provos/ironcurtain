@@ -60,6 +60,24 @@ describe('ResumeSessionModal', () => {
     expect(onresume).toHaveBeenCalledWith('saved-session-1234', ['/mnt/d/Reference', '/data/typed-not-added']);
   });
 
+  it('clears added folders when the dialog is closed and reopened', async () => {
+    const onresume = vi.fn();
+    const rendered = render(ResumeSessionModal, { props: props({ onresume }) });
+    const input = screen.getByTestId('resume-readonly-input');
+    await fireEvent.input(input, { target: { value: '/mnt/d/Reference' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.input(input, { target: { value: '/data/draft' } });
+    expect(screen.getAllByTestId('resume-readonly-chip')).toHaveLength(1);
+
+    await rendered.rerender(props({ onresume, open: false }));
+    await rendered.rerender(props({ onresume, open: true }));
+
+    expect(screen.queryAllByTestId('resume-readonly-chip')).toHaveLength(0);
+    expect((screen.getByTestId('resume-readonly-input') as HTMLInputElement).value).toBe('');
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume Claude Code session' }));
+    expect(onresume).toHaveBeenCalledWith('saved-session-1234', undefined);
+  });
+
   it('hides the folder field when there is nothing to resume', () => {
     render(ResumeSessionModal, { props: props({ sessions: [] }) });
     expect(screen.queryByTestId('resume-readonly-input')).toBeNull();

@@ -302,8 +302,7 @@ async function resumePtySession(
   if (rawReadonlyMounts && rawReadonlyMounts.length > 0) {
     const saved = loadSessionMetadata(snapshot.sessionId)?.readonlyMounts ?? [];
     try {
-      const { persist } = restoreReadonlyMounts(saved, rawReadonlyMounts);
-      readonlyMounts = (persist ?? []).slice(saved.length).map((m) => m.hostPath);
+      readonlyMounts = restoreReadonlyMounts(saved, rawReadonlyMounts).added.map((m) => m.hostPath);
     } catch (err) {
       throw new RpcError('INVALID_PARAMS', errorMessage(err));
     }

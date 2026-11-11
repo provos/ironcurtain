@@ -316,6 +316,8 @@ export function resolveReadonlyMounts(rawPaths: readonly string[]): ReadonlyMoun
 
 /** Result of restoring mounts on resume, possibly with folders added. */
 export interface ReadonlyMountRestore extends ReadonlyMountResolution {
+  /** The folders newly added on this resume (empty when none were). */
+  readonly added: ReadonlyMountSpec[];
   /**
    * Updated list to persist when folders were added: every saved entry
    * (including ones currently unavailable, so they return on a later resume)
@@ -397,13 +399,21 @@ export function restoreReadonlyMounts(
     }
     mounts.push({ hostPath: validateHostDirectory(spec.hostPath, guards), containerPath: spec.containerPath });
   }
-  if (additionalRawPaths.length === 0) return { mounts, warnings };
+  if (additionalRawPaths.length === 0) return { mounts, warnings, added: [] };
 
-  const known = new Set([...saved.map((spec) => spec.hostPath), ...mounts.map((spec) => spec.hostPath)]);
+  const savedHostPaths = new Set(saved.map((spec) => spec.hostPath));
+  const known = new Set([...savedHostPaths, ...mounts.map((spec) => spec.hostPath)]);
   const used = new Set(saved.map((spec) => spec.containerPath));
   const added: ReadonlyMountSpec[] = [];
-  for (const hostPath of new Set(additionalRawPaths.map((raw) => validateHostDirectory(raw, guards)))) {
+  for (const raw of additionalRawPaths) {
+    // Already saved with the session: nothing to add. Checked before
+    // validation so a saved folder that is missing right now (e.g. an
+    // unplugged drive) is skipped like any other duplicate instead of
+    // failing the resume.
+    if (savedHostPaths.has(resolve(expandTilde(normalizeHostPathInput(raw))))) continue;
+    const hostPath = validateHostDirectory(raw, guards);
     if (known.has(hostPath)) continue;
+    known.add(hostPath);
     added.push({ hostPath, containerPath: assignContainerPath(hostPath, used) });
   }
   if (saved.length + added.length > MAX_READONLY_MOUNTS) {
@@ -418,6 +428,7 @@ export function restoreReadonlyMounts(
   return {
     mounts: [...mounts, ...added],
     warnings,
+    added,
     ...(added.length > 0 ? { persist: [...saved, ...added] } : {}),
   };
 }
