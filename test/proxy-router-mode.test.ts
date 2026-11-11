@@ -17,12 +17,13 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, mkdirSync, 
 import { tmpdir } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findTsxBin } from './helpers/tsx-bin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..');
 const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
-const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
+const tsxBin = findTsxBin(projectRoot);
 
 /**
  * Writes a minimal compiled-policy + tool-annotations pair into a
