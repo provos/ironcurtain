@@ -18,6 +18,9 @@ import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
 import { formatModeLine, resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
+import { resolveReadonlyMounts, restoreReadonlyMounts } from './session/readonly-mounts.js';
+import { loadSessionMetadata } from './session/session-metadata.js';
+import { errorMessage } from './utils/error-message.js';
 import { shouldAutoSaveMemory } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
 import type { AgentImageResolution } from './docker/docker-infrastructure.js';
@@ -36,6 +39,11 @@ const startSpec: CommandSpec = {
       placeholder: '<name>',
     },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
+    {
+      flag: 'mount-ro',
+      description: 'Mount a host directory read-only at /mnt/ro/<name> (repeatable; container mode only)',
+      placeholder: '<path>',
+    },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     {
       flag: 'pty',
@@ -58,6 +66,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --agent builtin              # Local builtin REPL',
     'ironcurtain start --resume <session-id>        # Resume a non-mux session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
+    'ironcurtain start --mount-ro /mnt/d/Training "task" # Read-only reference folder',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
     'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
@@ -76,6 +85,7 @@ export async function main(args?: string[]): Promise<void> {
         resume: { type: 'string', short: 'r' },
         agent: { type: 'string', short: 'a' },
         workspace: { type: 'string', short: 'w' },
+        'mount-ro': { type: 'string', multiple: true },
         persona: { type: 'string', short: 'p' },
         pty: { type: 'boolean' },
         model: { type: 'string', short: 'm' },
@@ -111,6 +121,7 @@ export async function main(args?: string[]): Promise<void> {
   const resumeSessionId = values.resume as string | undefined;
   const agentName = values.agent as string | undefined;
   const rawWorkspace = values.workspace as string | undefined;
+  const rawReadonlyMounts = (values['mount-ro'] as string[] | undefined) ?? [];
   const personaName = values.persona as string | undefined;
   const providerProfileName = values['provider-profile'] as string | undefined;
   const modelOverride = values.model as string | undefined;
@@ -133,6 +144,11 @@ export async function main(args?: string[]): Promise<void> {
   if (resumeSessionId && rawWorkspace) {
     process.stderr.write(chalk.yellow('Note: --workspace is ignored when resuming; original workspace is restored.\n'));
   }
+  if (resumeSessionId && rawReadonlyMounts.length > 0) {
+    process.stderr.write(
+      chalk.yellow('Note: --mount-ro is ignored when resuming; original read-only mounts are restored.\n'),
+    );
+  }
   if (resumeSessionId && personaName) {
     process.stderr.write(chalk.yellow('Note: --persona is ignored when resuming; original persona is restored.\n'));
   }
@@ -149,6 +165,24 @@ export async function main(args?: string[]): Promise<void> {
       workspacePath = validateWorkspacePath(rawWorkspace, config.protectedPaths);
     } catch (error) {
       process.stderr.write(chalk.red(`Invalid workspace: ${error instanceof Error ? error.message : String(error)}\n`));
+      process.exit(1);
+    }
+  }
+
+  // Fail fast before image preparation; buildSessionConfig re-validates as the
+  // authoritative boundary (and PTY mode prints its warnings from there).
+  const readonlyMounts = rawReadonlyMounts.length > 0 && !resumeSessionId ? rawReadonlyMounts : undefined;
+  // Resume re-validates the persisted mounts the same way (a vanished folder
+  // only warns).
+  const persistedMounts = resumeSessionId ? loadSessionMetadata(resumeSessionId)?.readonlyMounts : undefined;
+  if (readonlyMounts || persistedMounts) {
+    try {
+      const { warnings } = readonlyMounts
+        ? resolveReadonlyMounts(readonlyMounts)
+        : restoreReadonlyMounts(persistedMounts);
+      if (!values.pty) for (const warning of warnings) process.stderr.write(chalk.yellow(`Warning: ${warning}\n`));
+    } catch (error) {
+      process.stderr.write(chalk.red(`Invalid read-only mount: ${errorMessage(error)}\n`));
       process.exit(1);
     }
   }
@@ -179,6 +213,13 @@ export async function main(args?: string[]): Promise<void> {
   // (Code Mode) agent never reaches profile resolution. Warn on a harmless
   // no-op rather than silently ignoring the flag. Skip on resume (already
   // warned above that the flag is ignored).
+  if (readonlyMounts && mode.kind !== 'docker') {
+    process.stderr.write(
+      chalk.red('--mount-ro requires container agent mode; the builtin (Code Mode) agent cannot use it.\n'),
+    );
+    process.exit(1);
+  }
+
   if (providerProfileName && !resumeSessionId && mode.kind !== 'docker') {
     process.stderr.write(
       chalk.yellow(
@@ -236,6 +277,7 @@ export async function main(args?: string[]): Promise<void> {
       config,
       mode,
       workspacePath,
+      readonlyMounts,
       resumeSessionId,
       persona: resumeSessionId ? undefined : personaName,
       providerProfileName: resumeSessionId ? undefined : providerProfileName,
@@ -266,6 +308,7 @@ export async function main(args?: string[]): Promise<void> {
       resumeSessionId,
       // workspacePath is already undefined when resuming (validation skipped above)
       workspacePath,
+      readonlyMounts,
       persona: resumeSessionId ? undefined : personaName,
       providerProfileName: resumeSessionId ? undefined : providerProfileName,
       captureTracesOverride,

@@ -42,6 +42,13 @@ import type { PersonaDefinition } from '../persona/types.js';
 import { createJobId } from '../cron/types.js';
 import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
+import {
+  formatReadonlyMountsPrompt,
+  resolveReadonlyMounts,
+  restoreReadonlyMounts,
+  type ReadonlyMountResolution,
+  type ReadonlyMountSpec,
+} from './readonly-mounts.js';
 import { SessionError } from '../types/errors.js';
 import {
   saveSessionMetadata,
@@ -310,9 +317,12 @@ async function createDockerSession(
           recordedAgentName: agentId,
         },
         undefined, // scriptsDir
-        options.preparedDockerImageResolution
-          ? { preparedImageResolution: options.preparedDockerImageResolution }
-          : undefined,
+        {
+          ...(options.preparedDockerImageResolution
+            ? { preparedImageResolution: options.preparedDockerImageResolution }
+            : {}),
+          readonlyMounts: sessionConfig.readonlyMounts,
+        },
         options.providerProfileName,
       );
       // Standalone sessions use their bundle for the session's entire
@@ -435,6 +445,10 @@ export interface SessionDirConfig {
   systemPromptAugmentation?: string;
   /** Memory MCP gate decision derived from persona/job/userConfig. */
   memoryEnabled: boolean;
+  /** Read-only extra mounts for the Docker agent container (restored on resume). */
+  readonlyMounts: readonly ReadonlyMountSpec[];
+  /** User-facing warnings about the mounts (e.g. a directory gone since the session was created). */
+  readonlyMountWarnings: readonly string[];
   /**
    * Skills resolved via user → persona → workflow last-wins. Always
    * `[]` in borrow mode — staging happened in-place via
@@ -489,6 +503,7 @@ export function buildSessionConfig(
     SessionOptions,
     | 'resumeSessionId'
     | 'workspacePath'
+    | 'readonlyMounts'
     | 'providerProfileName'
     | 'policyDir'
     | 'disableAutoApprove'
@@ -699,6 +714,26 @@ export function buildSessionConfig(
   // Patch MCP server args to use the session-specific sandbox directory
   applyAllowedDirectoryToMcpArgs(sessionConfig.mcpServers, sandboxDir);
 
+  // Read-only extra mounts (standalone Docker sessions only). This is the
+  // validation boundary: resume restores and re-validates the persisted set,
+  // a fresh session validates the caller's raw paths.
+  let readonlyMountResolution: ReadonlyMountResolution = { mounts: [], warnings: [] };
+  if (opts.mode?.kind === 'docker' && !borrowInfra) {
+    readonlyMountResolution = resumeSessionId
+      ? restoreReadonlyMounts(loadSessionMetadata(resumeSessionId)?.readonlyMounts)
+      : resolveReadonlyMounts(opts.readonlyMounts ?? []);
+  }
+  const { mounts: readonlyMounts, warnings: readonlyMountWarnings } = readonlyMountResolution;
+  for (const mount of readonlyMounts) logger.info(`Read-only mount: ${mount.hostPath} -> ${mount.containerPath}`);
+  for (const warning of readonlyMountWarnings) logger.warn(warning);
+  // Only resume warnings (a vanished mount) change what the agent can see.
+  const readonlyMountsPrompt = formatReadonlyMountsPrompt(readonlyMounts, resumeSessionId ? readonlyMountWarnings : []);
+  if (readonlyMountsPrompt) {
+    systemPromptAugmentation = systemPromptAugmentation
+      ? `${systemPromptAugmentation}\n\n${readonlyMountsPrompt}`
+      : readonlyMountsPrompt;
+  }
+
   // Create-once writes preserve existing settings and initialize legacy
   // sessions whose metadata is missing, including on resume. Fresh workload
   // admission can then merge its new lease identity into this record.
@@ -710,6 +745,7 @@ export function buildSessionConfig(
     createdAt: new Date().toISOString(),
     ...(opts.persona ? { persona: opts.persona } : {}),
     ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+    ...(readonlyMounts.length > 0 ? { readonlyMounts } : {}),
     ...(resolvedProfileName ? { providerProfileName: resolvedProfileName } : {}),
     // Only store policyDir when no persona is set (persona derives its own).
     ...(!opts.persona && policyDir ? { policyDir } : {}),
@@ -751,6 +787,8 @@ export function buildSessionConfig(
     auditLogPath,
     systemPromptAugmentation,
     memoryEnabled,
+    readonlyMounts,
+    readonlyMountWarnings,
     resolvedSkills: borrowInfra ? [] : resolvedSkills,
   };
 }

@@ -20,6 +20,8 @@ import {
   calculateLayout,
   isPickerMode,
   isBottomPanelPicker,
+  PICKER_ADD_READONLY_KEY,
+  PICKER_REMOVE_READONLY_KEY,
   type InputMode,
   type Layout,
   type MuxTab,
@@ -841,7 +843,13 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
   function drawPickerMenu(ps: PickerState, startY: number, totalRows: number): void {
     const hasPersonas = ps.menuItemCount >= 3;
-    const menuHeight = hasPersonas ? 5 : 4;
+    const optionRows = hasPersonas ? 3 : 2;
+    // Read-only folder lines below the box: one hint row, one row per chosen
+    // folder, and an optional notice -- trimmed to the available space.
+    const boxRows = optionRows + 2; // options + top/bottom border
+    const noticeRows = ps.notice ? 1 : 0;
+    const mountRows = Math.min(ps.readonlyMounts.length, Math.max(0, totalRows - boxRows - 1 - noticeRows));
+    const menuHeight = boxRows + 1 + mountRows + noticeRows;
     const topPad = Math.max(0, Math.floor((totalRows - menuHeight) / 2));
 
     for (let y = startY; y < startY + totalRows; y++) {
@@ -862,10 +870,31 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     }
 
     // Bottom border
-    const bottomY = hasPersonas ? y0 + 4 : y0 + 3;
+    const bottomY = y0 + optionRows + 1;
     clearLine(bottomY);
     moveTo(2, bottomY);
     term.cyan('\u2514' + '\u2500'.repeat(boxWidth) + '\u2518');
+
+    let y = bottomY + 1;
+    moveTo(2, y);
+    term.bgWhite.black(` ${PICKER_ADD_READONLY_KEY} `);
+    term.styleReset();
+    term.dim(' add read-only folder');
+    if (ps.readonlyMounts.length > 0) {
+      term('  ');
+      term.bgWhite.black(` ${PICKER_REMOVE_READONLY_KEY} `);
+      term.styleReset();
+      term.dim(' remove last');
+    }
+    y++;
+    for (const mount of ps.readonlyMounts.slice(0, mountRows)) {
+      moveTo(4, y++);
+      term.yellow(truncate(`ro: ${mount}`, _cols - 6));
+    }
+    if (ps.notice) {
+      moveTo(2, y);
+      term.yellow(truncate(ps.notice, _cols - 4));
+    }
 
     term.styleReset();
   }
@@ -880,8 +909,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     // Path input line — render with visible cursor block
     clearLine(currentY);
     moveTo(2, currentY);
-    term.cyan('Path: ');
-    const pathPrefix = 'Path: ';
+    const pathPrefix = ps.browseTarget === 'readonly-mount' ? 'Read-only folder: ' : 'Path: ';
+    term.cyan(pathPrefix);
     const beforeCursor = ps.inputPath.slice(0, ps.cursorPos);
     const cursorChar = ps.cursorPos < ps.inputPath.length ? ps.inputPath[ps.cursorPos] : ' ';
     const afterCursor = ps.cursorPos < ps.inputPath.length ? ps.inputPath.slice(ps.cursorPos + 1) : '';

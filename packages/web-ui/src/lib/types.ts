@@ -525,6 +525,8 @@ export interface PersonaListItem {
 export interface CreateSessionOptions {
   readonly persona?: string;
   readonly workspacePath?: string;
+  /** Host directories mounted read-only into the container (Container Agent Mode). */
+  readonly readonlyMounts?: readonly string[];
   readonly providerProfileName?: string;
   readonly model?: string;
 }

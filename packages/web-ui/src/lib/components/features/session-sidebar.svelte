@@ -4,6 +4,10 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
+  import X from 'phosphor-svelte/lib/X';
+
+  /** Mirrors MAX_READONLY_MOUNTS on the daemon (which re-validates). */
+  const MAX_READONLY_MOUNTS = 8;
 
   let {
     sessions,
@@ -36,6 +40,9 @@
   // Container/web-pty launch options (mux `/new` parity).
   let selectedPersona = $state('');
   let workspacePath = $state('');
+  let readonlyMounts = $state<string[]>([]);
+  let readonlyDraft = $state('');
+  const atReadonlyLimit = $derived(readonlyMounts.length >= MAX_READONLY_MOUNTS);
   let providerProfileName = $state('');
   let model = $state('');
   let providerProfiles = $state<string[]>([]);
@@ -68,14 +75,40 @@
     loadProviderProfiles();
   });
 
+  /** Adds `path` unless empty, duplicate, or over the limit. */
+  function withReadonlyMount(list: string[], path: string): string[] {
+    const trimmed = path.trim();
+    if (!trimmed || list.includes(trimmed) || list.length >= MAX_READONLY_MOUNTS) return list;
+    return [...list, trimmed];
+  }
+
+  function addReadonlyMount(): void {
+    readonlyMounts = withReadonlyMount(readonlyMounts, readonlyDraft);
+    readonlyDraft = '';
+  }
+
+  function removeReadonlyMount(path: string): void {
+    readonlyMounts = readonlyMounts.filter((p) => p !== path);
+  }
+
+  function handleReadonlyKeydown(event: KeyboardEvent): void {
+    // Enter adds the folder instead of submitting the launch form.
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    addReadonlyMount();
+  }
+
   function handleCreate(): void {
     if (creating) return;
     const persona = selectedPersona || undefined;
     const workspace = workspacePath.trim();
     const selectedModel = model.trim();
+    // A typed-but-not-added folder still counts.
+    const mounts = withReadonlyMount(readonlyMounts, readonlyDraft);
     oncreate({
       ...(persona ? { persona } : {}),
       ...(workspace ? { workspacePath: workspace } : {}),
+      ...(mounts.length > 0 ? { readonlyMounts: mounts } : {}),
       ...(providerProfileName ? { providerProfileName } : {}),
       ...(selectedModel ? { model: selectedModel } : {}),
     });
@@ -109,6 +142,54 @@
           disabled={creating}
         />
       </label>
+      <div class="block">
+        <label for="launch-readonly-input" class="text-xs text-muted-foreground">Read-only folders</label>
+        <div class="mt-1 flex gap-1">
+          <Input
+            id="launch-readonly-input"
+            data-testid="launch-readonly-input"
+            bind:value={readonlyDraft}
+            onkeydown={handleReadonlyKeydown}
+            placeholder="/mnt/d/Training or D:\Training"
+            class="px-2 py-1.5 text-xs"
+            disabled={creating || atReadonlyLimit}
+          />
+          <Button
+            data-testid="launch-readonly-add"
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={creating || !readonlyDraft.trim() || atReadonlyLimit}
+            onclick={addReadonlyMount}
+          >
+            Add
+          </Button>
+        </div>
+        {#if readonlyMounts.length > 0}
+          <ul data-testid="launch-readonly-list" class="mt-1 space-y-1">
+            {#each readonlyMounts as mount (mount)}
+              <li class="flex items-center gap-1 rounded bg-background px-2 py-1 text-xs">
+                <span class="min-w-0 flex-1 truncate font-mono" title={mount}>{mount}</span>
+                <button
+                  type="button"
+                  class="shrink-0 text-muted-foreground hover:text-foreground"
+                  aria-label="Remove {mount}"
+                  disabled={creating}
+                  onclick={() => removeReadonlyMount(mount)}
+                >
+                  <X size={12} />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if readonlyMounts.length > 0 || readonlyDraft.trim()}
+          <p data-testid="launch-readonly-warning" class="mt-1 text-xs text-warning">
+            The agent can read everything in these folders (mounted read-only at /mnt/ro/&lt;name&gt;), and their
+            contents may be sent to the model provider. Only add folders you are comfortable sharing.
+          </p>
+        {/if}
+      </div>
       <label class="block">
         <span class="text-xs text-muted-foreground">Provider profile</span>
         <select

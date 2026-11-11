@@ -14,13 +14,17 @@ import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { expandTilde } from '../types/argument-roles.js';
 import { PASTE_START, PASTE_END } from './paste-interceptor.js';
-import type { InputMode, MuxAction } from './types.js';
+import { PICKER_ADD_READONLY_KEY, PICKER_REMOVE_READONLY_KEY, type InputMode, type MuxAction } from './types.js';
 import type { SessionSnapshot } from '../pty/session-scanner.js';
 import type { PersonaSnapshot } from './persona-scanner.js';
 import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
 import { hasSelectableProfiles } from './provider-profile-snapshot.js';
+import { MAX_READONLY_MOUNTS, isWslHost } from '../session/readonly-mounts.js';
 
 export type PickerPhase = 'menu' | 'browse';
+
+/** What a submitted browse path is used for. */
+export type BrowseTarget = 'workspace' | 'readonly-mount';
 
 export interface PickerState {
   phase: PickerPhase;
@@ -37,6 +41,15 @@ export interface PickerState {
   error: string | null;
   // persona context (set when persona selected, carried through browse phase)
   persona: string | null;
+  /** Whether the browse phase picks the workspace or adds a read-only mount. */
+  browseTarget: BrowseTarget;
+  /**
+   * Validated host directories to mount read-only (shared across the whole
+   * /new flow, including the persona and provider steps).
+   */
+  readonlyMounts: readonly string[];
+  /** Non-error notice shown in the menu (e.g. whole-drive mount warning). */
+  notice: string | null;
 }
 
 export interface ResumePickerState {
@@ -119,7 +132,13 @@ export interface MuxInputHandler {
   exitResumePickerMode(): void;
 
   /** Re-enter picker browse phase with a validation error. */
-  enterBrowseWithError(path: string, error: string, persona?: string): void;
+  enterBrowseWithError(path: string, error: string, persona?: string, browseTarget?: BrowseTarget): void;
+
+  /**
+   * Records the validated read-only folder list (after a `picker-add-readonly`
+   * action) and returns to the /new menu, optionally showing a notice.
+   */
+  setReadonlyMounts(paths: readonly string[], notice?: string): void;
 
   /** Exit picker mode and return to command mode (no side effects). */
   exitPickerMode(): void;
@@ -280,15 +299,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
   let _cachedPersonas: PersonaSnapshot[] = [];
   let _cachedProfiles: ProviderProfileSnapshot[] = [];
+  /** Read-only mounts chosen in the current /new flow (validated host paths). */
+  let _readonlyMounts: readonly string[] = [];
 
-  function enterPickerMode(personas?: PersonaSnapshot[], profiles?: ProviderProfileSnapshot[]): void {
-    _cachedPersonas = personas ?? [];
-    _cachedProfiles = profiles ?? [];
-    _mode = 'picker';
-    _pickerState = {
-      phase: 'menu',
+  function newPickerState(fields: Partial<PickerState> & Pick<PickerState, 'phase'>): PickerState {
+    return {
       menuSelection: 0,
-      menuItemCount: _cachedPersonas.length > 0 ? 3 : 2,
+      menuItemCount: 2,
       inputPath: '',
       cursorPos: 0,
       entries: [],
@@ -297,7 +314,29 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       inList: false,
       error: null,
       persona: null,
+      browseTarget: 'workspace',
+      notice: null,
+      ...fields,
+      readonlyMounts: _readonlyMounts,
     };
+  }
+
+  /** Shows the /new menu, keeping cached personas/profiles and chosen mounts. */
+  function showPickerMenu(notice: string | null = null): void {
+    _mode = 'picker';
+    _pickerState = newPickerState({ phase: 'menu', menuItemCount: _cachedPersonas.length > 0 ? 3 : 2, notice });
+  }
+
+  function setReadonlyMounts(paths: readonly string[], notice?: string): void {
+    _readonlyMounts = paths;
+    showPickerMenu(notice ?? null);
+  }
+
+  function enterPickerMode(personas?: PersonaSnapshot[], profiles?: ProviderProfileSnapshot[]): void {
+    _cachedPersonas = personas ?? [];
+    _cachedProfiles = profiles ?? [];
+    _readonlyMounts = [];
+    showPickerMenu();
   }
 
   /** Resets entry selection and scroll after refreshing entries. */
@@ -318,22 +357,22 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     resetEntrySelection(_pickerState);
   }
 
-  function enterBrowseWithError(path: string, error: string, persona?: string): void {
+  function enterBrowseWithError(
+    path: string,
+    error: string,
+    persona?: string,
+    browseTarget: BrowseTarget = 'workspace',
+  ): void {
     _mode = 'picker';
     const resolvedPersona = persona ?? _pickerState?.persona ?? null;
-    _pickerState = {
+    _pickerState = newPickerState({
       phase: 'browse',
-      menuSelection: 0,
-      menuItemCount: 2,
       inputPath: path,
       cursorPos: path.length,
-      entries: [],
-      selectedIndex: 0,
-      scrollOffset: 0,
-      inList: false,
       error,
       persona: resolvedPersona,
-    };
+      browseTarget,
+    });
     resetEntrySelection(_pickerState);
   }
 
@@ -407,6 +446,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     return {
       kind: 'picker-spawn',
       ...(pending.workspacePath !== undefined ? { workspacePath: pending.workspacePath } : {}),
+      ...(_readonlyMounts.length > 0 ? { readonlyMounts: _readonlyMounts } : {}),
       ...(pending.persona !== undefined ? { persona: pending.persona } : {}),
       ...(providerProfileName !== undefined ? { providerProfileName } : {}),
     };
@@ -472,7 +512,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       // provider profiles so the post-selection provider-picker step is not
       // wrongly skipped after backing out of persona selection.
       _personaPickerState = null;
-      enterPickerMode(_cachedPersonas, _cachedProfiles);
+      showPickerMenu();
       return { kind: 'redraw-picker' };
     }
 
@@ -484,19 +524,12 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       // Transition to workspace browse phase with persona context
       exitPersonaPickerMode();
       _mode = 'picker';
-      _pickerState = {
+      _pickerState = newPickerState({
         phase: 'browse',
-        menuSelection: 0,
-        menuItemCount: 2,
         inputPath: selected.workspacePath + '/',
         cursorPos: selected.workspacePath.length + 1,
-        entries: [],
-        selectedIndex: 0,
-        scrollOffset: 0,
-        inList: false,
-        error: null,
         persona: selected.name,
-      };
+      });
       resetEntrySelection(_pickerState);
       return { kind: 'redraw-picker' };
     }
@@ -587,6 +620,22 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === '3' && ps.menuItemCount >= 3) return executeMenuSelection(2);
     if (key === ENTER) return executeMenuSelection(ps.menuSelection);
 
+    if (key === PICKER_ADD_READONLY_KEY) {
+      if (_readonlyMounts.length >= MAX_READONLY_MOUNTS) {
+        ps.notice = `At most ${MAX_READONLY_MOUNTS} read-only folders`;
+        return { kind: 'redraw-picker' };
+      }
+      initBrowsePhase(isWslHost() ? '/mnt/' : undefined);
+      ps.browseTarget = 'readonly-mount';
+      return { kind: 'redraw-picker' };
+    }
+    if (key === PICKER_REMOVE_READONLY_KEY && _readonlyMounts.length > 0) {
+      _readonlyMounts = _readonlyMounts.slice(0, -1);
+      ps.readonlyMounts = _readonlyMounts;
+      ps.notice = null;
+      return { kind: 'redraw-picker' };
+    }
+
     if (key === UP) {
       ps.menuSelection = Math.max(0, ps.menuSelection - 1);
       return { kind: 'redraw-picker' };
@@ -618,10 +667,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         return { kind: 'redraw-picker' };
       }
       // Return to menu phase, restoring persona menu item if available
-      ps.phase = 'menu';
-      ps.menuSelection = 0;
-      ps.menuItemCount = _cachedPersonas.length > 0 ? 3 : 2;
-      ps.persona = null;
+      showPickerMenu();
       return { kind: 'redraw-picker' };
     }
 
@@ -696,8 +742,10 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     // When in input field, Enter submits the current path
     if (key === ENTER && !ps.inList) {
       if (ps.inputPath.trim()) {
-        const workspacePath = ps.inputPath.replace(/\/+$/, '');
-        return finishSelection(ps.persona ? { workspacePath, persona: ps.persona } : { workspacePath });
+        const path = ps.inputPath.replace(/\/+$/, '') || '/';
+        // Read-only folders are validated by the orchestrator, like workspaces.
+        if (ps.browseTarget === 'readonly-mount') return { kind: 'picker-add-readonly', path };
+        return finishSelection(ps.persona ? { workspacePath: path, persona: ps.persona } : { workspacePath: path });
       }
       return { kind: 'redraw-picker' };
     }
@@ -1004,6 +1052,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     exitPersonaPickerMode,
     exitProviderPickerMode,
     enterBrowseWithError,
+    setReadonlyMounts,
     exitPickerMode,
     enterEscalationPickerMode,
     exitEscalationPickerMode,

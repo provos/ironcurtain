@@ -129,6 +129,8 @@ export interface PtyBridgeOptions {
   readonly workspacePath?: string;
   /** Optional session ID to resume (passed as --resume to the child). */
   readonly resumeSessionId?: string;
+  /** Host directories to mount read-only (each passed as --mount-ro; the child validates). */
+  readonly readonlyMounts?: readonly string[];
   /** Optional persona name (passed as --persona to the child). */
   readonly persona?: string;
   /** Optional provider-profile name (passed as --provider-profile to the child). */
@@ -149,7 +151,7 @@ export interface PtyBridgeOptions {
  * Pure and exported so the argv construction is unit-testable (F6) without
  * spawning a process. Order: prefix args (tsx loader/script path) → the
  * `start --pty --agent <agent>` base → the optional per-session selection
- * flags (`--resume`, `--workspace`, `--persona`, `--provider-profile`,
+ * flags (`--resume`, `--workspace`, `--mount-ro`, `--persona`, `--provider-profile`,
  * `--model`, `--capture-traces`). Each flag is appended only when set.
  */
 export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
@@ -159,6 +161,9 @@ export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
   }
   if (options.workspacePath) {
     spawnArgs.push('--workspace', options.workspacePath);
+  }
+  for (const mountPath of options.readonlyMounts ?? []) {
+    spawnArgs.push('--mount-ro', mountPath);
   }
   if (options.persona) {
     spawnArgs.push('--persona', options.persona);

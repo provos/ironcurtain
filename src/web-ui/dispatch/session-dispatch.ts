@@ -28,6 +28,8 @@ import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
+import { MAX_READONLY_MOUNTS, resolveReadonlyMounts } from '../../session/readonly-mounts.js';
+import { errorMessage } from '../../utils/error-message.js';
 import { getWorkspaceLabel, scanResumableSessions, validateResumeSession } from '../../pty/session-scanner.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
@@ -55,6 +57,11 @@ const sessionCreateSchema = z.object({
    * workspace (containment) and resolves the provider profile / model.
    */
   workspacePath: z.string().min(1).optional(),
+  /**
+   * Host directories to mount read-only into the container (Docker mode
+   * only). Validated here for an immediate error, then again by the child.
+   */
+  readonlyMounts: z.array(z.string().min(1).max(4096)).max(MAX_READONLY_MOUNTS).optional(),
   providerProfileName: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
 });
@@ -108,6 +115,9 @@ export async function sessionDispatch(
       // turn-based chatbox session. The daemon's SessionMode is process-global.
       if (ctx.mode.kind === 'docker') {
         return createPtySession(ctx, opts);
+      }
+      if (opts.readonlyMounts?.length) {
+        throw new RpcError('INVALID_PARAMS', 'Read-only folders require container agent mode');
       }
       return createWebSession(ctx, opts.persona, opts.captureTraces);
     }
@@ -241,10 +251,19 @@ async function createPtySession(
   opts: z.infer<typeof sessionCreateSchema>,
 ): Promise<{ label: number }> {
   const manager = requirePtyCapacity(ctx);
+  let readonlyMounts: string[] | undefined;
+  if (opts.readonlyMounts && opts.readonlyMounts.length > 0) {
+    try {
+      readonlyMounts = resolveReadonlyMounts(opts.readonlyMounts).mounts.map((m) => m.hostPath);
+    } catch (err) {
+      throw new RpcError('INVALID_PARAMS', errorMessage(err));
+    }
+  }
   return manager.create({
     ...(opts.persona ? { persona: opts.persona } : {}),
     ...(opts.captureTraces !== undefined ? { captureTraces: opts.captureTraces } : {}),
     ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+    ...(readonlyMounts ? { readonlyMounts } : {}),
     ...(opts.providerProfileName ? { providerProfileName: opts.providerProfileName } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });

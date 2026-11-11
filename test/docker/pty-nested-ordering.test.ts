@@ -65,6 +65,8 @@ vi.mock('../../src/session/index.js', () => ({
     systemPromptAugmentation: '',
     resolvedSkills: [],
     memoryEnabled: false,
+    readonlyMounts: [],
+    readonlyMountWarnings: [],
   }),
 }));
 
@@ -539,6 +541,22 @@ describe('Apple nested Docker PTY startup ordering', () => {
     expect(agent.trustedCreateOptions).toEqual({
       tmpfs: ['/var/lib/docker:ro,nosuid,nodev,noexec,size=1m'],
     });
+  });
+
+  it('mounts read-only extra folders into the PTY agent container', async () => {
+    installInfrastructure(undefined, { runtimeKind: 'docker' });
+    const readonlyMounts = [{ hostPath: '/mnt/d/Training', containerPath: '/mnt/ro/Training' }];
+    state.infrastructure = { ...(state.infrastructure as object), readonlyMounts };
+
+    await runPtySession({
+      config: config(resolveDockerWorkloadConfig({ enabled: false })),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      workspacePath: homeDir,
+      attach: async () => 0,
+    });
+
+    const agent = state.createdConfigs.at(-1);
+    expect(agent?.mounts).toContainEqual({ source: '/mnt/d/Training', target: '/mnt/ro/Training', readonly: true });
   });
 
   it('waits for Linux UID-remap handoff before the storage check and PTY attach', async () => {

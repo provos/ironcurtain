@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import type { DockerMount } from './types.js';
+import type { ReadonlyMountSpec } from '../session/readonly-mounts.js';
 
 /** The workspace directory shared by host, agent, and nested Docker daemon. */
 export const CONTAINER_WORKSPACE_DIR = '/workspace';
@@ -13,4 +14,9 @@ export function buildContainerWorkspaceMount(workspaceDir: string): DockerMount 
     throw new Error('container workspace source must be a canonical absolute directory below root');
   }
   return { source: workspaceDir, target: CONTAINER_WORKSPACE_DIR, readonly: false };
+}
+
+/** Read-only host-directory bind mounts (`/mnt/ro/<name>`) from validated specs. */
+export function buildReadonlyMounts(specs: readonly ReadonlyMountSpec[] | undefined): DockerMount[] {
+  return (specs ?? []).map((spec) => ({ source: spec.hostPath, target: spec.containerPath, readonly: true }));
 }

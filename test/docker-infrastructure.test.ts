@@ -945,6 +945,21 @@ describe('createSessionContainers', () => {
     expect(scriptsMount).toEqual({ source: scriptsDir, target: '/workflow-scripts', readonly: true });
   });
 
+  it.each([false, true])('mounts read-only extra mounts (useTcp=%s)', async (useTcp) => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp, docker });
+    const readonlyMounts = [{ hostPath: join(tempDir, 'Training'), containerPath: '/mnt/ro/Training' }];
+
+    await createSessionContainers({ ...core, readonlyMounts }, makeMockConfig());
+
+    const main = createCalls.find((call) => call.mounts.some((m) => m.target === '/etc/ironcurtain'));
+    expect(main?.mounts).toContainEqual({
+      source: join(tempDir, 'Training'),
+      target: '/mnt/ro/Training',
+      readonly: true,
+    });
+  });
+
   it('uses the stock agent image while mounting workflow dependency caches', async () => {
     const { docker, createCalls } = makeMockDocker();
     const core = makeMockCore({ tempDir, useTcp: false, docker });

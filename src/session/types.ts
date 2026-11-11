@@ -9,6 +9,7 @@ import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelis
 import type { WorkflowId } from '../workflow/types.js';
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import type { ResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
+import type { ReadonlyMountSpec } from './readonly-mounts.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -143,6 +144,13 @@ export interface SessionMetadata {
    * case (legacy-session fallback).
    */
   readonly agentConversationId?: AgentConversationId;
+
+  /**
+   * Extra host directories bind-mounted read-only into the Docker agent
+   * container (Docker Agent Mode only). Re-validated on resume via
+   * `restoreReadonlyMounts()`. See docs/designs/readonly-extra-mounts.md.
+   */
+  readonly readonlyMounts?: readonly ReadonlyMountSpec[];
 
   /**
    * Present only for secure nested Docker-workload sessions. Records the
@@ -476,6 +484,13 @@ export interface SessionOptions {
    * Must be validated via validateWorkspacePath() before passing here.
    */
   workspacePath?: string;
+
+  /**
+   * Host directories to mount read-only under `/mnt/ro/` (Docker Agent Mode
+   * only). Validated by `buildSessionConfig` via `resolveReadonlyMounts()`;
+   * ignored on resume, where the persisted mounts are restored instead.
+   */
+  readonlyMounts?: readonly string[];
 
   /**
    * Per-session provider-profile selection (OpenRouter integration §9.7).

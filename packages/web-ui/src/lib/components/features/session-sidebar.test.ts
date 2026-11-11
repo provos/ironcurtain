@@ -105,6 +105,30 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('adds, removes, and submits read-only folders with a warning', async () => {
+    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
+    render(SessionSidebar, { props: makeProps({ oncreate }) });
+
+    expect(screen.queryByTestId('launch-readonly-warning')).toBeNull();
+    const input = screen.getByTestId('launch-readonly-input');
+    await fireEvent.input(input, { target: { value: '/mnt/d/Training' } });
+    await fireEvent.click(screen.getByTestId('launch-readonly-add'));
+    await fireEvent.input(input, { target: { value: 'D:\\Data' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.input(input, { target: { value: '/mnt/d/Training' } });
+    await fireEvent.keyDown(input, { key: 'Enter' }); // duplicate ignored
+
+    expect(screen.getByTestId('launch-readonly-warning')).toBeTruthy();
+    expect(screen.getByTestId('launch-readonly-list').textContent).toContain('D:\\Data');
+    await fireEvent.click(screen.getByLabelText('Remove D:\\Data'));
+    expect(oncreate).not.toHaveBeenCalled();
+
+    await fireEvent.input(input, { target: { value: '  /data/ref  ' } });
+    await fireEvent.click(screen.getByTestId('launch-start'));
+
+    expect(oncreate).toHaveBeenCalledWith({ readonlyMounts: ['/mnt/d/Training', '/data/ref'] });
+  });
+
   it('uses the blank persona option as the default and omits empty launch fields', async () => {
     const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
     render(SessionSidebar, { props: makeProps({ oncreate }) });
