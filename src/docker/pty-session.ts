@@ -78,7 +78,7 @@ export interface PtySessionOptions {
   readonly preparedImageResolution?: AgentImageResolution;
   /** Validated workspace path. When provided, replaces the session sandbox. */
   readonly workspacePath?: string;
-  /** Host directories to mount read-only (validated by buildSessionConfig). Ignored on resume. */
+  /** Host directories to mount read-only (validated by buildSessionConfig). On resume, added to the saved set. */
   readonly readonlyMounts?: readonly string[];
   /** Session ID to resume. When set, reuses the existing session directory. */
   readonly resumeSessionId?: string;

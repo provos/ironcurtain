@@ -170,10 +170,11 @@ interface FreshPtySessionOptions {
 interface ResumePtySessionOptions {
   /** Trusted, validated persisted session descriptor. Never browser-supplied directly. */
   readonly resume: { sessionId: string; agent: string; persona?: string };
+  /** Host folders to add read-only (passed as `--mount-ro`; the child re-validates and saves them). */
+  readonly readonlyMounts?: readonly string[];
   readonly persona?: never;
   readonly captureTraces?: never;
   readonly workspacePath?: never;
-  readonly readonlyMounts?: never;
   readonly providerProfileName?: never;
   readonly model?: never;
 }
@@ -473,12 +474,12 @@ export class PtySessionManager {
         ironcurtainBin: bin,
         prefixArgs,
         agent,
+        ...(options.readonlyMounts?.length ? { readonlyMounts: options.readonlyMounts } : {}),
         ...(options.resume
           ? { resumeSessionId: options.resume.sessionId }
           : {
               ...(options.persona ? { persona: options.persona } : {}),
               ...(options.workspacePath ? { workspacePath: options.workspacePath } : {}),
-              ...(options.readonlyMounts?.length ? { readonlyMounts: options.readonlyMounts } : {}),
               ...(options.providerProfileName ? { providerProfileName: options.providerProfileName } : {}),
               ...(options.model ? { model: options.model } : {}),
             }),

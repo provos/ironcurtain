@@ -112,12 +112,12 @@
     resumeLoadGeneration++;
   }
 
-  async function handleResume(sessionId: string): Promise<void> {
+  async function handleResume(sessionId: string, readonlyMounts?: string[]): Promise<void> {
     if (resumingId !== null) return;
     resumingId = sessionId;
     resumeActionError = '';
     try {
-      const result = await resumeSession(sessionId);
+      const result = await resumeSession(sessionId, readonlyMounts);
       appState.selectedSessionLabel = result.label;
       resumeModalOpen = false;
       resumeLoadGeneration++;

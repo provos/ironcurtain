@@ -180,6 +180,56 @@ describe('restoreReadonlyMounts', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  function mkdir(name: string): string {
+    const path = join(tempDir, name);
+    mkdirSync(path, { recursive: true });
+    return path;
+  }
+
+  describe('adding folders on resume', () => {
+    it('keeps saved container paths and gives additions non-colliding ones', () => {
+      const saved = mkdir('a/data');
+      const added = mkdir('b/data');
+      const result = restoreReadonlyMounts([{ hostPath: saved, containerPath: '/mnt/ro/data' }], [added]);
+      expect(result.mounts).toEqual([
+        { hostPath: saved, containerPath: '/mnt/ro/data' },
+        { hostPath: added, containerPath: '/mnt/ro/data-2' },
+      ]);
+      expect(result.persist).toEqual(result.mounts);
+    });
+
+    it('avoids the container path of a saved folder that is currently missing, and keeps it saved', () => {
+      const gone = join(tempDir, 'gone');
+      const added = mkdir('other/gone');
+      const result = restoreReadonlyMounts([{ hostPath: gone, containerPath: '/mnt/ro/gone' }], [added]);
+      expect(result.mounts).toEqual([{ hostPath: added, containerPath: '/mnt/ro/gone-2' }]);
+      expect(result.persist).toEqual([
+        { hostPath: gone, containerPath: '/mnt/ro/gone' },
+        { hostPath: added, containerPath: '/mnt/ro/gone-2' },
+      ]);
+      expect(result.warnings[0]).toMatch(/no longer available/);
+    });
+
+    it('skips folders the session already mounts and reports no change', () => {
+      const saved = mkdir('data');
+      const result = restoreReadonlyMounts([{ hostPath: saved, containerPath: '/mnt/ro/data' }], [`${saved}/`]);
+      expect(result.mounts).toEqual([{ hostPath: saved, containerPath: '/mnt/ro/data' }]);
+      expect(result.persist).toBeUndefined();
+    });
+
+    it('counts saved folders, including missing ones, toward the limit', () => {
+      const saved = Array.from({ length: MAX_READONLY_MOUNTS }, (_, i) => ({
+        hostPath: join(tempDir, `missing-${i}`),
+        containerPath: `/mnt/ro/missing-${i}`,
+      }));
+      expect(() => restoreReadonlyMounts(saved, [mkdir('extra')])).toThrow(/session has 8, adding 1/);
+    });
+
+    it('rejects an unsafe addition', () => {
+      expect(() => restoreReadonlyMounts(undefined, ['/dev'])).toThrow(/system directory/);
+    });
+  });
+
   it('returns nothing when no mounts were persisted', () => {
     expect(restoreReadonlyMounts(undefined)).toEqual({ mounts: [], warnings: [] });
   });

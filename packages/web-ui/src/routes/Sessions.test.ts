@@ -272,9 +272,30 @@ describe('Sessions create flow guards', () => {
     expect(await screen.findByText('Claude Code session')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Resume Claude Code session' }));
 
-    expect(mockResumeSession).toHaveBeenCalledWith('saved-session-1234');
+    expect(mockResumeSession).toHaveBeenCalledWith('saved-session-1234', undefined);
     await waitFor(() => expect(mockAppState.selectedSessionLabel).toBe(12));
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('passes read-only folders added in the resume dialog to the resume request', async () => {
+    mockListResumableSessions.mockResolvedValue([
+      {
+        sessionId: 'saved-session-1234',
+        displayName: 'Claude Code session',
+        agent: 'claude-code',
+        status: 'user-exit',
+        lastActivity: new Date().toISOString(),
+      },
+    ]);
+    render(Sessions);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume previous…' }));
+    const input = await screen.findByTestId('resume-readonly-input');
+    await fireEvent.input(input, { target: { value: '/mnt/d/Training' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume Claude Code session' }));
+
+    expect(mockResumeSession).toHaveBeenCalledWith('saved-session-1234', ['/mnt/d/Training']);
   });
 
   it('keeps the resume dialog open with retry feedback after a failed request', async () => {

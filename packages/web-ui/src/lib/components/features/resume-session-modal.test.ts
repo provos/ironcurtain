@@ -39,6 +39,32 @@ function props(overrides: Record<string, unknown> = {}) {
 }
 
 describe('ResumeSessionModal', () => {
+  it('shows saved read-only folders and adds new ones when resuming', async () => {
+    const onresume = vi.fn();
+    const withFolders: ResumableSessionDto[] = [{ ...saved[0], readonlyMounts: ['/mnt/d/Training', 'D:\\Data'] }];
+    render(ResumeSessionModal, { props: props({ onresume, sessions: withFolders }) });
+
+    expect(screen.getByTestId('resume-saved-folders').textContent).toContain('Read-only: Training, Data');
+    expect(screen.queryByTestId('resume-readonly-warning')).toBeNull();
+
+    const input = screen.getByTestId('resume-readonly-input');
+    await fireEvent.input(input, { target: { value: '/mnt/d/Reference' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await fireEvent.input(input, { target: { value: '/data/typed-not-added' } });
+    expect(screen.getAllByTestId('resume-readonly-chip').map((chip) => chip.textContent?.trim())).toEqual([
+      'Reference',
+    ]);
+    expect(screen.getByTestId('resume-readonly-warning')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume Claude Code session' }));
+    expect(onresume).toHaveBeenCalledWith('saved-session-1234', ['/mnt/d/Reference', '/data/typed-not-added']);
+  });
+
+  it('hides the folder field when there is nothing to resume', () => {
+    render(ResumeSessionModal, { props: props({ sessions: [] }) });
+    expect(screen.queryByTestId('resume-readonly-input')).toBeNull();
+  });
+
   it('presents persisted metadata and resumes the selected row', async () => {
     const onresume = vi.fn();
     render(ResumeSessionModal, { props: props({ onresume }) });
@@ -49,7 +75,7 @@ describe('ResumeSessionModal', () => {
     expect(screen.getByText('Profile: work')).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Resume Goose session' }));
-    expect(onresume).toHaveBeenCalledWith('another-session');
+    expect(onresume).toHaveBeenCalledWith('another-session', undefined);
   });
 
   it('uses an announced loading state and a clear empty state', async () => {

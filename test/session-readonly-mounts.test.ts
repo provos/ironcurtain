@@ -85,14 +85,58 @@ describe('buildSessionConfig read-only mounts', () => {
     const result = buildSessionConfig(createTestConfig(), sessionId, resumedId, {
       mode: DOCKER_MODE,
       resumeSessionId: sessionId,
-      // Ignored on resume: the persisted set wins (this path would fail validation).
-      readonlyMounts: [TEST_ROOT],
     });
 
     expect(result.readonlyMounts).toEqual([{ hostPath: kept, containerPath: '/mnt/ro/kept' }]);
     expect(result.readonlyMountWarnings).toHaveLength(1);
     expect(result.readonlyMountWarnings[0]).toContain(gone);
     expect(result.systemPromptAugmentation).toContain('no longer available');
+  });
+
+  it('adds folders on resume and saves them for later resumes', () => {
+    const first = resolve(TEST_ROOT, 'first');
+    const second = resolve(TEST_ROOT, 'second');
+    mkdirSync(first, { recursive: true });
+    mkdirSync(second, { recursive: true });
+    const sessionId = createSessionId();
+    buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE, readonlyMounts: [first] });
+    loggerModule.teardown();
+
+    const resumed = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+      readonlyMounts: [second],
+    });
+    loggerModule.teardown();
+
+    const expected = [
+      { hostPath: first, containerPath: '/mnt/ro/first' },
+      { hostPath: second, containerPath: '/mnt/ro/second' },
+    ];
+    expect(resumed.readonlyMounts).toEqual(expected);
+    expect(resumed.systemPromptAugmentation).toContain('`/mnt/ro/second`');
+    expect(loadSessionMetadata(sessionId)?.readonlyMounts).toEqual(expected);
+
+    // A later resume without additions keeps both.
+    const again = buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+      mode: DOCKER_MODE,
+      resumeSessionId: sessionId,
+    });
+    expect(again.readonlyMounts).toEqual(expected);
+  });
+
+  it('rejects an unsafe folder added on resume', () => {
+    const sessionId = createSessionId();
+    buildSessionConfig(createTestConfig(), sessionId, sessionId, { mode: DOCKER_MODE });
+    loggerModule.teardown();
+    // TEST_ROOT contains the IronCurtain home used by these tests.
+    expect(() =>
+      buildSessionConfig(createTestConfig(), sessionId, createSessionId(), {
+        mode: DOCKER_MODE,
+        resumeSessionId: sessionId,
+        readonlyMounts: [TEST_ROOT],
+      }),
+    ).toThrow(/IronCurtain credentials or state/);
   });
 
   it('rejects an unsafe path at the session boundary', () => {

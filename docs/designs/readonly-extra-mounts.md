@@ -127,11 +127,11 @@ web UI sessions.create ──────────────┤ (daemon val
                                                                   in pty-session.ts and createSessionContainers
 ```
 
-- **CLI** (`src/index.ts`): new repeatable flag `--mount-ro <path>` (`parseArgs` `multiple: true`), validated next to `--workspace`. On `--resume` it is ignored with a note, the same way `--workspace` is. It is an error outside container agent mode.
+- **CLI** (`src/index.ts`): new repeatable flag `--mount-ro <path>` (`parseArgs` `multiple: true`), validated next to `--workspace`. With `--resume` it adds folders to the session's saved ones (§5.7). It is an error outside container agent mode.
 - **`PtyBridgeOptions.readonlyMounts?: readonly string[]`**. `buildSpawnArgs` appends one `--mount-ro <p>` per entry. Raw strings cross the process boundary, and the child does the authoritative validation, as it already does for the workspace.
 - **Infrastructure**: `PrepareDockerInfrastructureOptions.readonlyMounts` is stored on the bundle as `PreContainerInfrastructure.readonlyMounts`. `pty-session.ts` pushes `buildReadonlyMounts(infra.readonlyMounts)` after the topology `if/else`, so all three topologies get it, and the mounts flow into `createLedgeredAgentContainer` expanded evidence automatically.
 - **Batch parity** (`docker-infrastructure.ts` `createSessionContainers`): the same push. `src/docker/CLAUDE.md` "Dual session modes: keep in sync" requires it, and it makes `ironcurtain start -w ... --mount-ro ...` work.
-- **Resume**: mounts are persisted in `session-metadata.json` (`SessionMetadata.readonlyMounts`, written once at creation), which both the PTY and batch resume paths read through `buildSessionConfig`. On resume each entry is shape-checked and **re-validated** (`restoreReadonlyMounts`). A directory that no longer exists (e.g. an unplugged drive) is dropped with a warning on the PTY stderr and in the agent prompt, and the session continues. A path that now fails a _security_ check aborts the resume. Container paths are kept stable.
+- **Resume**: mounts are persisted in `session-metadata.json` (`SessionMetadata.readonlyMounts`, written once at creation), which both the PTY and batch resume paths read through `buildSessionConfig`. On resume each entry is shape-checked and **re-validated** (`restoreReadonlyMounts`). A directory that no longer exists (e.g. an unplugged drive) is dropped with a warning on the PTY stderr and in the agent prompt, and the session continues. A path that now fails a _security_ check aborts the resume. Container paths are kept stable. Folders can also be added on resume (§5.7).
 - **Agent orientation**: `buildSessionConfig` appends a "Read-only reference directories" section to `systemPromptAugmentation` listing each `containerPath` with its host path, telling the agent the folders cannot be modified and outputs belong in `/workspace`.
 - **Logging**: `buildSessionConfig` logs one `Read-only mount: <host> -> <container>` line per mount to the session log.
 
@@ -164,6 +164,16 @@ Typing `/mnt/d/Training` every time gets old. Two complementary sources, both me
 
 - **Persona default**: `persona.json` `readonlyMounts: string[]`, editable in `ironcurtain persona edit` and on the web UI Personas page. This fits naturally, since a "trainer" persona always wants its material.
 - **Global presets**: `config.json` `docker.readonlyMountPresets: [{ path, label }]`, shown as checkboxes in the web UI form and as a pick list in the mux step.
+
+### 5.7 Adding folders on resume
+
+Resume always creates a fresh container and re-sends the system prompt (`--append-system-prompt` on every launch), so a resumed session can gain folders:
+
+- `restoreReadonlyMounts(persisted, additional)` re-validates the saved folders as before, then validates the additions. Saved folders keep their `/mnt/ro/<name>` paths; additions get names that avoid **every** saved path, including folders that are currently unavailable, so those can return later without a clash. Folders the session already mounts are skipped. Saved plus added folders are capped at `MAX_READONLY_MOUNTS`, counting unavailable ones.
+- `buildSessionConfig` writes the merged list (saved, including unavailable, then additions) back with `updateSessionMetadata`, so later resumes keep the added folders. Removing a folder on resume is not supported.
+- **CLI:** `ironcurtain start --resume <id> --mount-ro <path>`.
+- **Mux:** the `/resume` picker gets the same `r` / `x` hotkeys as `/new`. `r` opens the folder browser, which returns to `/resume`. `mux-app` validates each addition against the selected session's saved folders (duplicates are reported as a notice), and Enter passes them with `resume-spawn`.
+- **Web UI:** `sessions.resume` accepts `readonlyMounts`. The daemon checks them against the saved folders for an immediate `INVALID_PARAMS` and passes only the additions to the child. `sessions.listResumable` includes each session's saved folders. The Resume dialog shows them per session and has the same chip field as New session (shared `readonly-folders-input.svelte`).
 
 ## 6. Platform notes
 

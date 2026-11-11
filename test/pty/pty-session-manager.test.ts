@@ -1292,6 +1292,35 @@ describe('sessions resume RPC', () => {
     await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toHaveLength(1);
   });
 
+  it('lists saved read-only folders and passes validated additions on resume', async () => {
+    writeSnapshot('saved-session');
+    writeFileSync(
+      join(home, 'sessions', 'saved-session', 'session-metadata.json'),
+      JSON.stringify({
+        createdAt: '2026-08-24T12:00:00.000Z',
+        readonlyMounts: [{ hostPath: '/mnt/d/Training', containerPath: '/mnt/ro/Training' }],
+      }),
+    );
+    const extra = realpathSync(mkdtempSync(join(tmpdir(), 'ic-resume-ro-')));
+    try {
+      const seen: PtyBridgeOptions[] = [];
+      const ctx = makeResumeContext(seen);
+
+      const list = (await sessionDispatch(ctx, 'sessions.listResumable', {})) as Array<Record<string, unknown>>;
+      expect(list[0]).toMatchObject({ readonlyMounts: ['/mnt/d/Training'] });
+
+      await expect(
+        sessionDispatch(ctx, 'sessions.resume', { sessionId: 'saved-session', readonlyMounts: ['/dev'] }),
+      ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+      expect(seen).toHaveLength(0);
+
+      await sessionDispatch(ctx, 'sessions.resume', { sessionId: 'saved-session', readonlyMounts: [`${extra}/`] });
+      expect(seen[0]).toMatchObject({ resumeSessionId: 'saved-session', readonlyMounts: [extra] });
+    } finally {
+      rmSync(extra, { recursive: true, force: true });
+    }
+  });
+
   it('offers a previously non-resumable Claude conversation and passes its identity to a stub bridge', async () => {
     writeSnapshot('legacy-workload', { agent: 'claude-code', resumable: false });
     const sessionDir = join(home, 'sessions', 'legacy-workload');

@@ -113,6 +113,23 @@ test.describe('Sessions', () => {
     await waitForPtyTerminal(page);
   });
 
+  test('resumes a saved session with an added read-only folder', async ({ page }) => {
+    await navigateTo(page, 'Sessions');
+    await page.getByRole('button', { name: 'Resume previous…' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Resume a session' });
+    await expect(dialog.getByTestId('resume-saved-folders')).toContainText('Read-only: Training');
+    const input = dialog.getByTestId('resume-readonly-input');
+    await input.fill('/mnt/d/Reference');
+    await input.press('Enter');
+    await expect(dialog.getByTestId('resume-readonly-chip')).toHaveText(['Reference']);
+    await expect(dialog.getByTestId('resume-readonly-warning')).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Resume Claude Code — ironcurtain' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByTestId('session-sidebar').locator('[data-testid^="session-item-"]')).toHaveCount(1);
+  });
+
   test('sends a trusted prompt and echoes it into the terminal', async ({ page }) => {
     await createDefaultSession(page);
     await waitForPtyTerminal(page);

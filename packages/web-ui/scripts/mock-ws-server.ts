@@ -83,6 +83,7 @@ interface MockResumableSession {
   workspaceLabel?: string;
   persona?: string;
   providerProfileName?: string;
+  readonlyMounts?: string[];
 }
 
 interface MockWhitelistCandidate {
@@ -1443,6 +1444,7 @@ function resetState(opts?: ResetOptions): void {
     workspaceLabel: '~/src/ironcurtain',
     persona: 'code-reviewer',
     providerProfileName: 'native',
+    readonlyMounts: ['/mnt/d/Training'],
   };
   resumableSessions.set(resumable.sessionId, resumable);
   escalations.clear();

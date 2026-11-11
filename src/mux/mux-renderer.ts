@@ -1035,8 +1035,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       return;
     }
 
-    // Session list
-    const listRows = Math.max(0, totalRows - 2); // title + hint bar
+    // Session list (title + hint bar, plus one row for added read-only folders)
+    const folderRows = rps.readonlyMounts.length > 0 || rps.notice ? 1 : 0;
+    const listRows = Math.max(0, totalRows - 2 - folderRows);
 
     // Scroll adjustment (render-time only; do not mutate rps)
     let scrollOffset = rps.scrollOffset;
@@ -1092,12 +1093,31 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       currentY++;
     }
 
+    if (folderRows > 0) {
+      clearLine(currentY);
+      moveTo(2, currentY);
+      const folders = rps.readonlyMounts.length > 0 ? `+ro: ${rps.readonlyMounts.join(', ')}` : '';
+      const text = [folders, rps.notice ?? ''].filter(Boolean).join('  ');
+      term.yellow(truncate(text, Math.max(1, _cols - 4)));
+      term.styleReset();
+      term.eraseLineAfter();
+      currentY++;
+    }
+
     // Hint bar
     clearLine(currentY);
     moveTo(2, currentY);
     term.bgWhite.black(' Enter ');
     term.styleReset();
     term.dim(' resume  ');
+    term.bgWhite.black(` ${PICKER_ADD_READONLY_KEY} `);
+    term.styleReset();
+    term.dim(' add read-only folder  ');
+    if (rps.readonlyMounts.length > 0) {
+      term.bgWhite.black(` ${PICKER_REMOVE_READONLY_KEY} `);
+      term.styleReset();
+      term.dim(' remove last  ');
+    }
     term.bgWhite.black(' Esc ');
     term.styleReset();
     term.dim(' cancel');

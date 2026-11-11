@@ -69,10 +69,21 @@ export type MuxAction =
       readonly persona?: string;
       readonly providerProfileName?: string;
     }
-  | { readonly kind: 'picker-add-readonly'; readonly path: string }
+  | {
+      readonly kind: 'picker-add-readonly';
+      readonly path: string;
+      /** Set when adding to a session being resumed (validated with its saved folders). */
+      readonly resumeSessionId?: string;
+    }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
-  | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }
+  | {
+      readonly kind: 'resume-spawn';
+      readonly sessionId: string;
+      readonly agent: string;
+      /** Validated host directories to add read-only to the resumed session. */
+      readonly readonlyMounts?: readonly string[];
+    }
   | { readonly kind: 'persona-spawn'; readonly persona: string }
   | { readonly kind: 'escalation-open' }
   | { readonly kind: 'escalation-dismiss'; readonly targetMode?: 'command' }
