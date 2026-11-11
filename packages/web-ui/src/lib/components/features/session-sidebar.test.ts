@@ -1,28 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 import SessionSidebar from './session-sidebar.svelte';
 import { mockSession } from '../../__tests__/fixtures.js';
-import type { CreateSessionOptions, PersonaListItem, SessionDto } from '$lib/types.js';
-
-function makePersona(overrides: Partial<PersonaListItem> = {}): PersonaListItem {
-  return {
-    name: 'coder',
-    description: 'Code-focused persona',
-    compiled: true,
-    ...overrides,
-  };
-}
+import type { SessionDto } from '$lib/types.js';
 
 function makeProps(overrides: Record<string, unknown> = {}) {
   return {
     sessions: new Map<number, SessionDto>(),
     selectedLabel: null,
     onselect: vi.fn(),
-    oncreate: vi.fn<(opts: CreateSessionOptions) => void>(),
+    onnew: vi.fn(),
     creating: false,
-    createError: '',
-    loadPersonasFn: vi.fn<() => Promise<PersonaListItem[]>>().mockResolvedValue([]),
-    loadProviderProfilesFn: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -32,132 +20,30 @@ describe('SessionSidebar', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows launch options and loads personas/provider profiles without creating a session', async () => {
-    const loadPersonasFn = vi
-      .fn<() => Promise<PersonaListItem[]>>()
-      .mockResolvedValue([
-        makePersona({ name: 'coder', compiled: true }),
-        makePersona({ name: 'draft', compiled: false }),
-      ]);
-    const loadProviderProfilesFn = vi.fn<() => Promise<string[]>>().mockResolvedValue(['work']);
+  it('is a session list with a New action instead of an inline launch form', async () => {
+    const onnew = vi.fn();
+    render(SessionSidebar, { props: makeProps({ onnew }) });
 
-    render(SessionSidebar, { props: makeProps({ loadPersonasFn, loadProviderProfilesFn }) });
+    expect(screen.queryByTestId('session-launch-form')).toBeNull();
+    expect(screen.queryByTestId('launch-start')).toBeNull();
+    expect(screen.getByText('No active sessions')).toBeTruthy();
 
-    expect(screen.getByText('Launch options')).toBeTruthy();
-    expect(screen.getByTestId('launch-persona')).toBeTruthy();
-    expect(screen.getByTestId('launch-workspace')).toBeTruthy();
-    expect(screen.getByTestId('launch-provider')).toBeTruthy();
-    expect(screen.getByTestId('launch-model')).toBeTruthy();
-    expect(screen.getByTestId('launch-start')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Start session' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'New' })).toBeNull();
-    expect(screen.queryByTestId('persona-default')).toBeNull();
-    await waitFor(() => {
-      expect(loadPersonasFn).toHaveBeenCalledTimes(1);
-      expect(loadProviderProfilesFn).toHaveBeenCalledTimes(1);
-    });
-
-    const personaSelect = screen.getByTestId('launch-persona') as HTMLSelectElement;
-    await waitFor(() => {
-      expect(Array.from(personaSelect.options).some((option) => option.value === 'coder')).toBe(true);
-    });
-
-    const draftOption = Array.from(personaSelect.options).find((option) => option.value === 'draft');
-    expect(draftOption?.disabled).toBe(true);
-
-    const providerSelect = screen.getByTestId('launch-provider') as HTMLSelectElement;
-    await waitFor(() => {
-      expect(Array.from(providerSelect.options).some((option) => option.value === 'work')).toBe(true);
-    });
+    await fireEvent.click(screen.getByTestId('session-new'));
+    expect(onnew).toHaveBeenCalledTimes(1);
   });
 
-  it('does not create when selecting launch options and submits only from start session', async () => {
-    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
-    render(SessionSidebar, {
-      props: makeProps({
-        oncreate,
-        loadPersonasFn: vi
-          .fn<() => Promise<PersonaListItem[]>>()
-          .mockResolvedValue([makePersona({ name: 'coder', compiled: true })]),
-        loadProviderProfilesFn: vi.fn<() => Promise<string[]>>().mockResolvedValue(['ops']),
-      }),
-    });
-
-    const personaSelect = screen.getByTestId('launch-persona') as HTMLSelectElement;
-    await waitFor(() => {
-      expect(Array.from(personaSelect.options).some((option) => option.value === 'coder')).toBe(true);
-    });
-
-    await fireEvent.change(personaSelect, { target: { value: 'coder' } });
-    await fireEvent.input(screen.getByTestId('launch-workspace'), { target: { value: '  /tmp/workspace  ' } });
-    await fireEvent.change(screen.getByTestId('launch-provider'), { target: { value: 'ops' } });
-    await fireEvent.input(screen.getByTestId('launch-model'), { target: { value: '  gpt-5  ' } });
-    expect(oncreate).not.toHaveBeenCalled();
-
-    await fireEvent.click(screen.getByTestId('launch-start'));
-
-    expect(oncreate).toHaveBeenCalledTimes(1);
-    expect(oncreate).toHaveBeenCalledWith({
-      persona: 'coder',
-      workspacePath: '/tmp/workspace',
-      providerProfileName: 'ops',
-      model: 'gpt-5',
-    });
-  });
-
-  it('adds, removes, and submits read-only folders with a warning', async () => {
-    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
-    render(SessionSidebar, { props: makeProps({ oncreate }) });
-
-    expect(screen.queryByTestId('launch-readonly-warning')).toBeNull();
-    const input = screen.getByTestId('launch-readonly-input');
-    await fireEvent.input(input, { target: { value: '/mnt/d/Training' } });
-    await fireEvent.click(screen.getByTestId('launch-readonly-add'));
-    await fireEvent.input(input, { target: { value: 'D:\\Data' } });
-    await fireEvent.keyDown(input, { key: 'Enter' });
-    await fireEvent.input(input, { target: { value: '/mnt/d/Training' } });
-    await fireEvent.keyDown(input, { key: 'Enter' }); // duplicate ignored
-
-    expect(screen.getByTestId('launch-readonly-warning')).toBeTruthy();
-    expect(screen.getByTestId('launch-readonly-list').textContent).toContain('D:\\Data');
-    await fireEvent.click(screen.getByLabelText('Remove D:\\Data'));
-    expect(oncreate).not.toHaveBeenCalled();
-
-    await fireEvent.input(input, { target: { value: '  /data/ref  ' } });
-    await fireEvent.click(screen.getByTestId('launch-start'));
-
-    expect(oncreate).toHaveBeenCalledWith({ readonlyMounts: ['/mnt/d/Training', '/data/ref'] });
-  });
-
-  it('uses the blank persona option as the default and omits empty launch fields', async () => {
-    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
-    render(SessionSidebar, { props: makeProps({ oncreate }) });
-
-    await fireEvent.click(screen.getByTestId('launch-start'));
-
-    expect(oncreate).toHaveBeenCalledTimes(1);
-    expect(oncreate).toHaveBeenCalledWith({});
-  });
-
-  it('ignores native form submit while a session is already being created', async () => {
-    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
-    render(SessionSidebar, { props: makeProps({ creating: true, oncreate }) });
-
-    await fireEvent.submit(screen.getByTestId('session-launch-form'));
-
-    expect(oncreate).not.toHaveBeenCalled();
-  });
-
-  it('still selects existing sessions from the list', async () => {
+  it('selects existing sessions from the list', async () => {
     const onselect = vi.fn();
     render(SessionSidebar, {
       props: makeProps({
-        sessions: new Map([[3, mockSession(3, { source: { kind: 'web-pty' } })]]),
+        sessions: new Map([[3, mockSession(3, { source: { kind: 'web-pty' }, persona: 'reviewer' })]]),
         onselect,
       }),
     });
 
-    await fireEvent.click(screen.getByTestId('session-item-3'));
+    const item = screen.getByTestId('session-item-3');
+    expect(item.textContent).toContain('reviewer');
+    await fireEvent.click(item);
 
     expect(onselect).toHaveBeenCalledWith(3);
   });
@@ -174,5 +60,56 @@ describe('SessionSidebar', () => {
     expect(stoppingStatus.textContent).toContain('Stopping…');
     expect(stoppingStatus.getAttribute('aria-hidden')).toBe('true');
     expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('offers collapse when a toggle handler is provided', async () => {
+    const ontogglecollapse = vi.fn();
+    render(SessionSidebar, { props: makeProps({ ontogglecollapse }) });
+
+    await fireEvent.click(screen.getByTestId('sidebar-collapse'));
+    expect(ontogglecollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a rail with session numbers, New, expand, and resume when collapsed', async () => {
+    const onselect = vi.fn();
+    const onnew = vi.fn();
+    const ontogglecollapse = vi.fn();
+    const onresumeopen = vi.fn();
+    render(SessionSidebar, {
+      props: makeProps({
+        collapsed: true,
+        selectedLabel: 2,
+        sessions: new Map([
+          [2, mockSession(2, { source: { kind: 'web-pty' } })],
+          [5, mockSession(5, { source: { kind: 'web-pty' } })],
+        ]),
+        onselect,
+        onnew,
+        ontogglecollapse,
+        onresumeopen,
+      }),
+    });
+
+    expect(screen.queryByTestId('session-sidebar')).toBeNull();
+    expect(screen.getByTestId('session-rail-item-2').getAttribute('aria-current')).toBe('true');
+
+    await fireEvent.click(screen.getByTestId('session-rail-item-5'));
+    await fireEvent.click(screen.getByTestId('session-new'));
+    await fireEvent.click(screen.getByTestId('resume-open'));
+    await fireEvent.click(screen.getByTestId('sidebar-expand'));
+
+    expect(onselect).toHaveBeenCalledWith(5);
+    expect(onnew).toHaveBeenCalledTimes(1);
+    expect(onresumeopen).toHaveBeenCalledTimes(1);
+    expect(ontogglecollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables resume with the reason shown', () => {
+    render(SessionSidebar, {
+      props: makeProps({ onresumeopen: vi.fn(), resumeDisabledReason: 'Connect to the daemon to resume a session.' }),
+    });
+
+    expect(screen.getByTestId('resume-open')).toHaveProperty('disabled', true);
+    expect(screen.getByText('Connect to the daemon to resume a session.')).toBeTruthy();
   });
 });

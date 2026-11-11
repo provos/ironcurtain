@@ -147,6 +147,7 @@ describe('Sessions create flow guards', () => {
       }),
     );
     render(Sessions);
+    await fireEvent.click(screen.getByTestId('session-new'));
 
     const form = screen.getByTestId('session-launch-form');
     await fireEvent.submit(form);
@@ -156,12 +157,42 @@ describe('Sessions create flow guards', () => {
 
     resolveCreate?.({ label: 7 });
     await waitFor(() => expect(mockAppState.selectedSessionLabel).toBe(7));
+    // A successful start closes the New session dialog.
+    await waitFor(() => expect(screen.queryByTestId('session-launch-form')).toBeNull());
+  });
+
+  it('opens the New session dialog from the empty state and keeps it open on a failed start', async () => {
+    mockCreateSession.mockRejectedValue(new Error('Read-only mount /proc overlaps system directory /proc'));
+    render(Sessions);
+
+    await fireEvent.click(screen.getByTestId('empty-new-session'));
+    await fireEvent.click(screen.getByTestId('launch-start'));
+
+    await waitFor(() => expect(screen.getByTestId('launch-error').textContent).toContain('overlaps system directory'));
+    expect(screen.getByTestId('session-launch-form')).toBeTruthy();
+  });
+
+  it('collapses the session list to a rail and remembers it', async () => {
+    localStorage.removeItem('ic-sessions-sidebar-collapsed');
+    const rendered = render(Sessions);
+
+    await fireEvent.click(screen.getByTestId('sidebar-collapse'));
+    expect(screen.getByTestId('session-rail')).toBeTruthy();
+    expect(localStorage.getItem('ic-sessions-sidebar-collapsed')).toBe('1');
+
+    rendered.unmount();
+    render(Sessions);
+    expect(screen.getByTestId('session-rail')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('sidebar-expand'));
+    expect(screen.getByTestId('session-sidebar')).toBeTruthy();
+    localStorage.removeItem('ic-sessions-sidebar-collapsed');
   });
 
   it('shows an upgrade/restart message when daemon status omits sessionMode', async () => {
     mockAppState.daemonStatus = makeStatus();
     render(Sessions);
 
+    await fireEvent.click(screen.getByTestId('session-new'));
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(mockCreateSession).not.toHaveBeenCalled();
@@ -173,6 +204,7 @@ describe('Sessions create flow guards', () => {
     mockAppState.daemonStatus = makeStatus('builtin');
     render(Sessions);
 
+    await fireEvent.click(screen.getByTestId('session-new'));
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(mockCreateSession).not.toHaveBeenCalled();

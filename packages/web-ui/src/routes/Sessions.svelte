@@ -21,6 +21,7 @@
   import type { CreateSessionOptions, ResumableSessionDto } from '../lib/types.js';
 
   import SessionSidebar from '$lib/components/features/session-sidebar.svelte';
+  import NewSessionDialog from '$lib/components/features/new-session-dialog.svelte';
   import TerminalConsole from '$lib/components/features/terminal-console.svelte';
   import ResumeSessionModal from '$lib/components/features/resume-session-modal.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -33,6 +34,32 @@
   // Session creation state
   let creatingSession = $state(false);
   let createError = $state('');
+  let newSessionOpen = $state(false);
+
+  function openNewSession(): void {
+    createError = '';
+    newSessionOpen = true;
+  }
+
+  // Session list collapse (per-browser convenience; storage may be unavailable).
+  const SIDEBAR_COLLAPSED_KEY = 'ic-sessions-sidebar-collapsed';
+  function readSidebarCollapsed(): boolean {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+  let sidebarCollapsed = $state(readSidebarCollapsed());
+
+  function toggleSidebar(): void {
+    sidebarCollapsed = !sidebarCollapsed;
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0');
+    } catch {
+      /* storage unavailable: the toggle still works for this page view */
+    }
+  }
 
   let resumeModalOpen = $state(false);
   let resumableSessions = $state<ResumableSessionDto[]>([]);
@@ -160,6 +187,7 @@
     try {
       const result = await createSession(opts);
       appState.selectedSessionLabel = result.label;
+      newSessionOpen = false;
     } catch (err) {
       createError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -222,13 +250,22 @@
     sessions={appState.sessions}
     selectedLabel={appState.selectedSessionLabel}
     onselect={(label) => (appState.selectedSessionLabel = label)}
+    onnew={openNewSession}
+    creating={creatingSession}
+    collapsed={sidebarCollapsed}
+    ontogglecollapse={toggleSidebar}
+    onresumeopen={openResumeModal}
+    {resumeDisabledReason}
+  />
+
+  <NewSessionDialog
+    open={newSessionOpen}
+    onclose={() => (newSessionOpen = false)}
     oncreate={handleCreate}
     creating={creatingSession}
     {createError}
     loadPersonasFn={listPersonas}
     loadProviderProfilesFn={loadProviderProfiles}
-    onresumeopen={openResumeModal}
-    {resumeDisabledReason}
   />
 
   <ResumeSessionModal
@@ -360,7 +397,10 @@
     <div class="flex-1 flex items-center justify-center text-muted-foreground">
       <div class="text-center">
         <p class="text-lg mb-2">No session selected</p>
-        <p class="text-sm">Select a session from the list or create a new one.</p>
+        <p class="text-sm">Select a session from the list or start a new one.</p>
+        <Button data-testid="empty-new-session" variant="outline" size="sm" class="mt-4" onclick={openNewSession}>
+          New session
+        </Button>
       </div>
     </div>
   {/if}

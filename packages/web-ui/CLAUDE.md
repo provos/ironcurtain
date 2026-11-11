@@ -66,7 +66,8 @@ src/
       features/           -- Domain-specific components
         escalation-card.svelte   -- Single escalation with approve/deny/whitelist
         escalation-modal.svelte  -- Tabbed modal for pending escalations
-        session-sidebar.svelte   -- Session list with container launch options
+        session-sidebar.svelte   -- Session list (collapsible to a rail) with New / Resume actions
+        new-session-dialog.svelte -- New session dialog: launch options + read-only folder chips
         terminal-console.svelte  -- xterm terminal for web-pty sessions
   routes/
     Dashboard.svelte      -- Overview cards, active sessions table, upcoming jobs
@@ -213,7 +214,7 @@ A `web-pty` session (`source.kind === 'web-pty'`) renders a live xterm.js termin
 
 **Trusted-message bar (mux parity).** A docked input row below the terminal (in `Sessions.svelte`, subordinate to the terminal) sends a TRUSTED message via `sessions.ptyPrompt { label, text }` → `{ accepted: true }`. Unlike `ptyInput` (raw keystrokes, base64, **never** trusted), `text` is PLAIN text: the daemon records it as trusted user-context (authorizing auto-approval) and injects it into the child PTY. This bar is the ONLY path to auto-approval from the browser. Store action: `sendPtyPrompt(label, text)`.
 
-**Launch options (`sessions.create`).** In Container Agent Mode `sessions.create` accepts optional `persona` / `workspacePath` / `providerProfileName` / `model` (mux `/new` parity). The New-session sidebar always surfaces these launch fields plus a "Start session" button (`launch-*` test ids); selecting a persona does not start a session. The provider dropdown is populated from `config.getModelProviders`. `createSession(opts?: CreateSessionOptions)` sends only the provided keys.
+**Launch options (`sessions.create`).** In Container Agent Mode `sessions.create` accepts optional `persona` / `workspacePath` / `readonlyMounts` / `providerProfileName` / `model` (mux `/new` parity). The session list's "New" button (`session-new`, also in the collapsed rail and the empty state) opens `new-session-dialog.svelte`, which holds these fields plus a "Start session" button (`launch-*` test ids); selecting a persona does not start a session. Read-only folders are entered as chips (Enter adds, Backspace on an empty input removes the last) with a one-line visibility note; the daemon validates them. A successful start closes the dialog; a failure keeps it open with the error (`launch-error`). The session list collapses to a rail (`sidebar-collapse` / `sidebar-expand`), remembered per browser in `localStorage` (`ic-sessions-sidebar-collapsed`). The provider dropdown is populated from `config.getModelProviders`. `createSession(opts?: CreateSessionOptions)` sends only the provided keys.
 
 **Session mode (`DaemonStatusDto.sessionMode`).** The daemon status carries `sessionMode: 'builtin' | 'container'`. The backend maps internal `SessionMode.kind === 'docker'` to the public `container` value so the UI does not expose a Docker-only label when Apple Container is the active runtime.
 

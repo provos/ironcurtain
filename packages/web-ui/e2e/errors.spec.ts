@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo, createDefaultSession, resetMockServer, waitForPtyTerminal } from './helpers.js';
+import {
+  connectWithToken,
+  navigateTo,
+  createDefaultSession,
+  openNewSessionDialog,
+  resetMockServer,
+  waitForPtyTerminal,
+} from './helpers.js';
 
 test.describe('Error handling', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -37,6 +44,7 @@ test.describe('Error handling', () => {
     await navigateTo(page, 'Sessions');
 
     // Create a session and verify it appears with a numeric label
+    await openNewSessionDialog(page);
     await expect(page.getByTestId('launch-workspace')).toBeVisible();
     await expect(page.getByTestId('launch-provider')).toBeVisible();
     await expect(page.getByTestId('launch-persona')).toBeVisible();

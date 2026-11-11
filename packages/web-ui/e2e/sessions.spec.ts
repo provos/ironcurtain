@@ -7,6 +7,7 @@ import {
   ptyRows,
   waitForPtyTerminal,
   sendTrustedPtyPrompt,
+  openNewSessionDialog,
 } from './helpers.js';
 
 test.describe('Sessions', () => {
@@ -25,16 +26,47 @@ test.describe('Sessions', () => {
     expect(label).toMatch(/#\d+/);
   });
 
-  test('keeps workspace, provider, and persona launch options available before start', async ({ page }) => {
+  test('keeps launch options in the New session dialog until start', async ({ page }) => {
     await navigateTo(page, 'Sessions');
+    await expect(page.getByTestId('session-launch-form')).toHaveCount(0);
 
-    await expect(page.getByText('Launch options')).toBeVisible();
+    await openNewSessionDialog(page);
     await expect(page.getByTestId('launch-workspace')).toBeVisible();
     await expect(page.getByTestId('launch-provider')).toBeVisible();
     await expect(page.getByTestId('launch-persona')).toBeVisible();
+    await expect(page.getByTestId('launch-readonly-input')).toBeVisible();
     await expect(page.getByTestId('launch-start')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'New' })).toHaveCount(0);
     await expect(page.locator('[data-testid^="session-item-"]')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByRole('dialog', { name: 'New session' })).toBeHidden();
+  });
+
+  test('starts a session with read-only folder chips', async ({ page }) => {
+    await navigateTo(page, 'Sessions');
+    await openNewSessionDialog(page);
+
+    const input = page.getByTestId('launch-readonly-input');
+    await input.fill('/mnt/d/Training');
+    await input.press('Enter');
+    await input.fill('D:\\Datasets\\imagenet');
+    await input.press('Enter');
+    await expect(page.getByTestId('launch-readonly-chip')).toHaveText(['Training', 'imagenet']);
+    await expect(page.getByTestId('launch-readonly-warning')).toBeVisible();
+
+    await page.getByTestId('launch-start').click();
+    await expect(page.getByRole('dialog', { name: 'New session' })).toBeHidden();
+    await expect(page.locator('[data-testid^="session-item-"]').first()).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('collapses the session list to a rail', async ({ page }) => {
+    await createDefaultSession(page);
+    await page.getByTestId('sidebar-collapse').click();
+
+    await expect(page.getByTestId('session-sidebar')).toHaveCount(0);
+    await expect(page.locator('[data-testid^="session-rail-item-"]')).toHaveCount(1);
+    await page.getByTestId('sidebar-expand').click();
+    await expect(page.getByTestId('session-sidebar')).toBeVisible();
   });
 
   test('session appears in the sidebar after creation', async ({ page }) => {

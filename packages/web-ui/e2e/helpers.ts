@@ -95,12 +95,19 @@ export async function approveSeededGate(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible({ timeout: 5_000 });
 }
 
+/** Open the New session dialog from the session list (or its collapsed rail). */
+export async function openNewSessionDialog(page: Page): Promise<void> {
+  await page.getByTestId('session-new').click();
+  await expect(page.getByRole('dialog', { name: 'New session' })).toBeVisible();
+}
+
 /**
- * Create a new session using the visible launcher and explicit start button.
+ * Create a new session through the New session dialog's explicit start button.
  * Returns the session label text (e.g., "#1").
  */
 export async function createDefaultSession(page: Page): Promise<string> {
   await navigateTo(page, 'Sessions');
+  await openNewSessionDialog(page);
 
   await expect(page.getByTestId('launch-start')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('launch-workspace')).toBeVisible();
