@@ -11,6 +11,7 @@ import {
   sendTrustedPtyPrompt,
   PTY_BANNER_TEXT,
   PTY_LIVE_FRAME_TEXT,
+  openNewSessionDialog,
 } from './helpers.js';
 
 /** The current bottom-row frame counter, or null if no frame has rendered. */
@@ -126,6 +127,7 @@ test.describe('PTY terminal (Container Agent Mode)', () => {
 
   test('creates a web-pty session with launch options set', async ({ page }) => {
     await navigateTo(page, 'Sessions');
+    await openNewSessionDialog(page);
 
     const personaSelect = page.getByTestId('launch-persona');
     await expect(personaSelect).toBeVisible({ timeout: 10_000 });

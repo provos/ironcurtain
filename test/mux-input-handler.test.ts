@@ -1024,3 +1024,74 @@ describe('MuxInputHandler', () => {
     });
   });
 });
+
+describe('MuxInputHandler read-only folders in /new', () => {
+  function typePath(handler: ReturnType<typeof createMuxInputHandler>, path: string): void {
+    while ((handler.pickerState?.cursorPos ?? 0) > 0) handler.handleKey('BACKSPACE');
+    for (const c of path) handler.handleKey(c);
+  }
+
+  it('emits picker-add-readonly from the read-only browser and carries the validated list into spawn', () => {
+    const handler = createMuxInputHandler({ initialMode: 'command' });
+    handler.enterPickerMode();
+    handler.handleKey('r');
+    expect(handler.pickerState?.phase).toBe('browse');
+    expect(handler.pickerState?.browseTarget).toBe('readonly-mount');
+
+    typePath(handler, '/data/Training/');
+    expect(handler.handleKey('ENTER')).toEqual({ kind: 'picker-add-readonly', path: '/data/Training' });
+
+    // The orchestrator validates and records the canonical list.
+    handler.setReadonlyMounts(['/data/Training'], 'note');
+    expect(handler.pickerState?.phase).toBe('menu');
+    expect(handler.pickerState?.notice).toBe('note');
+    expect(handler.pickerState?.readonlyMounts).toEqual(['/data/Training']);
+
+    expect(handler.handleKey('1')).toEqual({ kind: 'picker-spawn', readonlyMounts: ['/data/Training'] });
+  });
+
+  it('re-enters the read-only browser with an error', () => {
+    const handler = createMuxInputHandler({ initialMode: 'command' });
+    handler.enterPickerMode();
+    handler.enterBrowseWithError('/proc', 'bad folder', undefined, 'readonly-mount');
+    expect(handler.pickerState?.browseTarget).toBe('readonly-mount');
+    expect(handler.pickerState?.error).toBe('bad folder');
+    expect(handler.pickerState?.readonlyMounts).toEqual([]);
+  });
+
+  it('removes the last folder with x and resets the list on a new /new', () => {
+    const handler = createMuxInputHandler({ initialMode: 'command' });
+    handler.enterPickerMode();
+    handler.setReadonlyMounts(['/a', '/b']);
+    handler.handleKey('DOWN');
+    handler.handleKey('x');
+    expect(handler.pickerState?.readonlyMounts).toEqual(['/a']);
+    expect(handler.pickerState?.menuSelection).toBe(1);
+
+    handler.enterPickerMode();
+    expect(handler.pickerState?.readonlyMounts).toEqual([]);
+  });
+
+  it('Escape from the read-only browser returns to the menu without adding', () => {
+    const handler = createMuxInputHandler({ initialMode: 'command' });
+    handler.enterPickerMode();
+    handler.handleKey('r');
+    handler.handleKey('ESCAPE');
+    expect(handler.pickerState?.phase).toBe('menu');
+    expect(handler.pickerState?.browseTarget).toBe('workspace');
+    expect(handler.pickerState?.readonlyMounts).toEqual([]);
+  });
+
+  it('keeps chosen folders through the workspace browse step', () => {
+    const handler = createMuxInputHandler({ initialMode: 'command' });
+    handler.enterPickerMode();
+    handler.setReadonlyMounts(['/ref']);
+    handler.handleKey('2');
+    typePath(handler, '/ws');
+    expect(handler.handleKey('ENTER')).toEqual({
+      kind: 'picker-spawn',
+      workspacePath: '/ws',
+      readonlyMounts: ['/ref'],
+    });
+  });
+});

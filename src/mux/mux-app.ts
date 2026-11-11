@@ -16,6 +16,8 @@ import { writeTrustedUserContext } from '../escalation/trusted-input.js';
 import { createPasteInterceptor, type PasteInterceptor } from './paste-interceptor.js';
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
+import { resolveReadonlyMounts } from '../session/readonly-mounts.js';
+import { errorMessage } from '../utils/error-message.js';
 import { scanResumableSessions } from '../pty/session-scanner.js';
 import { scanPersonas } from './persona-scanner.js';
 import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
@@ -97,6 +99,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
   async function spawnSession(opts?: {
     workspacePath?: string;
+    readonlyMounts?: readonly string[];
     resumeSessionId?: string;
     agentOverride?: string;
     persona?: string;
@@ -115,6 +118,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       prefixArgs,
       agent: sessionAgent,
       workspacePath: opts?.workspacePath,
+      readonlyMounts: opts?.readonlyMounts,
       resumeSessionId: opts?.resumeSessionId,
       persona: opts?.persona,
       providerProfileName: opts?.providerProfileName,
@@ -282,6 +286,22 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         renderer.fullRedraw();
         break;
 
+      case 'picker-add-readonly': {
+        // Validate together with the folders chosen so far (dedupe + cap).
+        const existing = inputHandler.pickerState?.readonlyMounts ?? [];
+        try {
+          const { mounts, warnings } = resolveReadonlyMounts([...existing, action.path]);
+          inputHandler.setReadonlyMounts(
+            mounts.map((m) => m.hostPath),
+            warnings.join(' ') || undefined,
+          );
+        } catch (err) {
+          inputHandler.enterBrowseWithError(action.path, errorMessage(err), undefined, 'readonly-mount');
+        }
+        renderer.fullRedraw();
+        break;
+      }
+
       case 'picker-spawn': {
         let validatedPath: string | undefined;
         if (action.workspacePath) {
@@ -299,13 +319,16 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         }
         const tab = await spawnSession({
           workspacePath: validatedPath,
+          readonlyMounts: action.readonlyMounts,
           persona: action.persona,
           providerProfileName: action.providerProfileName,
         });
         activeTabIndex = tabs.length - 1;
         const personaPrefix = action.persona ? `persona "${action.persona}" ` : '';
         const profileSuffix = action.providerProfileName ? ` [${action.providerProfileName}]` : '';
-        const suffix = validatedPath ? ` in ${validatedPath}` : '';
+        const roCount = action.readonlyMounts?.length ?? 0;
+        const roSuffix = roCount === 1 ? ' with 1 read-only folder' : ` with ${roCount} read-only folders`;
+        const suffix = (validatedPath ? ` in ${validatedPath}` : '') + (roCount > 0 ? roSuffix : '');
         showMessage(`Spawned ${personaPrefix}session #${tab.number}${suffix}${profileSuffix}`);
         inputHandler.exitPickerMode();
         renderer.fullRedraw();

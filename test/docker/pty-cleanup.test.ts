@@ -37,6 +37,8 @@ vi.mock('../../src/session/index.js', () => ({
     systemPromptAugmentation: '',
     resolvedSkills: [],
     memoryEnabled: false,
+    readonlyMounts: [],
+    readonlyMountWarnings: [],
   }),
 }));
 

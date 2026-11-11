@@ -625,6 +625,7 @@ export async function createSession(opts?: CreateSessionOptions): Promise<{ labe
   const params: Record<string, unknown> = {};
   if (opts?.persona) params.persona = opts.persona;
   if (opts?.workspacePath) params.workspacePath = opts.workspacePath;
+  if (opts?.readonlyMounts?.length) params.readonlyMounts = opts.readonlyMounts;
   if (opts?.providerProfileName) params.providerProfileName = opts.providerProfileName;
   if (opts?.model) params.model = opts.model;
   return getWsClient().request<{ label: number }>('sessions.create', params);

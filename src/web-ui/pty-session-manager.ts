@@ -158,6 +158,8 @@ interface FreshPtySessionOptions {
   readonly captureTraces?: boolean;
   /** Workspace dir passed as `--workspace` (the child validates containment). */
   readonly workspacePath?: string;
+  /** Host directories passed as `--mount-ro` (the child re-validates). */
+  readonly readonlyMounts?: readonly string[];
   /** Provider-profile name passed as `--provider-profile`. */
   readonly providerProfileName?: string;
   /** Model ID override passed as `--model`. */
@@ -171,6 +173,7 @@ interface ResumePtySessionOptions {
   readonly persona?: never;
   readonly captureTraces?: never;
   readonly workspacePath?: never;
+  readonly readonlyMounts?: never;
   readonly providerProfileName?: never;
   readonly model?: never;
 }
@@ -475,6 +478,7 @@ export class PtySessionManager {
           : {
               ...(options.persona ? { persona: options.persona } : {}),
               ...(options.workspacePath ? { workspacePath: options.workspacePath } : {}),
+              ...(options.readonlyMounts?.length ? { readonlyMounts: options.readonlyMounts } : {}),
               ...(options.providerProfileName ? { providerProfileName: options.providerProfileName } : {}),
               ...(options.model ? { model: options.model } : {}),
             }),

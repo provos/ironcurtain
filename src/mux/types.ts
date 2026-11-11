@@ -44,6 +44,11 @@ export interface MuxTab {
   scrollOffset: number | null;
 }
 
+/** /new menu hotkey that opens the browser to add a read-only folder. */
+export const PICKER_ADD_READONLY_KEY = 'r';
+/** /new menu hotkey that removes the most recently added read-only folder. */
+export const PICKER_REMOVE_READONLY_KEY = 'x';
+
 /**
  * Actions produced by the input handler for the orchestrator to execute.
  */
@@ -59,9 +64,12 @@ export type MuxAction =
   | {
       readonly kind: 'picker-spawn';
       readonly workspacePath?: string;
+      /** Validated host directories to mount read-only into the container. */
+      readonly readonlyMounts?: readonly string[];
       readonly persona?: string;
       readonly providerProfileName?: string;
     }
+  | { readonly kind: 'picker-add-readonly'; readonly path: string }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
   | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }

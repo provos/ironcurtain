@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { WebSocket as WsWebSocket } from 'ws';
@@ -1340,5 +1340,53 @@ describe('sessions resume RPC', () => {
     ).rejects.toMatchObject({
       code: 'SESSION_NOT_RESUMABLE',
     });
+  });
+});
+
+describe('sessions.create (docker) read-only mounts', () => {
+  function makeCtx(createBridge: (options: PtyBridgeOptions) => Promise<PtyBridge>): DispatchContext {
+    const eventBus = new WebEventBus();
+    const manager = new PtySessionManager({
+      sender: { sendToSubscribers: () => {} },
+      sessionManager: new SessionManager(),
+      eventBus,
+      mode: { kind: 'docker', agent: 'claude-code' },
+      daemonId: 'test',
+      daemonPid: 1,
+      createBridge,
+      preflight: async () => {},
+    });
+    return {
+      handler: makeHandler(),
+      sessionManager: new SessionManager(),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      eventBus,
+      maxConcurrentWebSessions: 5,
+      sessionQueues: new Map(),
+      ptySessionManager: manager,
+    };
+  }
+
+  it('passes canonical read-only mount paths to the bridge', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ic-web-ro-')));
+    try {
+      const createBridge = vi.fn<(options: PtyBridgeOptions) => Promise<PtyBridge>>(
+        async () => new StubBridge() as unknown as PtyBridge,
+      );
+      await sessionDispatch(makeCtx(createBridge), 'sessions.create', { readonlyMounts: [`${dir}/`] });
+      expect(createBridge.mock.calls[0][0].readonlyMounts).toEqual([dir]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an unsafe mount before spawning a bridge', async () => {
+    const createBridge = vi.fn<(options: PtyBridgeOptions) => Promise<PtyBridge>>(
+      async () => new StubBridge() as unknown as PtyBridge,
+    );
+    await expect(
+      sessionDispatch(makeCtx(createBridge), 'sessions.create', { readonlyMounts: ['/dev'] }),
+    ).rejects.toThrow(/system directory/);
+    expect(createBridge).not.toHaveBeenCalled();
   });
 });

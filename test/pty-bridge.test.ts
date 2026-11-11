@@ -107,6 +107,12 @@ describe('buildSpawnArgs', () => {
     expect(buildSpawnArgs(baseOptions())).not.toContain('--workspace');
   });
 
+  it('appends one --mount-ro <path> per read-only mount, in order', () => {
+    const args = buildSpawnArgs(baseOptions({ readonlyMounts: ['/mnt/d/Training', '/data/ref'] }));
+    expect(args.slice(-4)).toEqual(['--mount-ro', '/mnt/d/Training', '--mount-ro', '/data/ref']);
+    expect(buildSpawnArgs(baseOptions())).not.toContain('--mount-ro');
+  });
+
   it('appends --persona <name> when set, omits when unset', () => {
     const args = buildSpawnArgs(baseOptions({ persona: 'exec-assistant' }));
     expect(args[args.indexOf('--persona') + 1]).toBe('exec-assistant');

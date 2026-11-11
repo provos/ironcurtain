@@ -46,7 +46,8 @@ import {
   type AgentId,
   type ConversationStateConfig,
 } from './agent-adapter.js';
-import { buildContainerWorkspaceMount, CONTAINER_WORKSPACE_DIR } from './container-workspace.js';
+import { readonlyMountsOverlapWorkspace, type ReadonlyMountSpec } from '../session/readonly-mounts.js';
+import { buildContainerWorkspaceMount, buildReadonlyMounts, CONTAINER_WORKSPACE_DIR } from './container-workspace.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import { resolveActiveProfile } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
@@ -497,6 +498,12 @@ export interface PreContainerInfrastructure {
    * callers pass a per-session sandbox here.
    */
   readonly workspaceDir: string;
+  /**
+   * User-selected host directories bind-mounted read-only under `/mnt/ro/`
+   * in the agent container. Validated by `readonly-mounts.ts`; absent for
+   * workflow bundles. Not exposed to the nested Docker daemon.
+   */
+  readonly readonlyMounts?: readonly ReadonlyMountSpec[];
   readonly escalationDir: string;
   /**
    * Audit log path, populated by `prepareDockerInfrastructure()` from
@@ -952,6 +959,8 @@ export type AgentImageResolution = {
 
 export interface PrepareDockerInfrastructureOptions {
   readonly providerProfileName?: string;
+  /** Validated read-only extra mounts for the agent container (standalone sessions only). */
+  readonly readonlyMounts?: readonly ReadonlyMountSpec[];
   readonly preparedImageResolution?: AgentImageResolution;
   /** Explicit request-rewriter mode for this container lifecycle. */
   readonly proxyAgentKind?: AgentKind;
@@ -971,7 +980,7 @@ export async function prepareDockerInfrastructure(
   scriptsDir?: string,
   options: PrepareDockerInfrastructureOptions = {},
 ): Promise<PreContainerInfrastructure> {
-  const { providerProfileName, preparedImageResolution, proxyAgentKind } = options;
+  const { providerProfileName, preparedImageResolution, proxyAgentKind, readonlyMounts } = options;
   // Secure nested Docker resolves the effective runtime and rejects every
   // unsupported variant before feature-attributable runtime, image, artifact,
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
@@ -1056,6 +1065,16 @@ export async function prepareDockerInfrastructure(
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(config.userConfig.containerRuntime));
+  if (
+    runtimeKind === 'apple-container' &&
+    readonlyMounts !== undefined &&
+    readonlyMountsOverlapWorkspace(readonlyMounts, workspaceDir)
+  ) {
+    throw new Error(
+      'Apple container cannot mount a read-only folder that overlaps the workspace (virtiofs drops nested shares). ' +
+        'Choose read-only folders outside the workspace.',
+    );
+  }
   const topology = resolveNetworkTopology(
     runtimeKind,
     admittedEnvironment === undefined ? undefined : admittedEnvironment.egressTransport === 'tcp',
@@ -1745,6 +1764,7 @@ export async function prepareDockerInfrastructure(
       scope,
       bundleDir,
       workspaceDir,
+      readonlyMounts,
       escalationDir,
       auditLogPath,
       proxy,
@@ -1890,6 +1910,7 @@ export async function createDockerInfrastructure(
       providerProfileName,
       preparedImageResolution: options?.preparedImageResolution,
       proxyAgentKind: workflowId !== undefined ? 'workflow' : 'batch',
+      readonlyMounts: options?.readonlyMounts,
     },
   );
 
@@ -2895,6 +2916,8 @@ export interface CreateDockerInfrastructureOptions {
   readonly baseImageOverride?: string;
   /** Exact CLI preflight result, threaded into this one session without re-resolution. */
   readonly preparedImageResolution?: AgentImageResolution;
+  /** Validated read-only extra mounts for the agent container. */
+  readonly readonlyMounts?: readonly ReadonlyMountSpec[];
 }
 
 /**
@@ -2977,6 +3000,7 @@ async function createSessionContainersAttempt(
     const mounts: { source: string; target: string; readonly: boolean }[] = [
       buildContainerWorkspaceMount(core.workspaceDir),
       { source: core.orientationDir, target: '/etc/ironcurtain', readonly: true },
+      ...buildReadonlyMounts(core.readonlyMounts),
     ];
     // Same-VM nested daemon (§4.4 variant 1): present only for an admitted
     // Docker-workload bundle, in which case this agent container both hosts the

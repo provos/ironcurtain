@@ -23,7 +23,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
 import { loadSessionMetadata, updateSessionMetadata } from '../session/session-metadata.js';
-import { buildContainerWorkspaceMount } from './container-workspace.js';
+import { buildContainerWorkspaceMount, buildReadonlyMounts } from './container-workspace.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import { validateResumeSession } from '../pty/session-scanner.js';
@@ -78,6 +78,8 @@ export interface PtySessionOptions {
   readonly preparedImageResolution?: AgentImageResolution;
   /** Validated workspace path. When provided, replaces the session sandbox. */
   readonly workspacePath?: string;
+  /** Host directories to mount read-only (validated by buildSessionConfig). Ignored on resume. */
+  readonly readonlyMounts?: readonly string[];
   /** Session ID to resume. When set, reuses the existing session directory. */
   readonly resumeSessionId?: string;
   /** Persona name. Used to build CLAUDE.md and system prompt augmentation. */
@@ -325,6 +327,7 @@ async function runPtySessionAttempt(
   const dirConfig = buildSessionConfig(options.config, effectiveSessionId, sessionId, {
     resumeSessionId: options.resumeSessionId,
     workspacePath: isResume ? resumeSnapshot.workspacePath : options.workspacePath,
+    readonlyMounts: options.readonlyMounts,
     persona,
     providerProfileName,
     mode: options.mode,
@@ -338,6 +341,9 @@ async function runPtySessionAttempt(
   // Layer PTY-specific fields on top of the shared config.
   const sessionConfig = { ...dirConfig.config, isPtySession: true };
   const { sandboxDir, escalationDir, systemPromptAugmentation } = dirConfig;
+  for (const warning of dirConfig.readonlyMountWarnings) {
+    process.stderr.write(chalk.yellow(`Warning: ${warning}\n`));
+  }
 
   logger.info(`PTY session ${effectiveSessionId} ${isResume ? 'resuming' : 'starting'}`);
 
@@ -445,6 +451,7 @@ async function runPtySessionAttempt(
         providerProfileName,
         preparedImageResolution: options.preparedImageResolution,
         proxyAgentKind: 'pty',
+        readonlyMounts: dirConfig.readonlyMounts,
       },
     );
     // Publish every cleanup-owned resource before any subsequent callback can
@@ -776,6 +783,7 @@ async function runPtySessionAttempt(
       }
     }
 
+    mounts.push(...buildReadonlyMounts(infra.readonlyMounts));
     mounts.push(...buildDockerWorkloadEgressMounts(infra));
     mounts.push(...buildDockerBuildShimMounts(infra));
 
