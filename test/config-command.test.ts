@@ -242,6 +242,37 @@ describe('config-command', () => {
     expect(ws.brave).toEqual({ apiKey: 'test-brave-key-123' });
   });
 
+  it('selects Parallel without a key and lets the user disable it', async () => {
+    seedConfig(env.testHome, { webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } } });
+    mocks.select
+      .mockResolvedValueOnce('websearch')
+      .mockResolvedValueOnce('select')
+      .mockResolvedValueOnce('parallel')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(mocks.select).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.arrayContaining([
+          { value: 'parallel', label: 'Parallel Search', hint: expect.stringContaining('mcp.parallel.ai') },
+        ]),
+      }),
+    );
+    expect(mocks.text).not.toHaveBeenCalled();
+    expect(loadUserConfig().webSearch).toMatchObject({ provider: 'parallel', brave: { apiKey: 'existing-brave-key' } });
+
+    mocks.select.mockResolvedValueOnce('websearch').mockResolvedValueOnce('disable').mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).webSearch).toBeUndefined();
+    expect(loadUserConfig().webSearch.provider).toBeNull();
+  });
+
   it('Model Providers section appears in main menu', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',

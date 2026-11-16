@@ -3,7 +3,7 @@
  *
  * Exposes two tools:
  * - `http_fetch` (GET-only) retrieves web content, converting HTML to markdown by default.
- * - `web_search` queries a configured search provider (Brave, Tavily, or SerpAPI).
+ * - `web_search` queries a configured search provider.
  *
  * Security:
  * - SSRF protection is handled by the policy engine (IP addresses blocked structurally)
@@ -305,12 +305,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
+server.setRequestHandler(CallToolRequestSchema, async (req, { signal }) => {
   switch (req.params.name) {
     case 'http_fetch':
       return handleHttpFetch(req.params.arguments);
     case 'web_search':
-      return handleWebSearch(req.params.arguments);
+      return handleWebSearch(req.params.arguments, signal);
     default:
       return {
         content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }],
@@ -383,6 +383,7 @@ async function handleHttpFetch(
 
 async function handleWebSearch(
   args: Record<string, unknown> | undefined,
+  signal: AbortSignal,
 ): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
   const query = args?.query as string | undefined;
   if (!query || typeof query !== 'string') {
@@ -399,7 +400,7 @@ async function handleWebSearch(
           type: 'text',
           text:
             'Web search is not configured. Set a search provider in ~/.ironcurtain/config.json ' +
-            'using "ironcurtain config" or by adding a webSearch section with provider and API key.',
+            'using "ironcurtain config" or by adding a webSearch section with the provider and any required API key.',
         },
       ],
       isError: true,
@@ -413,7 +414,7 @@ async function handleWebSearch(
       : 5;
 
   try {
-    const results = await searchProvider.search(query, maxResults);
+    const results = await searchProvider.search(query, maxResults, signal);
     const formatted = formatSearchResults(query, results);
     return { content: [{ type: 'text', text: formatted }] };
   } catch (err) {

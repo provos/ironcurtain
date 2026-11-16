@@ -230,12 +230,14 @@ files, filesystem snapshots, or backups. They do not rotate or delete `identity.
 
 Configure a web search provider so the agent can search the web via the `web_search` tool.
 
-| Field                      | Type   | Default  | Description                                       |
-| -------------------------- | ------ | -------- | ------------------------------------------------- |
-| `webSearch.provider`       | string | _(none)_ | Active provider: `brave`, `tavily`, or `serpapi`. |
-| `webSearch.brave.apiKey`   | string | —        | Brave Search API key.                             |
-| `webSearch.tavily.apiKey`  | string | —        | Tavily API key.                                   |
-| `webSearch.serpapi.apiKey` | string | —        | SerpAPI key.                                      |
+| Field                     | Type   | Default  | Description                                                  |
+| ------------------------- | ------ | -------- | ------------------------------------------------------------ |
+| `webSearch.provider`      | string | _(none)_ | Active provider (`brave`, `tavily`, `serpapi`, or `parallel`). |
+| `webSearch.brave.apiKey`   | string | —        | Brave Search API key.                                        |
+| `webSearch.tavily.apiKey`  | string | —        | Tavily API key.                                              |
+| `webSearch.serpapi.apiKey` | string | —        | SerpAPI key.                                                 |
+
+Choose **Parallel Search** in `ironcurtain setup` or under **Web Search** in `ironcurtain config`, or set `"webSearch": { "provider": "parallel" }` in `config.json`. Search queries are sent to `https://mcp.parallel.ai/mcp` and use its anonymous rate limits. No Parallel API key is required.
 
 ### Getting API Keys
 
