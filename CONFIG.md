@@ -237,7 +237,11 @@ Configure a web search provider so the agent can search the web via the `web_sea
 | `webSearch.tavily.apiKey`  | string | —        | Tavily API key.                                              |
 | `webSearch.serpapi.apiKey` | string | —        | SerpAPI key.                                                 |
 
-Choose **Parallel Search** in `ironcurtain setup` or under **Web Search** in `ironcurtain config`, or set `"webSearch": { "provider": "parallel" }` in `config.json`. Search queries are sent to `https://mcp.parallel.ai/mcp` and use its anonymous rate limits. No Parallel API key is required.
+Choose **Parallel Search** in `ironcurtain setup` or under **Web Search** in `ironcurtain config`, or set `"webSearch": { "provider": "parallel" }` in `config.json`. When selected, IronCurtain sends web search queries to Parallel at `https://mcp.parallel.ai/mcp`. Searches use Parallel's anonymous rate limits and require no API key.
+
+Under Parallel's standard [Customer Terms](https://parallel.ai/customer-terms), Parallel may use search inputs and outputs to train and improve the models behind its services. The terms say that data used for training is not linked to any individual during training.
+
+Anonymous access has no zero data retention (ZDR) guarantee. Parallel's [Scale plan](https://parallel.ai/blog/scale-plan) requires a signed agreement to enable Hybrid ZDR for eligible authenticated account traffic.
 
 ### Getting API Keys
 
