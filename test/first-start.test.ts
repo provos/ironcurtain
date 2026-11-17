@@ -131,6 +131,18 @@ describe('first-start wizard', () => {
   });
 
   describe('re-run safety', () => {
+    it('configures Parallel without asking for an API key', async () => {
+      mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+      mocks.select.mockResolvedValueOnce('parallel');
+      mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
+      mocks.confirm.mockResolvedValueOnce(false); // auto-approve
+
+      await runFirstStart();
+
+      expect(readConfig(env.testHome).webSearch).toEqual({ provider: 'parallel' });
+      expect(mocks.text).not.toHaveBeenCalled();
+    });
+
     it('preserves existing web search API key when re-selecting same provider', async () => {
       seedConfig(env.testHome, {
         webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } },

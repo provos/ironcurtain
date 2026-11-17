@@ -15,6 +15,7 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
+  PARALLEL_WEB_SEARCH_HINT,
   loadUserConfig,
   saveUserConfig,
   type ResolvedDockerResourcesConfig,
@@ -144,11 +145,14 @@ export async function runFirstStart(): Promise<void> {
       'information. This is optional but makes the agent significantly more helpful.',
   );
   const existingProvider = existingConfig.webSearch.provider;
-  const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
-    value: prov,
-    label: WEB_SEARCH_PROVIDER_LABELS[prov],
-    hint: prov === existingProvider ? `${WEB_SEARCH_PROVIDER_URLS[prov]} (configured)` : WEB_SEARCH_PROVIDER_URLS[prov],
-  }));
+  const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => {
+    const hint = prov === 'parallel' ? PARALLEL_WEB_SEARCH_HINT : WEB_SEARCH_PROVIDER_URLS[prov];
+    return {
+      value: prov,
+      label: WEB_SEARCH_PROVIDER_LABELS[prov],
+      hint: prov === existingProvider ? `${hint} (configured)` : hint,
+    };
+  });
   const setupSearch = await p.select({
     message: 'Set up a web search provider?',
     options: [
@@ -159,8 +163,11 @@ export async function runFirstStart(): Promise<void> {
   });
   handleCancel(setupSearch);
 
-  if (setupSearch !== 'skip') {
-    const provider = setupSearch as WebSearchProvider;
+  if (setupSearch === 'parallel') {
+    pending.webSearch = { provider: setupSearch };
+    p.log.success('Web search configured with Parallel Search.');
+  } else if (setupSearch !== 'skip') {
+    const provider = setupSearch as Exclude<WebSearchProvider, 'parallel'>;
     const existingKey = existingConfig.webSearch[provider]?.apiKey;
     if (existingKey) {
       // Re-selected a provider that already has an API key — preserve it

@@ -21,6 +21,7 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
+  PARALLEL_WEB_SEARCH_HINT,
   GOOSE_PROVIDERS,
   DOCKER_AGENTS,
   SESSION_MODES,
@@ -251,7 +252,8 @@ export function computeDiff(
   if (pending.webSearch) {
     const pw = pending.webSearch;
     const rw = resolved.webSearch;
-    if (pw.provider !== undefined && pw.provider !== rw.provider) {
+    const disabling = Object.keys(pw).length === 0;
+    if ((pw.provider !== undefined || disabling) && (pw.provider ?? null) !== rw.provider) {
       diffs.push(['webSearch.provider', { from: rw.provider ?? 'none', to: pw.provider ?? 'none' }]);
     }
     // Show API key changes as masked values
@@ -876,7 +878,7 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
 async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
-    const currentProvider = pending.webSearch?.provider ?? resolved.webSearch.provider;
+    const currentProvider = pending.webSearch ? pending.webSearch.provider : resolved.webSearch.provider;
     const currentLabel = currentProvider ? WEB_SEARCH_PROVIDER_LABELS[currentProvider] : 'not configured';
 
     const action = await p.select({
@@ -899,7 +901,7 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
       value: prov,
       label: WEB_SEARCH_PROVIDER_LABELS[prov],
-      hint: prov === currentProvider ? '(current)' : undefined,
+      hint: prov === 'parallel' ? PARALLEL_WEB_SEARCH_HINT : prov === currentProvider ? '(current)' : undefined,
     }));
 
     const selected = await p.select({
@@ -908,6 +910,11 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     });
     if (isCancelled(selected)) continue;
     const provider = selected as WebSearchProvider;
+
+    if (provider === 'parallel') {
+      pending.webSearch = { provider };
+      continue;
+    }
 
     p.note(`Get an API key at ${WEB_SEARCH_PROVIDER_URLS[provider]}`, WEB_SEARCH_PROVIDER_LABELS[provider]);
 
@@ -2025,7 +2032,7 @@ function autoCompactHint(resolved: ResolvedUserConfig, pending: UserConfig): str
 }
 
 function webSearchHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
-  const provider = pending.webSearch?.provider ?? resolved.webSearch.provider;
+  const provider = pending.webSearch ? pending.webSearch.provider : resolved.webSearch.provider;
   return provider ? WEB_SEARCH_PROVIDER_LABELS[provider] : 'not configured';
 }
 

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- Add Parallel Search as an opt-in `web_search` provider that works without a Parallel API key.
+
 ## [0.14.0] - 2026-09-21
 
 ### Features

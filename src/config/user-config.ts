@@ -211,7 +211,7 @@ const snapshotSchema = z
   })
   .optional();
 
-export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
+export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi', 'parallel'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
 /** Human-readable labels for web search providers. */
@@ -219,10 +219,13 @@ export const WEB_SEARCH_PROVIDER_LABELS: Readonly<Record<WebSearchProvider, stri
   brave: 'Brave Search',
   tavily: 'Tavily',
   serpapi: 'SerpAPI',
+  parallel: 'Parallel Search',
 };
 
-/** Signup URLs for web search providers. */
-export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<WebSearchProvider, string>> = {
+export const PARALLEL_WEB_SEARCH_HINT = 'Sends queries to mcp.parallel.ai. No API key required.';
+
+/** Signup URLs for web search providers that require an API key. */
+export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<Exclude<WebSearchProvider, 'parallel'>, string>> = {
   brave: 'https://brave.com/search/api/',
   tavily: 'https://tavily.com/',
   serpapi: 'https://serpapi.com/',
