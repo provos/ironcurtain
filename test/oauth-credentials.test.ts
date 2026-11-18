@@ -77,7 +77,7 @@ function makeConfig(overrides?: Partial<IronCurtainConfig['userConfig']>): IronC
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
-      webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
+      webSearch: { provider: null, brave: null, tavily: null, serpapi: null, keenable: null },
       serverCredentials: {},
       signal: null,
       ...overrides,

@@ -1,7 +1,7 @@
 /**
  * Web search provider abstraction.
  *
- * Supports Brave, Tavily, SerpAPI, and Parallel Search.
+ * Supports Brave, Tavily, SerpAPI, Parallel Search, and Keenable.
  * Each provider is configured via environment variables injected through
  * the serverCredentials flow (never hardcoded or read from the config directly).
  */
@@ -234,6 +234,78 @@ async function fetchBoundedMcpResponse(
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+// ─── Keenable ────────────────────────────────────────────────
+
+const KEENABLE_RESPONSE_LIMIT = 5 * 1024 * 1024;
+
+const keenableSearchResponse = z.object({
+  results: z.array(
+    z.object({
+      title: z.string().nullish(),
+      url: z.httpUrl(),
+      snippet: z.string().nullish(),
+      description: z.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * Keenable search over its REST API. Without a key it uses the public keyless
+ * endpoint (rate limited per IP), which requires an `X-Keenable-Title` header.
+ * With KEENABLE_API_KEY it uses the keyed endpoint instead.
+ */
+class KeenableSearchProvider implements SearchProvider {
+  readonly name = 'keenable';
+  private readonly apiKey: string | undefined;
+  private readonly baseUrl: string;
+
+  constructor(apiKey?: string, baseUrl?: string) {
+    this.apiKey = apiKey || undefined;
+    this.baseUrl = baseUrl ?? 'https://api.keenable.ai';
+  }
+
+  async search(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
+    const url = new URL(this.apiKey ? '/v1/search' : '/v1/search/public', this.baseUrl);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': `IronCurtain/${VERSION}`,
+    };
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey;
+    else headers['X-Keenable-Title'] = 'IronCurtain';
+
+    const deadline = AbortSignal.any([AbortSignal.timeout(SEARCH_TIMEOUT_MS), ...(signal ? [signal] : [])]);
+    // Requests carry the query and possibly an API key. Keep them at the configured origin.
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query: query.slice(0, 1000), max_results: Math.min(Math.max(maxResults, 1), 50) }),
+      redirect: 'error',
+      signal: deadline,
+    });
+    if (response.status === 429) {
+      throw new Error('Keenable rate limit reached (HTTP 429). Try again later or add a Keenable API key.');
+    }
+    if (!response.ok) {
+      throw new Error(`Search API returned ${response.status}: ${response.statusText}`);
+    }
+    const length = Number(response.headers.get('content-length') ?? 0);
+    if (length > KEENABLE_RESPONSE_LIMIT) {
+      throw new Error(`Keenable response exceeds ${KEENABLE_RESPONSE_LIMIT} byte limit`);
+    }
+    const text = await response.text();
+    if (text.length > KEENABLE_RESPONSE_LIMIT) {
+      throw new Error(`Keenable response exceeds ${KEENABLE_RESPONSE_LIMIT} byte limit`);
+    }
+    const { results } = keenableSearchResponse.parse(JSON.parse(text));
+    return results.slice(0, maxResults).map(({ url: resultUrl, title, snippet, description }) => ({
+      title: title || resultUrl,
+      url: resultUrl,
+      snippet: snippet || description || '',
+    }));
+  }
+}
+
 // ─── Factory ─────────────────────────────────────────────────
 
 /**
@@ -251,6 +323,8 @@ export function createSearchProvider(env: Record<string, string | undefined>): S
   switch (provider) {
     case 'parallel':
       return new ParallelSearchProvider();
+    case 'keenable':
+      return new KeenableSearchProvider(env.KEENABLE_API_KEY, env.KEENABLE_API_BASE_URL);
     case 'brave': {
       const apiKey = env.BRAVE_API_KEY;
       if (!apiKey) return null;

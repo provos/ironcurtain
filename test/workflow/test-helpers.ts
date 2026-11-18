@@ -370,7 +370,7 @@ export function makeTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}):
       llmBaseUrl: undefined,
       llmApiKey: undefined,
     },
-    webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
+    webSearch: { provider: null, brave: null, tavily: null, serpapi: null, keenable: null },
     serverCredentials: {},
     signal: null,
     gooseProvider: 'anthropic',

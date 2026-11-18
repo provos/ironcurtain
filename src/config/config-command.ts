@@ -21,7 +21,8 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
-  PARALLEL_WEB_SEARCH_HINT,
+  KEYLESS_WEB_SEARCH_HINTS,
+  isKeylessWebSearchProvider,
   GOOSE_PROVIDERS,
   DOCKER_AGENTS,
   SESSION_MODES,
@@ -901,7 +902,11 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
       value: prov,
       label: WEB_SEARCH_PROVIDER_LABELS[prov],
-      hint: prov === 'parallel' ? PARALLEL_WEB_SEARCH_HINT : prov === currentProvider ? '(current)' : undefined,
+      hint: isKeylessWebSearchProvider(prov)
+        ? KEYLESS_WEB_SEARCH_HINTS[prov]
+        : prov === currentProvider
+          ? '(current)'
+          : undefined,
     }));
 
     const selected = await p.select({
@@ -911,7 +916,7 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     if (isCancelled(selected)) continue;
     const provider = selected as WebSearchProvider;
 
-    if (provider === 'parallel') {
+    if (isKeylessWebSearchProvider(provider)) {
       pending.webSearch = { provider };
       continue;
     }

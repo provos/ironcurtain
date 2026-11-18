@@ -721,6 +721,15 @@ describe('loadUserConfig', () => {
     expect(config.webSearch.brave).toBeNull();
     expect(config.webSearch.tavily).toBeNull();
     expect(config.webSearch.serpapi).toBeNull();
+    expect(config.webSearch.keenable).toBeNull();
+  });
+
+  it('keenable webSearch parses with or without an API key', () => {
+    writeConfigFile({ webSearch: { provider: 'keenable' } });
+    expect(loadUserConfig().webSearch).toMatchObject({ provider: 'keenable', keenable: null });
+
+    writeConfigFile({ webSearch: { provider: 'keenable', keenable: { apiKey: 'test-keenable-key' } } });
+    expect(loadUserConfig().webSearch.keenable).toEqual({ apiKey: 'test-keenable-key' });
   });
 
   // ── serverCredentials tests ─────────────────────────────────────────

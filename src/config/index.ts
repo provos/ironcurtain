@@ -183,6 +183,9 @@ function computeWebSearchCredentials(webSearch: ResolvedWebSearchConfig): Record
     case 'serpapi':
       if (webSearch.serpapi) creds.SERPAPI_API_KEY = webSearch.serpapi.apiKey;
       break;
+    case 'keenable':
+      if (webSearch.keenable) creds.KEENABLE_API_KEY = webSearch.keenable.apiKey;
+      break;
   }
 
   return creds;
