@@ -93,7 +93,7 @@ Playwright auto-starts both the mock server and Vite dev server. Tests cover das
 
 - **Svelte 5** -- runes-based reactivity (`$state`, `$derived`, `$effect`)
 - **Vite** -- dev server and production bundler
-- **Tailwind CSS v3** -- utility-first styling with CSS custom property theming
+- **Tailwind CSS v4** -- Vite integration and theme tokens in `src/app.css`. Requires Chrome 111+, Safari 16.4+, or Firefox 128+.
 - **phosphor-svelte** -- icons (tree-shaken via Vite plugin)
 - **marked + DOMPurify** -- safe markdown rendering
 - **clsx + tailwind-merge** -- conditional class merging (shadcn-svelte pattern)

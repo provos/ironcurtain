@@ -405,7 +405,10 @@
         above sibling cards but below the drawer (z-50 from Fix-pack A).
         bg-background prevents body content showing through as it scrolls under.
       -->
-      <div class="sticky top-0 z-10 -mx-6 px-6 py-2 bg-background/95 backdrop-blur" data-testid="action-error-sticky">
+      <div
+        class="sticky top-0 z-10 -mx-6 px-6 py-2 bg-background/95 backdrop-blur-sm"
+        data-testid="action-error-sticky"
+      >
         <Alert variant="destructive" dismissible ondismiss={() => (actionError = '')}>{actionError}</Alert>
       </div>
     {/if}
@@ -422,7 +425,7 @@
               <select
                 id="def-select"
                 bind:value={selectedDefinition}
-                class="flex-1 min-w-0 px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
+                class="flex-1 min-w-0 px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
               >
                 <option value="">Select a workflow…</option>
                 {#if bundledDefs.length > 0}
@@ -478,7 +481,7 @@
               bind:value={taskDescription}
               placeholder="Describe the task in detail…"
               rows="4"
-              class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring placeholder:text-muted-foreground/50 transition-all disabled:opacity-50 resize-y min-h-[80px]"
+              class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-ring/40 focus:border-ring placeholder:text-muted-foreground/50 transition-all disabled:opacity-50 resize-y min-h-[80px]"
             ></textarea>
           </div>
           <div>

@@ -35,7 +35,7 @@
       aria-expanded={expanded}
       aria-controls={detailsId}
       onclick={() => (expanded = !expanded)}
-      class="flex w-full flex-wrap items-center gap-2 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      class="flex w-full flex-wrap items-center gap-2 text-left rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span class="flex items-center gap-2 text-sm font-semibold">
         <Gauge size={18} weight="duotone" class="text-primary" /> Resource limits

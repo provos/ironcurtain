@@ -76,7 +76,7 @@
       <Clock size={40} class="mx-auto text-muted-foreground/30 mb-4" />
       <p class="text-muted-foreground">No jobs configured</p>
       <p class="text-sm text-muted-foreground/70 mt-1">
-        Add jobs via <code class="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">ironcurtain daemon add-job</code>
+        Add jobs via <code class="font-mono text-xs bg-muted px-1.5 py-0.5 rounded-sm">ironcurtain daemon add-job</code>
       </p>
     </Card>
   {:else}
@@ -98,7 +98,7 @@
               <div class="text-[11px] text-muted-foreground font-mono mt-0.5">{entry.job.id}</div>
             </TableCell>
             <TableCell>
-              <code class="text-xs font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded"
+              <code class="text-xs font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-sm"
                 >{entry.job.schedule}</code
               >
             </TableCell>

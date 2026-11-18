@@ -154,7 +154,7 @@
                     disabled={disabled[item.key] || !mutationAllowed || saving}
                     placeholder={disabled[item.key] ? 'No limit' : 'Enter limit'}
                     aria-describedby={`budget-unit-${item.key}`}
-                    class="w-full min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 disabled:opacity-50 tabular-nums"
+                    class="w-full min-w-0 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-ring/40 disabled:opacity-50 tabular-nums"
                     oninput={() => (saved = false)}
                   />
                   <span id={`budget-unit-${item.key}`} class="text-xs text-muted-foreground shrink-0">{item.unit}</span>
@@ -175,7 +175,7 @@
                 inputmode="decimal"
                 bind:value={warning}
                 disabled={!mutationAllowed || saving}
-                class="w-20 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 disabled:opacity-50 tabular-nums"
+                class="w-20 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-ring/40 disabled:opacity-50 tabular-nums"
                 oninput={() => (saved = false)}
               /><span class="text-sm text-muted-foreground">%</span>
             </div>

@@ -226,7 +226,7 @@
   <li>
     <button
       onclick={() => handleClick(node)}
-      class="w-full text-left flex items-center gap-1.5 px-2 py-0.5 rounded hover:bg-accent/50 transition-colors"
+      class="w-full text-left flex items-center gap-1.5 px-2 py-0.5 rounded-sm hover:bg-accent/50 transition-colors"
       style="padding-left: {depth * 16 + 8}px"
     >
       {#if node.type === 'directory'}

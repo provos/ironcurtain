@@ -24,13 +24,15 @@ test.describe('Theme switching', () => {
     await expect(sidebar.getByText('Midnight')).toBeVisible();
   });
 
-  test('switching to Daylight changes the data-theme attribute', async ({ page }) => {
+  test('switching to Daylight updates the dashboard card theme', async ({ page }) => {
     const sidebar = page.getByTestId('sidebar-nav');
+    const sessionsCard = page.getByTestId('stat-sessions');
+    await expect(sessionsCard).toHaveCSS('background-color', 'rgb(22, 24, 29)');
     await sidebar.getByText('Theme:', { exact: false }).click();
     await sidebar.getByText('Daylight').click();
 
-    const theme = await page.locator('html').getAttribute('data-theme');
-    expect(theme).toBe('daylight');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'daylight');
+    await expect(sessionsCard).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   });
 
   test('switching to Midnight changes the data-theme attribute', async ({ page }) => {

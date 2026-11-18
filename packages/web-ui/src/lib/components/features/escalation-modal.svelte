@@ -119,15 +119,15 @@
   </div>
 
   <div class="px-5 py-2 border-t border-border text-[10px] text-muted-foreground flex items-center gap-4">
-    <span><kbd class="px-1 py-0.5 bg-muted rounded text-[10px]">a</kbd> approve</span>
-    <span><kbd class="px-1 py-0.5 bg-muted rounded text-[10px]">d</kbd> deny</span>
+    <span><kbd class="px-1 py-0.5 bg-muted rounded-sm text-[10px]">a</kbd> approve</span>
+    <span><kbd class="px-1 py-0.5 bg-muted rounded-sm text-[10px]">d</kbd> deny</span>
     {#if sortedEscalations.length > 1}
       <span
-        ><kbd class="px-1 py-0.5 bg-muted rounded text-[10px]">&larr;</kbd><kbd
-          class="px-1 py-0.5 bg-muted rounded text-[10px]">&rarr;</kbd
+        ><kbd class="px-1 py-0.5 bg-muted rounded-sm text-[10px]">&larr;</kbd><kbd
+          class="px-1 py-0.5 bg-muted rounded-sm text-[10px]">&rarr;</kbd
         > switch</span
       >
     {/if}
-    <span><kbd class="px-1 py-0.5 bg-muted rounded text-[10px]">Esc</kbd> dismiss</span>
+    <span><kbd class="px-1 py-0.5 bg-muted rounded-sm text-[10px]">Esc</kbd> dismiss</span>
   </div>
 </Modal>
