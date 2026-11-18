@@ -831,7 +831,7 @@
         <label class="text-xs text-muted-foreground" for="pf-type">Provider service</label>
         <select
           id="pf-type"
-          class="w-full rounded border bg-background p-2"
+          class="w-full rounded-sm border bg-background p-2"
           bind:value={editing.profile.type}
           disabled={editing.original !== null}
           onchange={changeService}
@@ -850,7 +850,7 @@
       {#if editDescriptor?.plan}
         <div>
           <label class="text-xs text-muted-foreground" for="pf-plan">API plan</label>
-          <select id="pf-plan" class="w-full rounded border bg-background p-2" bind:value={editing.profile.plan}>
+          <select id="pf-plan" class="w-full rounded-sm border bg-background p-2" bind:value={editing.profile.plan}>
             {#each editDescriptor.plan.choices as choice (choice.value)}
               <option value={choice.value}>{choice.label}</option>
             {/each}

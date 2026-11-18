@@ -31,7 +31,7 @@
 
 <Card
   class="overflow-hidden transition-all animate-fade-in
-  {loading ? 'opacity-50 border-border' : 'border-destructive/20 shadow-sm shadow-destructive/5'}"
+  {loading ? 'opacity-50 border-border' : 'border-destructive/20 shadow-xs shadow-destructive/5'}"
 >
   <div class="px-5 py-4 flex items-start justify-between gap-4">
     <div class="min-w-0">

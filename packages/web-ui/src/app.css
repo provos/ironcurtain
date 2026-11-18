@@ -1,8 +1,45 @@
 @import '@fontsource/orbitron/700.css';
+@import 'tailwindcss' source(none);
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@source '.';
+@source '../index.html';
+
+@theme inline {
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, monospace;
+  --color-border: hsl(var(--border));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  /* Keep inherited line heights when a child sets an arbitrary font size. */
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-3xl--line-height: 2.25rem;
+}
 
 /*
  * Three themed palettes for IronCurtain.
@@ -88,27 +125,35 @@
 }
 
 @layer base {
-  * {
-    @apply border-border;
+  *,
+  ::before,
+  ::after {
+    border-color: hsl(var(--border));
+  }
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
   }
   body {
-    @apply bg-background text-foreground;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
     font-family: 'DM Sans', system-ui, sans-serif;
   }
-  code,
-  .font-mono {
+  code {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
 }
 
 /* ── Transitions ─────────────────────────────────────── */
-@layer utilities {
-  .theme-transition {
-    transition:
-      background-color 0.3s ease,
-      color 0.2s ease,
-      border-color 0.3s ease;
-  }
+@utility theme-transition {
+  transition:
+    background-color 0.3s ease,
+    color 0.2s ease,
+    border-color 0.3s ease;
 }
 
 /* ── Scrollbar ───────────────────────────────────────── */
@@ -246,8 +291,6 @@
   }
 }
 
-@layer utilities {
-  .animate-fade-in {
-    animation: fadeIn 0.3s ease-out;
-  }
+@utility animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
 }

@@ -58,13 +58,13 @@
       data-testid="statistics-nav-summary"
       onclick={onselect}
       aria-label={`Open Statistics. ${description}`}
-      class="group relative w-full overflow-hidden rounded-xl border px-3 pb-3 pt-2.5 text-left shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar
+      class="group relative w-full overflow-hidden rounded-xl border px-3 pb-3 pt-2.5 text-left shadow-xs transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar
         {active
         ? 'border-primary/45 bg-primary/10'
         : 'border-border/80 bg-card/70 hover:border-primary/40 hover:bg-accent/35'}"
     >
       <span
-        class="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-primary/10 to-transparent opacity-80"
+        class="pointer-events-none absolute inset-x-0 top-0 h-14 bg-linear-to-b from-primary/10 to-transparent opacity-80"
         aria-hidden="true"
       ></span>
 

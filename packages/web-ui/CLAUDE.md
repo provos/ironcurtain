@@ -6,7 +6,7 @@ Opt-in Svelte 5 SPA served by the IronCurtain daemon via `--web-ui`. Communicate
 
 - **Svelte 5** with runes (`$state`, `$derived`, `$effect`, `$props`, `$bindable`)
 - **Vite** for dev server and production builds
-- **Tailwind CSS v3** with CSS custom properties for theming
+- **Tailwind CSS v4** with the Vite plugin and CSS theme tokens in `src/app.css`
 - **shadcn-svelte pattern** -- custom UI components in `src/lib/components/ui/` built with `clsx` + `tailwind-merge`
 - **phosphor-svelte** for icons (tree-shaken via `sveltePhosphorOptimize` Vite plugin)
 - **marked** + **DOMPurify** for safe markdown rendering
@@ -107,7 +107,7 @@ Three themes selected via `data-theme` attribute on `<html>`:
 - **Daylight** (light) -- warm white background, teal accents
 - **Midnight** (dark) -- deep navy background, blue accents
 
-Theme variables are defined in `app.css` as HSL values (e.g., `--primary: 38 92% 55%`) and consumed via Tailwind's `hsl(var(--primary))` pattern in `tailwind.config.js`. All UI components inherit theme colors automatically.
+Theme palettes define HSL values in `app.css`. The `@theme inline` block maps them to utilities such as `bg-primary`, which resolve against the active palette.
 
 Theme preference is stored in `localStorage` under `ic-theme`.
 

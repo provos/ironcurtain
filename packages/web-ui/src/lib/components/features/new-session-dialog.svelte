@@ -65,7 +65,7 @@
   }
 
   const selectClass =
-    'mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring';
+    'mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-sm focus:outline-hidden focus:ring-2 focus:ring-ring/40 focus:border-ring';
 </script>
 
 <!-- Height-capped with a scrolling body so Start session stays reachable on

@@ -623,7 +623,7 @@
               rows="12"
               data-testid="constitution-editor"
               class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm font-mono
-                     focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
+                     focus:outline-hidden focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
               placeholder="# Persona constitution&#10;&#10;Describe the policy principles in markdown..."
             ></textarea>
             <div class="flex items-center gap-3 mt-3">
@@ -832,7 +832,7 @@
           rows="6"
           data-testid="new-persona-constitution"
           class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm font-mono
-                 focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
+                 focus:outline-hidden focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
           placeholder="# Principles&#10;&#10;Leave blank to start with an empty persona."
         ></textarea>
       </div>

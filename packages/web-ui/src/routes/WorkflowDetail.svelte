@@ -309,7 +309,7 @@
         </p>
         <pre
           data-testid="corruption-message"
-          class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded p-3 overflow-x-auto">{corruptionMessage}</pre>
+          class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded-sm p-3 overflow-x-auto">{corruptionMessage}</pre>
       </CardContent>
     </Card>
   {:else if error}
@@ -337,7 +337,7 @@
         <CardContent>
           <pre
             data-testid="workflow-error-text"
-            class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded p-3 overflow-x-auto max-h-80 overflow-y-auto">{detail.error}</pre>
+            class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded-sm p-3 overflow-x-auto max-h-80 overflow-y-auto">{detail.error}</pre>
         </CardContent>
       </Card>
     {/if}
@@ -482,7 +482,7 @@
                   {/if}
                 </div>
                 {#if t.agentMessage && expandedMessages.has(i)}
-                  <div class="ml-20 mt-1 mb-2 p-3 rounded bg-muted/50 text-sm prose-markdown">
+                  <div class="ml-20 mt-1 mb-2 p-3 rounded-sm bg-muted/50 text-sm prose-markdown">
                     {@html renderMarkdown(t.agentMessage)}
                   </div>
                 {/if}

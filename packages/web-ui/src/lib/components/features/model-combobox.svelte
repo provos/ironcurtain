@@ -181,7 +181,7 @@
     autocomplete="off"
     class={cn(
       'w-full px-3 py-2.5 bg-background border rounded-lg text-sm transition-all',
-      'focus:outline-none focus:ring-2 placeholder:text-muted-foreground/50 disabled:opacity-50',
+      'focus:outline-hidden focus:ring-2 placeholder:text-muted-foreground/50 disabled:opacity-50',
       invalid
         ? 'border-destructive ring-2 ring-destructive/40 focus:ring-destructive/40 focus:border-destructive'
         : 'border-border focus:ring-ring/40 focus:border-ring',

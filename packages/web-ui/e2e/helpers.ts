@@ -24,17 +24,13 @@ export async function resetMockServer(
 }
 
 /**
- * Navigate to the app with the mock server's test token and wait
- * for the WebSocket connection to establish (sidebar becomes visible).
+ * Connect with the mock token and wait for the sidebar to show Live.
  */
 export async function connectWithToken(page: Page): Promise<void> {
   await page.goto('/?token=mock-dev-token');
-  // The sidebar nav appears only after the auth gate is passed and
-  // the WS connection is established (appState.connected becomes true).
-  // Target the desktop sidebar by test id; the mobile drawer also
-  // renders a <nav> in the DOM (offscreen) so a bare 'nav' selector
-  // would hit a strict-mode violation.
-  await expect(page.getByTestId('sidebar-nav')).toBeVisible({ timeout: 10_000 });
+  // Token preflight can show the sidebar before the socket opens.
+  const live = page.getByTestId('sidebar-nav').getByTestId('connection-status').getByText('Live');
+  await expect(live).toBeVisible();
 }
 
 /**

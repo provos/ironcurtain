@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import tailwindcss from '@tailwindcss/vite';
 import { sveltePhosphorOptimize } from 'phosphor-svelte/vite';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -10,7 +11,7 @@ const devPort = parsePort(process.env.IRONCURTAIN_WEB_UI_PORT, 5173);
 const daemonPort = parsePort(process.env.IRONCURTAIN_WEB_UI_DAEMON_PORT, 7400);
 
 export default defineConfig({
-  plugins: [svelte(), sveltePhosphorOptimize()],
+  plugins: [tailwindcss(), svelte(), sveltePhosphorOptimize()],
   resolve: {
     alias: {
       $lib: resolve(__dirname, 'src/lib'),

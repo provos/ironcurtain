@@ -142,6 +142,7 @@ test.describe('Escalation Modal', () => {
     // Wait for the modal to auto-open
     const modal = page.getByRole('dialog');
     await expect(modal).toBeVisible({ timeout: 10_000 });
+    await expect(modal.and(page.locator(':focus-within'))).toBeVisible();
 
     // Dismiss with Escape
     await page.keyboard.press('Escape');
@@ -192,6 +193,7 @@ test.describe('Escalation Modal', () => {
     const modal = page.getByRole('dialog');
     await expect(modal).toBeVisible({ timeout: 10_000 });
     await expect(modal.getByText('Write to protected system path')).toBeVisible();
+    await expect(modal.and(page.locator(':focus-within'))).toBeVisible();
 
     // Press "a" to approve
     await page.keyboard.press('a');

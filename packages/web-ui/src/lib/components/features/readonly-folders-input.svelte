@@ -70,7 +70,7 @@
       bind:value={draft}
       onkeydown={handleKeydown}
       placeholder={atLimit ? 'Folder limit reached' : '/mnt/d/Training or D:\\Training, then Enter'}
-      class="min-w-40 flex-1 bg-transparent px-1 py-0.5 font-mono text-xs placeholder:font-sans placeholder:text-muted-foreground focus:outline-none"
+      class="min-w-40 flex-1 bg-transparent px-1 py-0.5 font-mono text-xs placeholder:font-sans placeholder:text-muted-foreground focus:outline-hidden"
       disabled={disabled || atLimit}
     />
   </div>

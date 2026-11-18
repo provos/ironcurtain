@@ -333,7 +333,7 @@
           aria-current={appState.currentView === item.id ? 'page' : undefined}
           class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
             {appState.currentView === item.id
-            ? 'bg-accent text-accent-foreground font-medium shadow-sm'
+            ? 'bg-accent text-accent-foreground font-medium shadow-xs'
             : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
         >
           <item.icon size={16} class="shrink-0" />

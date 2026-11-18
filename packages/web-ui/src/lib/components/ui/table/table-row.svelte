@@ -36,7 +36,8 @@
 <tr
   class={cn(
     'border-t border-border/50 transition-colors',
-    clickable && 'hover:bg-accent/40 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+    clickable &&
+      'hover:bg-accent/40 cursor-pointer focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40',
     !clickable && !muted && 'hover:bg-accent/30',
     muted && 'opacity-50',
     className,

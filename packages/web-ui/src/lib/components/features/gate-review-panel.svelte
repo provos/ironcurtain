@@ -222,7 +222,7 @@
           {#each gate.presentedArtifacts as artifact (artifact)}
             <button
               onclick={() => selectArtifact(artifact)}
-              class="px-2 py-1 text-xs rounded border transition-colors
+              class="px-2 py-1 text-xs rounded-sm border transition-colors
                 {selectedArtifact === artifact
                 ? 'border-primary bg-primary/10 text-primary'
                 : 'border-border text-muted-foreground hover:text-foreground'}"
@@ -245,7 +245,7 @@
           {#if ac && ac.files.length > 0}
             <div class="space-y-3">
               {#each ac.files as file (file.path)}
-                <div class="border border-border rounded overflow-hidden">
+                <div class="border border-border rounded-sm overflow-hidden">
                   <div class="px-3 py-1.5 bg-muted/30 border-b border-border text-xs font-mono text-muted-foreground">
                     {file.path}
                   </div>
@@ -282,7 +282,7 @@
         placeholder="Describe what should be changed..."
         rows={3}
         class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm
-          placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50
+          placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/50
           resize-y"
       ></textarea>
       <div class="flex gap-2">
