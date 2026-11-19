@@ -1112,19 +1112,16 @@ export async function prepareDockerInfrastructure(
   // `getBundleSocketsDir(bundleId)` / `getBundleHostOnlyDir(bundleId)`
   // (both under `~/.ironcurtain/run/<bid12>/`) so every assembled path
   // stays well under the cap even with a 20-char username.
-  // Harden the runtime root FIRST: `ensureSecureBundleDir` rejects a
-  // pre-existing symlink at that path. If we only checked the children
-  // (`sockets/`, `host/`) an attacker who planted a symlink at the
-  // runtime root would silently redirect them. The root's ancestors
-  // (`~/.ironcurtain/run/`, `~/.ironcurtain/`) are the user's trust
-  // boundary and intentionally not walked.
-  ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
   const socketsDir = getBundleSocketsDir(bundleId);
   const hostOnlyDir = getBundleHostOnlyDir(bundleId);
-  ensureSecureBundleDir(socketsDir);
-  ensureSecureBundleDir(hostOnlyDir);
-
   const socketPath = getBundleProxySocketPath(bundleId);
+  const prepareRuntimeDirectories = (): void => {
+    // Check the root for symlinks before creating either child directory.
+    ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
+    ensureSecureBundleDir(socketsDir);
+    ensureSecureBundleDir(hostOnlyDir);
+  };
+  if (admitted === undefined) prepareRuntimeDirectories();
 
   const docker = createContainerRuntime(runtimeKind, admittedEnvironment?.dockerEndpoint);
 
@@ -1182,6 +1179,7 @@ export async function prepareDockerInfrastructure(
       bundleId,
       workspaceRoot: workspaceDir,
       auditLogPath,
+      prepareRuntimeDirectories,
       ...(artifact === undefined ? {} : { artifact }),
     });
   }
@@ -2519,6 +2517,7 @@ interface DockerWorkloadAdmissionForSessionOptions {
   readonly bundleId: BundleId;
   readonly workspaceRoot: string;
   readonly auditLogPath: string;
+  readonly prepareRuntimeDirectories: () => void;
   /** Required only for Apple's same-VM daemon; Docker Desktop has no archive bootstrap. */
   readonly artifact?: SelectedAgentArtifact;
 }
@@ -2551,6 +2550,7 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
     configuration: options.dockerWorkload,
+    prepareRuntimeDirectories: options.prepareRuntimeDirectories,
     watchdogPolicyTemplatePath: getFrozenWatchdogPolicyTemplatePath(),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
