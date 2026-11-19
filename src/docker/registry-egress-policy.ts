@@ -307,7 +307,8 @@ export function authorizeValidatedRegistryEgressRequest(
  * Authorize following one 3xx redirect as the immediate bounded response to an
  * already-authorized manifest/blob pull. The reference (tag or digest) does not
  * matter — any content pull may be redirected. A target that matches a reviewed
- * origin is re-authorized against it; an unlisted (dynamic CDN) host is reachable
+ * origin is re-authorized against it and can only tighten the chain's byte and
+ * hop ceilings. An unlisted (dynamic CDN) host is reachable
  * only here, stays on HTTPS, and carries NO credential header. The destination-bound
  * transport resolves the host and rejects a private/loopback/link-local/ULA answer
  * before connecting; a literal-address redirect is refused outright here.
@@ -347,9 +348,9 @@ export function authorizeValidatedRegistryRedirect(
       repository: classification.repository,
       reference: classification.reference,
       requestedDigest: classification.requestedDigest,
-      maxBytes: matchedOrigin.perRequest.maxBytes,
+      maxBytes: Math.min(current.maxBytes, matchedOrigin.perRequest.maxBytes),
       maxDurationMs: matchedOrigin.perRequest.maxDurationMs,
-      maxRedirectHops: matchedOrigin.perRequest.maxRedirectHops,
+      maxRedirectHops: Math.min(current.maxRedirectHops, matchedOrigin.perRequest.maxRedirectHops),
       redirectHop: hop,
     };
   }
