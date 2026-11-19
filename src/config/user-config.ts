@@ -216,7 +216,7 @@ const snapshotSchema = z
   })
   .optional();
 
-export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi', 'parallel'] as const;
+export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi', 'parallel', 'keenable'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
 /** Human-readable labels for web search providers. */
@@ -225,16 +225,33 @@ export const WEB_SEARCH_PROVIDER_LABELS: Readonly<Record<WebSearchProvider, stri
   tavily: 'Tavily',
   serpapi: 'SerpAPI',
   parallel: 'Parallel Search',
+  keenable: 'Keenable',
 };
 
 export const PARALLEL_WEB_SEARCH_HINT = 'Sends queries to mcp.parallel.ai. No API key required.';
+export const KEENABLE_WEB_SEARCH_HINT = 'Sends queries to api.keenable.ai. No API key required.';
+
+/** Providers that work without an API key, so setup does not prompt for one. */
+export const KEYLESS_WEB_SEARCH_PROVIDERS = ['parallel', 'keenable'] as const;
+export type KeylessWebSearchProvider = (typeof KEYLESS_WEB_SEARCH_PROVIDERS)[number];
+
+/** Hints for providers that work without an API key. */
+export const KEYLESS_WEB_SEARCH_HINTS: Readonly<Record<KeylessWebSearchProvider, string>> = {
+  parallel: PARALLEL_WEB_SEARCH_HINT,
+  keenable: KEENABLE_WEB_SEARCH_HINT,
+};
+
+export function isKeylessWebSearchProvider(provider: string): provider is KeylessWebSearchProvider {
+  return (KEYLESS_WEB_SEARCH_PROVIDERS as readonly string[]).includes(provider);
+}
 
 /** Signup URLs for web search providers that require an API key. */
-export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<Exclude<WebSearchProvider, 'parallel'>, string>> = {
-  brave: 'https://brave.com/search/api/',
-  tavily: 'https://tavily.com/',
-  serpapi: 'https://serpapi.com/',
-};
+export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<Exclude<WebSearchProvider, KeylessWebSearchProvider>, string>> =
+  {
+    brave: 'https://brave.com/search/api/',
+    tavily: 'https://tavily.com/',
+    serpapi: 'https://serpapi.com/',
+  };
 
 const webSearchSchema = z
   .object({
@@ -242,6 +259,8 @@ const webSearchSchema = z
     brave: z.object({ apiKey: z.string().min(1) }).optional(),
     tavily: z.object({ apiKey: z.string().min(1) }).optional(),
     serpapi: z.object({ apiKey: z.string().min(1) }).optional(),
+    /** Optional: Keenable works without a key; a key switches to the keyed API. */
+    keenable: z.object({ apiKey: z.string().min(1) }).optional(),
   })
   .optional();
 
@@ -553,6 +572,7 @@ export interface ResolvedWebSearchConfig {
   readonly brave: { readonly apiKey: string } | null;
   readonly tavily: { readonly apiKey: string } | null;
   readonly serpapi: { readonly apiKey: string } | null;
+  readonly keenable: { readonly apiKey: string } | null;
 }
 
 /**
@@ -1034,6 +1054,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       brave: config.webSearch?.brave ?? null,
       tavily: config.webSearch?.tavily ?? null,
       serpapi: config.webSearch?.serpapi ?? null,
+      keenable: config.webSearch?.keenable ?? null,
     },
     modelProviders: resolveModelProviders(config.modelProviders),
     hostModelProfiles: config.hostModelProfiles,

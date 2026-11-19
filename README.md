@@ -326,7 +326,7 @@ IronCurtain ships with six pre-configured MCP servers. All tool calls (except me
 | -------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Filesystem**       | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                                                           |
 | **Git**              | 28    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                                                        |
-| **Fetch**            | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI, Parallel Search)                                                    |
+| **Fetch**            | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI, Parallel Search, Keenable)                                         |
 | **GitHub**           | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token                                 |
 | **Google Workspace** | 128   | Gmail, Calendar, Drive, Docs, Sheets — requires OAuth setup via `ironcurtain auth`                                                                |
 | **Memory**           | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |

@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Add Parallel Search as an opt-in `web_search` provider that works without a Parallel API key.
+- Add Keenable as an opt-in `web_search` provider that works without an API key; an optional `webSearch.keenable.apiKey` switches to the keyed API.
 
 ## [0.14.0] - 2026-09-21
 

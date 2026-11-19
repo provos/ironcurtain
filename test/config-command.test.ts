@@ -276,6 +276,29 @@ describe('config-command', () => {
     expect(loadUserConfig().webSearch.provider).toBeNull();
   });
 
+  it('selects Keenable without asking for a key and keeps other provider keys', async () => {
+    seedConfig(env.testHome, { webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } } });
+    mocks.select
+      .mockResolvedValueOnce('websearch')
+      .mockResolvedValueOnce('select')
+      .mockResolvedValueOnce('keenable')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(mocks.select).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.arrayContaining([
+          { value: 'keenable', label: 'Keenable', hint: expect.stringContaining('api.keenable.ai') },
+        ]),
+      }),
+    );
+    expect(mocks.text).not.toHaveBeenCalled();
+    expect(loadUserConfig().webSearch).toMatchObject({ provider: 'keenable', brave: { apiKey: 'existing-brave-key' } });
+  });
+
   it('Model Providers section appears in main menu', async () => {
     seedConfig(env.testHome, {
       agentModelId: USER_CONFIG_DEFAULTS.agentModelId,

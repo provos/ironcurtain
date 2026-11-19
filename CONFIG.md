@@ -230,12 +230,13 @@ files, filesystem snapshots, or backups. They do not rotate or delete `identity.
 
 Configure a web search provider so the agent can search the web via the `web_search` tool.
 
-| Field                     | Type   | Default  | Description                                                  |
-| ------------------------- | ------ | -------- | ------------------------------------------------------------ |
-| `webSearch.provider`      | string | _(none)_ | Active provider (`brave`, `tavily`, `serpapi`, or `parallel`). |
-| `webSearch.brave.apiKey`   | string | —        | Brave Search API key.                                        |
-| `webSearch.tavily.apiKey`  | string | —        | Tavily API key.                                              |
-| `webSearch.serpapi.apiKey` | string | —        | SerpAPI key.                                                 |
+| Field                       | Type   | Default  | Description                                                                |
+| --------------------------- | ------ | -------- | -------------------------------------------------------------------------- |
+| `webSearch.provider`        | string | _(none)_ | Active provider (`brave`, `tavily`, `serpapi`, `parallel`, or `keenable`). |
+| `webSearch.brave.apiKey`    | string | —        | Brave Search API key.                                                      |
+| `webSearch.tavily.apiKey`   | string | —        | Tavily API key.                                                            |
+| `webSearch.serpapi.apiKey`  | string | —        | SerpAPI key.                                                               |
+| `webSearch.keenable.apiKey` | string | —        | Optional Keenable API key. Not needed for keyless search.                  |
 
 Choose **Parallel Search** in `ironcurtain setup` or under **Web Search** in `ironcurtain config`, or set `"webSearch": { "provider": "parallel" }` in `config.json`. When selected, IronCurtain sends web search queries to Parallel at `https://mcp.parallel.ai/mcp`. Searches use Parallel's anonymous rate limits and require no API key.
 
@@ -243,11 +244,14 @@ Under Parallel's standard [Customer Terms](https://parallel.ai/customer-terms), 
 
 Anonymous access has no zero data retention (ZDR) guarantee. Parallel's [Scale plan](https://parallel.ai/blog/scale-plan) requires a signed agreement to enable Hybrid ZDR for eligible authenticated account traffic.
 
+Choose **Keenable** in `ironcurtain setup` or under **Web Search** in `ironcurtain config`, or set `"webSearch": { "provider": "keenable" }` in `config.json`. When selected, IronCurtain sends web search queries to Keenable at `https://api.keenable.ai`. Without a key, searches use Keenable's keyless endpoint, which is limited to 1,000 requests per hour per IP address ([rate limits](https://docs.keenable.ai/rate-limits)). To use the keyed API instead, add `"keenable": { "apiKey": "..." }` to the `webSearch` section.
+
 ### Getting API Keys
 
 - **Brave Search**: https://brave.com/search/api/
 - **Tavily**: https://tavily.com/
 - **SerpAPI**: https://serpapi.com/
+- **Keenable** (optional): https://keenable.ai/
 
 ## Model Providers (OpenRouter and Z.AI)
 

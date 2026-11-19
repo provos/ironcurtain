@@ -143,6 +143,18 @@ describe('first-start wizard', () => {
       expect(mocks.text).not.toHaveBeenCalled();
     });
 
+    it('configures Keenable without asking for an API key', async () => {
+      mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+      mocks.select.mockResolvedValueOnce('keenable');
+      mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
+      mocks.confirm.mockResolvedValueOnce(false); // auto-approve
+
+      await runFirstStart();
+
+      expect(readConfig(env.testHome).webSearch).toEqual({ provider: 'keenable' });
+      expect(mocks.text).not.toHaveBeenCalled();
+    });
+
     it('preserves existing web search API key when re-selecting same provider', async () => {
       seedConfig(env.testHome, {
         webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } },

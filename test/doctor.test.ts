@@ -133,7 +133,7 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
     autoApprove: { enabled: false, modelId: 'anthropic:m' },
     auditRedaction: { enabled: true },
     memory: { enabled: true, autoSave: true, llmBaseUrl: undefined, llmApiKey: undefined },
-    webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
+    webSearch: { provider: null, brave: null, tavily: null, serpapi: null, keenable: null },
     serverCredentials: {},
     signal: null,
     gooseProvider: 'anthropic' as const,

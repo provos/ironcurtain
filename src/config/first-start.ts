@@ -15,7 +15,9 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
-  PARALLEL_WEB_SEARCH_HINT,
+  KEYLESS_WEB_SEARCH_HINTS,
+  isKeylessWebSearchProvider,
+  type KeylessWebSearchProvider,
   loadUserConfig,
   saveUserConfig,
   type ResolvedDockerResourcesConfig,
@@ -146,7 +148,7 @@ export async function runFirstStart(): Promise<void> {
   );
   const existingProvider = existingConfig.webSearch.provider;
   const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => {
-    const hint = prov === 'parallel' ? PARALLEL_WEB_SEARCH_HINT : WEB_SEARCH_PROVIDER_URLS[prov];
+    const hint = isKeylessWebSearchProvider(prov) ? KEYLESS_WEB_SEARCH_HINTS[prov] : WEB_SEARCH_PROVIDER_URLS[prov];
     return {
       value: prov,
       label: WEB_SEARCH_PROVIDER_LABELS[prov],
@@ -163,11 +165,11 @@ export async function runFirstStart(): Promise<void> {
   });
   handleCancel(setupSearch);
 
-  if (setupSearch === 'parallel') {
+  if (typeof setupSearch === 'string' && isKeylessWebSearchProvider(setupSearch)) {
     pending.webSearch = { provider: setupSearch };
-    p.log.success('Web search configured with Parallel Search.');
+    p.log.success(`Web search configured with ${WEB_SEARCH_PROVIDER_LABELS[setupSearch]}.`);
   } else if (setupSearch !== 'skip') {
-    const provider = setupSearch as Exclude<WebSearchProvider, 'parallel'>;
+    const provider = setupSearch as Exclude<WebSearchProvider, KeylessWebSearchProvider>;
     const existingKey = existingConfig.webSearch[provider]?.apiKey;
     if (existingKey) {
       // Re-selected a provider that already has an API key — preserve it
