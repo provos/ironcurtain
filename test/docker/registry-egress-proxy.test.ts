@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRegistryEgressGuard,
   handleRegistryEgressRequest,
@@ -635,6 +635,60 @@ describe('registry redirect and credential model', () => {
         return !budget.startsWith('mirror') || shape.hosts.includes(mirror);
       })
       .flatMap((budget) => ['anonymous', 'bearer'].map((credential) => ({ ...shape, ...budget, credential }))),
+  );
+
+  it.each([
+    { originMs: 900, mirrorMs: 200 },
+    { originMs: 200, mirrorMs: 900 },
+  ])(
+    'keeps the earliest logical deadline across $originMs ms origin and $mirrorMs ms mirror',
+    async ({ originMs, mirrorMs }) => {
+      const originMayRedirect = createGate();
+      const path = '/v2/library/app/manifests/1.0';
+      const entry = await startUpstream((_req, res) => {
+        void originMayRedirect.promise.then(() => {
+          res.writeHead(307, { location: `https://${mirror}${path}` }).end();
+        });
+      });
+      const target = await startUpstream(() => {
+        /* Keep the final response open until the deadline. */
+      });
+      const entryReceived = firstRequest(entry);
+      const mirrorReceived = firstRequest(target);
+      const guard = fixtureGuard({
+        perRequest: { maxBytes: 64, maxDurationMs: originMs, maxRedirectHops: 2 },
+        additionalOrigins: [
+          {
+            id: 'mirror',
+            destination: { protocol: 'https:', hostname: mirror, port: 443 },
+            operations: ['manifest-pull'],
+            perRequest: { maxBytes: 64, maxDurationMs: mirrorMs, maxRedirectHops: 2 },
+            requestHeaders: { allow: [] },
+          },
+        ],
+      });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+      try {
+        const response = driveThroughSeam({
+          guard,
+          transport: routingTransport({ [registry]: entry.port, [mirror]: target.port }),
+          targetHost: registry,
+          path,
+        });
+        await entryReceived;
+        await vi.advanceTimersByTimeAsync(120);
+        originMayRedirect.resolve();
+        await mirrorReceived;
+        await vi.advanceTimersByTimeAsync(79);
+        expect(guard.session.activeRequests).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(await response).toMatchObject({ statusCode: 504, body: expect.stringContaining('time ceiling') });
+        expect(guard.session.activeRequests).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
   );
 
   it.each(traces)(

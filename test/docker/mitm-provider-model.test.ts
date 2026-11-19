@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadOrCreateCA, type CertificateAuthority } from '../../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy, type ProviderKeyMapping } from '../../src/docker/mitm-proxy.js';
-import type { OAuthTokenManager } from '../../src/docker/oauth-token-manager.js';
-import { createDirectOutboundTransport, type DestinationBoundRequest } from '../../src/docker/outbound-transport.js';
+import {
+  createDirectOutboundTransport,
+  type DestinationBoundRequest,
+  type OutboundTransport,
+} from '../../src/docker/outbound-transport.js';
 import type { KeyInjection } from '../../src/docker/provider-config.js';
 import {
   createFakeUpstream,
@@ -57,7 +60,7 @@ async function createRoute(provider: Provider) {
     },
     fakeKey: `model-${provider.host}`,
     realKey: state.token,
-    tokenManager: { getValidAccessToken, handleAuthFailure } as unknown as OAuthTokenManager,
+    tokenManager: { getValidAccessToken, handleAuthFailure },
   };
   return { provider, state, upstream, mapping, getValidAccessToken, handleAuthFailure };
 }
@@ -71,6 +74,7 @@ describe('MITM provider routing and credential model', () => {
   let socketPath: string;
   let ca: CertificateAuthority;
   let proxy: MitmProxy | undefined;
+  let transport: OutboundTransport | undefined;
 
   beforeAll(async () => {
     vi.stubEnv('IRONCURTAIN_MITM_ALLOW_ALL_HOSTS', '');
@@ -78,16 +82,17 @@ describe('MITM provider routing and credential model', () => {
     socketPath = join(tempDir, 'mitm.sock');
     ca = loadOrCreateCA(join(tempDir, 'ca'));
     for (const provider of providers) routes.push(await createRoute(provider));
-    const transport = createDirectOutboundTransport({ lookup: localhostDnsLookup as typeof dns.lookup });
+    const direct = createDirectOutboundTransport({ lookup: localhostDnsLookup as typeof dns.lookup });
+    transport = direct;
     proxy = createMitmProxy({
       socketPath,
       ca,
       providers: routes.map(({ mapping }) => mapping),
       outboundTransport: {
-        ...transport,
+        ...direct,
         request(request, onResponse) {
           outboundAttempts.push(request);
-          return transport.request(request, onResponse);
+          return direct.request(request, onResponse);
         },
       },
     });
@@ -97,10 +102,11 @@ describe('MITM provider routing and credential model', () => {
   afterAll(async () => {
     try {
       await proxy?.stop();
+    } finally {
+      transport?.destroy?.();
       await Promise.all(
         routes.map(({ upstream }) => new Promise<void>((resolve) => upstream.server.close(() => resolve()))),
       );
-    } finally {
       if (tempDir) rmSync(tempDir, { recursive: true, force: true });
       vi.unstubAllEnvs();
     }
@@ -169,7 +175,8 @@ describe('MITM provider routing and credential model', () => {
       const start = route.upstream.requests().length;
       const otherStart = other.upstream.requests().length;
       const outboundStart = outboundAttempts.length;
-      const refreshStart = route.handleAuthFailure.mock.calls.length;
+      const retryStart = route.handleAuthFailure.mock.calls.length;
+      const refreshStart = route.getValidAccessToken.mock.calls.length;
 
       const response = await request(route, supplied);
 
@@ -178,7 +185,8 @@ describe('MITM provider routing and credential model', () => {
       expect(outboundAttempts.slice(outboundStart).map(({ destination }) => destination.port)).toEqual(
         expectedTokens.map(() => route.upstream.port),
       );
-      expect(route.handleAuthFailure.mock.calls.length - refreshStart).toBe(expectRetry ? 1 : 0);
+      expect(route.getValidAccessToken.mock.calls.length - refreshStart).toBe(credential === 'sentinel' ? 1 : 0);
+      expect(route.handleAuthFailure.mock.calls.length - retryStart).toBe(expectRetry ? 1 : 0);
       expect(response.statusCode).toBe(
         challenge === 'none' || (expectRetry && challenge === 'first attempt') ? 200 : 401,
       );

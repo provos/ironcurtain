@@ -21,14 +21,11 @@ import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { type Reassembler, redactHeaders } from './trajectory-types.js';
-import type { ExchangeRecord, PoisonReason } from './trajectory-types.js';
+import type { ExchangeRecord, PoisonReason, ReassemblyResult } from './trajectory-types.js';
 import { createReassembler, providerForHost, ReassemblyError, TruncatedStreamError } from './trajectory-reassembler.js';
 import type { SessionId } from '../session/types.js';
 import * as logger from '../logger.js';
 import { BoundedContentDecoder, type ContentDecoderFailure } from './llm-observation/content-decoder.js';
-
-/** Reused for the (ignored) responseBody arg on the reassembler path. */
-const EMPTY_BODY = Buffer.alloc(0);
 
 /**
  * Trajectory capture predates the bounded metrics observer and deliberately
@@ -109,6 +106,9 @@ export interface CaptureExchangeHandle {
 export interface AttachResponseInputs {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+  readonly retried?: boolean;
+  /** Read at finalization because the capture inlet can be ended after an HTTP reset. */
+  readonly isHttpResponseComplete?: () => boolean;
 }
 
 /**
@@ -126,38 +126,20 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
   let aborted = false;
   let bufferedRequestBody: Buffer | undefined;
 
-  function maybeWriteRecord(args: {
-    statusCode: number;
-    responseHeaders: Readonly<Record<string, string | string[] | undefined>>;
-    streaming: boolean;
-    responseBody: Buffer;
-    responseFinishedAt: number;
-    reassembly?: {
-      ok: boolean;
-      diagnostic?: string;
-      providerRequestId?: string;
-      stopReason?: string;
-      modelFingerprint?: string;
-      usage?: Readonly<Record<string, unknown>>;
-      events?: ReadonlyArray<{ eventType: string; dataUtf8: string; offsetMs: number }>;
-      reassembledBody?: string;
-    };
-  }): void {
+  function maybeWriteRecord(
+    response: AttachResponseInputs,
+    args: {
+      streaming: boolean;
+      responseFinishedAt: number;
+    } & ({ rawBody: Buffer; reassembly?: never } | { reassembly: ReassemblyResult; rawBody?: never }),
+  ): void {
     if (aborted) return;
     const reqBuf = bufferedRequestBody ?? Buffer.concat(requestChunks, requestBytes);
     const reqFields = bodyToFields(reqBuf);
-    let respBodyUtf8: string;
-    let respBodyBase64: string | undefined;
-    let respBodyBytes: number;
-    if (args.streaming && args.reassembly?.ok && args.reassembly.reassembledBody !== undefined) {
-      respBodyUtf8 = args.reassembly.reassembledBody;
-      respBodyBytes = Buffer.byteLength(respBodyUtf8, 'utf-8');
-    } else {
-      const respFields = bodyToFields(args.responseBody);
-      respBodyUtf8 = respFields.bodyUtf8;
-      respBodyBase64 = respFields.bodyBase64;
-      respBodyBytes = respFields.bodyBytes;
-    }
+    const result = args.reassembly;
+    const respFields = result
+      ? { bodyUtf8: result.bodyUtf8, bodyBytes: Buffer.byteLength(result.bodyUtf8, 'utf-8') }
+      : bodyToFields(args.rawBody);
     const record: ExchangeRecord = {
       schemaVersion: 1,
       exchangeId,
@@ -181,25 +163,19 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         ...(inputs.requestContentEncoding !== undefined ? { contentEncoding: inputs.requestContentEncoding } : {}),
       },
       response: {
-        status: args.statusCode,
-        headers: redactHeaders(args.responseHeaders),
+        status: response.statusCode,
+        headers: redactHeaders(response.headers),
         streaming: args.streaming,
-        ...(args.reassembly?.providerRequestId !== undefined
-          ? { providerRequestId: args.reassembly.providerRequestId }
-          : {}),
-        ...(args.reassembly?.stopReason !== undefined ? { stopReason: args.reassembly.stopReason } : {}),
-        ...(args.reassembly?.modelFingerprint !== undefined
-          ? { modelFingerprint: args.reassembly.modelFingerprint }
-          : {}),
-        ...(args.reassembly?.usage !== undefined ? { usage: args.reassembly.usage } : {}),
-        bodyUtf8: respBodyUtf8,
-        ...(respBodyBase64 !== undefined ? { bodyBase64: respBodyBase64 } : {}),
-        bodyBytes: respBodyBytes,
-        ...(args.reassembly?.events !== undefined ? { streamRaw: { events: args.reassembly.events } } : {}),
+        ...(result?.providerRequestId !== undefined ? { providerRequestId: result.providerRequestId } : {}),
+        ...(result?.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+        ...(result?.modelFingerprint !== undefined ? { modelFingerprint: result.modelFingerprint } : {}),
+        ...(result?.usage !== undefined ? { usage: result.usage } : {}),
+        ...respFields,
+        ...(result ? { streamRaw: { events: result.events } } : {}),
       },
       capture: {
-        reassemblyOk: args.reassembly?.ok ?? true,
-        ...(args.reassembly?.diagnostic !== undefined ? { reassemblyDiagnostic: args.reassembly.diagnostic } : {}),
+        reassemblyOk: true,
+        ...(response.retried ? { retried: true } : {}),
       },
     };
     try {
@@ -366,22 +342,10 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         const responseFinishedAt = Date.now();
         if (reassembler) {
           try {
-            const result = reassembler.finalize();
-            maybeWriteRecord({
-              statusCode: args.statusCode,
-              responseHeaders: args.headers,
+            maybeWriteRecord(args, {
               streaming: true,
-              responseBody: EMPTY_BODY, // ignored on the reassembly-ok path
               responseFinishedAt,
-              reassembly: {
-                ok: true,
-                providerRequestId: result.providerRequestId,
-                stopReason: result.stopReason,
-                modelFingerprint: result.modelFingerprint,
-                usage: result.usage,
-                events: result.events,
-                reassembledBody: result.bodyUtf8,
-              },
+              reassembly: reassembler.finalize(),
             });
             finishCompletion(true);
           } catch (err) {
@@ -401,15 +365,19 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             }
           }
         } else {
+          // Without a provider terminal event, only a complete HTTP message
+          // can prove that the captured bytes form the entire response.
+          if (args.isHttpResponseComplete?.() === false) {
+            dropExchange(new Error('upstream closed before the HTTP response was complete'));
+            return;
+          }
           // No reassembler: capture the raw bytes verbatim. `streaming`
           // reflects the content-type sniff — true only for a known SSE
           // content-type on a host without a reassembler (no structured
           // fields available), false otherwise.
-          maybeWriteRecord({
-            statusCode: args.statusCode,
-            responseHeaders: args.headers,
+          maybeWriteRecord(args, {
             streaming,
-            responseBody: Buffer.concat(responseChunks, responseBytes),
+            rawBody: Buffer.concat(responseChunks, responseBytes),
             responseFinishedAt,
           });
           finishCompletion(true);

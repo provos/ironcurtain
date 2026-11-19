@@ -309,7 +309,6 @@ export function stripScheduleSkillTools(body: Record<string, unknown>): RewriteR
 }
 
 const FUNCTION_BLOCK_PATTERN = /<function>([\s\S]*?)<\/function>\s*/g;
-const FUNCTION_BLOCK_NAME_PATTERN = /"name"\s*:\s*"([^"]+)"/;
 
 /**
  * Walks `body.messages[].content[].tool_result.content[]` and removes
@@ -423,12 +422,17 @@ function scrubToolResultEntry(rawEntry: unknown): EntryResult | null {
     if (!rawEntry.text.includes('<function>')) return null;
     const labels: string[] = [];
     const scrubbed = rawEntry.text.replace(FUNCTION_BLOCK_PATTERN, (match, blockBody: string) => {
-      const nameMatch = FUNCTION_BLOCK_NAME_PATTERN.exec(blockBody);
-      if (nameMatch && SCHEDULE_SKILL_TOOL_NAMES.has(nameMatch[1])) {
-        labels.push(`function_block:${nameMatch[1]}`);
-        return '';
+      let schema: unknown;
+      try {
+        schema = JSON.parse(blockBody) as unknown;
+      } catch {
+        return match;
       }
-      return match;
+      if (!isPlainObject(schema) || typeof schema.name !== 'string' || !SCHEDULE_SKILL_TOOL_NAMES.has(schema.name)) {
+        return match;
+      }
+      labels.push(`function_block:${schema.name}`);
+      return '';
     });
     if (labels.length === 0) return null;
     return { kind: 'replace', value: { ...rawEntry, text: scrubbed }, labels };

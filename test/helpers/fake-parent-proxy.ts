@@ -68,6 +68,7 @@ export interface FakeParentProxy {
  */
 export async function startFakeParentProxy(options: FakeParentProxyOptions): Promise<FakeParentProxy> {
   const connectAuthorities: string[] = [];
+  const sockets = new Set<Socket>();
   let connections = 0;
 
   const inner = http.createServer((request, response) => {
@@ -82,8 +83,10 @@ export async function startFakeParentProxy(options: FakeParentProxyOptions): Pro
   });
 
   const outer = http.createServer(options.httpRoute);
-  outer.on('connection', () => {
+  outer.on('connection', (socket) => {
     connections += 1;
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
   });
   outer.on('connect', (request: http.IncomingMessage, socket: Socket, head: Buffer) => {
     const authority = request.url ?? '';
@@ -117,8 +120,8 @@ export async function startFakeParentProxy(options: FakeParentProxyOptions): Pro
     close: () =>
       new Promise<void>((resolve) => {
         inner.closeAllConnections();
-        outer.closeAllConnections();
         outer.close(() => resolve());
+        for (const socket of sockets) socket.destroy();
       }),
   };
 }

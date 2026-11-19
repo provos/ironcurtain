@@ -61,9 +61,7 @@ export interface RawEvent {
  * — we never need the parsed value, only the raw substring.
  */
 export function readJsonValueSubstring(data: string, start: number): string | undefined {
-  // Skip leading whitespace
-  let i = start;
-  while (i < data.length && /\s/.test(data[i] ?? '')) i++;
+  const i = skipWhitespace(data, start);
   if (i >= data.length) return undefined;
   const first = data[i];
   if (first === '"') {
@@ -115,40 +113,36 @@ export function findJsonStringEnd(data: string, start: number): number {
   return -1;
 }
 
-/**
- * Finds a top-level field by name in a JSON object and returns the raw
- * substring of its value. Returns `undefined` if not found.
- *
- * Naïve scan that respects string escapes; sufficient for the
- * well-formed Anthropic/OpenAI envelopes we capture.
- */
-export function findFieldValueSubstring(data: string, fieldName: string): string | undefined {
+function skipWhitespace(data: string, index: number): number {
+  while (index < data.length && /\s/.test(data[index] ?? '')) index++;
+  return index;
+}
+
+/** Visit the object's keys in order, skipping nested JSON values as a unit. */
+function findTopLevelField(data: string, fieldName: string): { start: number; raw: string } | undefined {
+  const objectStart = skipWhitespace(data, 0);
+  if (data[objectStart] !== '{') return undefined;
   const needle = `"${fieldName}"`;
-  let i = 0;
-  while (i < data.length) {
-    // Skip strings entirely so a quoted occurrence of fieldName doesn't fool us
-    const ch = data[i];
-    if (ch === '"') {
-      const end = findJsonStringEnd(data, i);
-      if (end < 0) return undefined;
-      // Check whether this string is our key (followed by `:`)
-      if (data.slice(i, end + 1) === needle) {
-        let j = end + 1;
-        while (j < data.length && /\s/.test(data[j] ?? '')) j++;
-        if (data[j] !== ':') {
-          // Not our key (some other string), keep scanning
-          i = end + 1;
-          continue;
-        }
-        j++;
-        return readJsonValueSubstring(data, j);
-      }
-      i = end + 1;
-      continue;
-    }
-    i++;
+  let keyStart = skipWhitespace(data, objectStart + 1);
+  while (keyStart < data.length) {
+    const keyEnd = findJsonStringEnd(data, keyStart);
+    if (keyEnd < 0) return undefined;
+    const colon = skipWhitespace(data, keyEnd + 1);
+    if (data[colon] !== ':') return undefined;
+    const start = skipWhitespace(data, colon + 1);
+    const raw = readJsonValueSubstring(data, start);
+    if (!raw) return undefined;
+    if (data.slice(keyStart, keyEnd + 1) === needle) return { start, raw };
+    const comma = skipWhitespace(data, start + raw.length);
+    if (data[comma] !== ',') return undefined;
+    keyStart = skipWhitespace(data, comma + 1);
   }
   return undefined;
+}
+
+/** Returns the raw JSON value of a top-level field, if present. */
+export function findFieldValueSubstring(data: string, fieldName: string): string | undefined {
+  return findTopLevelField(data, fieldName)?.raw;
 }
 
 /**
@@ -163,31 +157,9 @@ export function findFieldValueSubstring(data: string, fieldName: string): string
  * field is absent.
  */
 export function replaceTopLevelField(body: string, fieldName: string, newValue: string): string {
-  const needle = `"${fieldName}"`;
-  let i = 0;
-  while (i < body.length) {
-    const ch = body[i];
-    if (ch === '"') {
-      const end = findJsonStringEnd(body, i);
-      if (end < 0) return body;
-      if (body.slice(i, end + 1) === needle) {
-        let j = end + 1;
-        while (j < body.length && /\s/.test(body[j] ?? '')) j++;
-        if (body[j] === ':') {
-          j++;
-          while (j < body.length && /\s/.test(body[j] ?? '')) j++;
-          const existing = readJsonValueSubstring(body, j);
-          if (existing !== undefined) {
-            return body.slice(0, j) + newValue + body.slice(j + existing.length);
-          }
-        }
-      }
-      i = end + 1;
-      continue;
-    }
-    i++;
-  }
-  return body;
+  const field = findTopLevelField(body, fieldName);
+  if (!field) return body;
+  return body.slice(0, field.start) + newValue + body.slice(field.start + field.raw.length);
 }
 
 /**
@@ -572,6 +544,13 @@ export class AnthropicReassembler extends AbstractSseReassembler {
     }
     if (block.kind === 'tool_use') {
       const inputJson = block.partialJsonChunks.join('') || '{}';
+      // The message can have a terminal event even if an argument fragment
+      // is missing. Validate the JSON and keep the original spelling.
+      try {
+        JSON.parse(inputJson);
+      } catch {
+        throw new ReassemblyError('anthropic tool_use input is invalid JSON');
+      }
       // The block's openRaw carries id and name; reuse them as raw
       // substrings to preserve byte fidelity (e.g., id ordering).
       const idPart = block.idRaw ?? '""';
@@ -635,7 +614,7 @@ interface ResponsesItemState {
  * `reassembly-failure` rather than silently trusting item.done.
  */
 export class ResponsesReassembler extends AbstractSseReassembler {
-  private completedSeen = false;
+  private terminalType?: 'response.completed' | 'response.failed' | 'response.incomplete';
   private status?: string;
   private usageRaw?: string;
   private providerRequestId?: string;
@@ -651,7 +630,7 @@ export class ResponsesReassembler extends AbstractSseReassembler {
   private readonly items = new Map<number, ResponsesItemState>();
 
   protected terminalSeen(): boolean {
-    return this.completedSeen;
+    return this.terminalType !== undefined;
   }
 
   protected dispatch(eventType: string, data: string): void {
@@ -676,6 +655,7 @@ export class ResponsesReassembler extends AbstractSseReassembler {
       case 'response.failed':
       case 'response.incomplete':
         this.onTerminal(data);
+        this.terminalType = type;
         return;
       default:
         // response.in_progress, response.content_part.added/.done, and any
@@ -760,7 +740,6 @@ export class ResponsesReassembler extends AbstractSseReassembler {
       const usageRaw = findFieldValueSubstring(responseRaw, 'usage');
       if (usageRaw !== undefined && usageRaw !== 'null') this.usageRaw = usageRaw;
     }
-    this.completedSeen = true;
   }
 
   protected assembleResult(): ReassemblyResult {
@@ -819,7 +798,12 @@ export class ResponsesReassembler extends AbstractSseReassembler {
     const itemParts: string[] = [];
     for (const idx of sorted) {
       const item = this.items.get(idx);
-      if (!item?.doneRaw) continue;
+      if (!item?.doneRaw) {
+        if (this.terminalType === 'response.completed') {
+          throw new ReassemblyError(`completed responses stream missing output_item.done for index ${idx}`);
+        }
+        continue;
+      }
       itemParts.push(item.doneRaw);
     }
     const outputArray = `[${itemParts.join(',')}]`;

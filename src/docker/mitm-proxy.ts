@@ -101,7 +101,8 @@ export interface DynamicHostController {
   addHost(domain: string): boolean;
 
   /**
-   * Remove a domain from the passthrough allowlist.
+   * Remove a domain from the passthrough allowlist for new requests and
+   * connections. Established tunnels stay open until they are closed.
    * Cannot remove statically configured providers.
    *
    * @returns true if the domain was removed, false if not found or static.
@@ -311,6 +312,8 @@ export interface MitmProxyOptions {
   readonly statisticsEnabled?: boolean;
 }
 
+type ManagedTokenSource = Pick<OAuthTokenManager, 'getValidAccessToken' | 'handleAuthFailure'>;
+
 export interface ProviderKeyMapping {
   readonly config: ProviderConfig;
   /** The fake sentinel key given to the container. */
@@ -318,7 +321,7 @@ export interface ProviderKeyMapping {
   /** The real API key to inject in upstream requests. Mutable for token refresh. */
   realKey: string;
   /** Optional token manager for OAuth providers — enables proactive refresh and 401 retry. */
-  readonly tokenManager?: OAuthTokenManager;
+  readonly tokenManager?: ManagedTokenSource;
 }
 
 /**
@@ -1562,6 +1565,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             const captureTap = handle.attachResponse({
               statusCode: upstream.statusCode ?? 502,
               headers: upstream.headers,
+              retried: isRetry,
+              isHttpResponseComplete: () => upstream.complete,
             });
             const inlet = createResponseCaptureInlet({
               captureTap,
@@ -1694,10 +1699,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       // Proactive token refresh: ensure the real key is fresh before forwarding.
       // Update every sentinel-authenticated request's headers, even if another
       // request already installed the same refreshed token in the shared mapping.
-      if (provider.tokenManager) {
+      if (swappedKey && provider.tokenManager) {
         try {
           provider.realKey = await provider.tokenManager.getValidAccessToken();
-          if (swappedKey) injectRealKey(modifiedHeaders, provider);
+          injectRealKey(modifiedHeaders, provider);
         } catch (err) {
           logger.warn(
             `[mitm-proxy] Proactive token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1902,6 +1907,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // Outer server - UDS listener, handles CONNECT and plain HTTP proxy requests
   const outerServer = http.createServer();
 
+  // CONNECT and upgrades detach sockets from HTTP connection management.
+  function trackRawClientSocket(socket: Socket): void {
+    activeClientSockets.add(socket);
+    socket.once('close', () => activeClientSockets.delete(socket));
+  }
+
   // Connection-source guard (tcp-hostonly topology): destroy sockets from
   // outside the allowed subnet before any HTTP parsing happens. Covers
   // plain requests, CONNECT, and WebSocket upgrades alike since all ride
@@ -1976,6 +1987,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   });
 
   outerServer.on('connect', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    trackRawClientSocket(clientSocket);
+    const connId = ++connectionId;
+    clientSocket.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] #${connId} client socket error: ${err.message}`);
+      clientSocket.destroy();
+    });
     if (!consumeProxyAuthorization(req, options.requiredProxyAuthorization)) {
       clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
       return;
@@ -1990,19 +2008,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // as an unknown host, opening a raw tunnel that bypasses MITM.
     const host = normalizeHost(rawHost);
     const port = registryAuthority?.port ?? (colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443);
-    const connId = ++connectionId;
     const metricsLeaseToken = parseMetricsProxyAuthorization(req.headers['proxy-authorization']);
-
-    // Handle client socket errors early to prevent uncaught 'error' events
-    clientSocket.on('error', (err) => {
-      const log = isConnectionReset(err) ? logger.debug : logger.info;
-      log(`[mitm-proxy] #${connId} client socket error: ${err.message}`);
-      clientSocket.destroy();
-    });
-
-    // Track raw client socket for cleanup during stop()
-    activeClientSockets.add(clientSocket);
-    clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
     if (listenerMode.kind === 'registry-egress' && registryAuthority === undefined) {
       logger.info(`[mitm-proxy] #${connId} DENIED malformed registry-egress CONNECT authority`);
@@ -2173,6 +2179,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // through the proxy, the outer server emits an 'upgrade' event instead
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    trackRawClientSocket(clientSocket);
+    clientSocket.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] WebSocket client socket error: ${err.message}`);
+      clientSocket.destroy();
+    });
     if (!consumeProxyAuthorization(req, options.requiredProxyAuthorization)) {
       clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
       return;
@@ -2188,11 +2200,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
-
-    clientSocket.on('error', (err) => {
-      const log = isConnectionReset(err) ? logger.debug : logger.info;
-      log(`[mitm-proxy] WebSocket client socket error: ${err.message}`);
-    });
 
     logger.info(`[mitm-proxy] WebSocket upgrade ws://${parsed.hostname}:${parsed.port}${parsed.path} → PASSTHROUGH`);
     bridgeWebSocketUpgrade(clientSocket, head, parsed.hostname, parsed.port, parsed.path, req.headers);
@@ -2345,9 +2352,19 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
     upstreamReq.setTimeout(30_000);
     activeUpstreamRequests.add(upstreamReq);
+    upstreamReq.once('close', () => activeUpstreamRequests.delete(upstreamReq));
+
+    // Until the upgrade completes, the client owns the pending HTTP request.
+    const cancelHandshake = (): void => {
+      clientSocket.destroy();
+      upstreamReq.destroy();
+    };
+    clientSocket.once('end', cancelHandshake);
+    clientSocket.once('close', cancelHandshake);
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
-      activeUpstreamRequests.delete(upstreamReq);
+      clientSocket.off('end', cancelHandshake);
+      clientSocket.off('close', cancelHandshake);
       clientSocket.write(formatRawHttpResponse(upstreamRes));
 
       // Track the pair for cleanup
@@ -2379,14 +2396,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     upstreamReq.on('response', (res) => {
-      activeUpstreamRequests.delete(upstreamReq);
+      res.once('error', () => clientSocket.destroy());
       clientSocket.write(formatRawHttpResponse(res));
       res.pipe(clientSocket);
-      clientSocket.on('close', () => upstreamReq.destroy());
     });
 
     upstreamReq.on('error', (err) => {
-      activeUpstreamRequests.delete(upstreamReq);
       const log = isConnectionReset(err) ? logger.debug : logger.info;
       log(`[mitm-proxy] WebSocket upgrade upstream error: ${err.message}`);
       if (!clientSocket.destroyed) {
@@ -2686,9 +2701,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 }
 
 /**
- * Injects the real key into already-validated headers.
- * Used after a token refresh to update the Authorization/API-key header
- * with the new real key before a retry.
+ * Installs the managed key after a sentinel match or token refresh.
  */
 function injectRealKey(headers: Record<string, string | string[] | undefined>, provider: ProviderKeyMapping): void {
   const { keyInjection } = provider.config;
@@ -2707,7 +2720,7 @@ function injectRealKey(headers: Record<string, string | string[] | undefined>, p
  * Called when upstream returns 401 and a token manager is available.
  */
 function retryWithRefreshedToken(
-  tokenManager: OAuthTokenManager,
+  tokenManager: ManagedTokenSource,
   provider: ProviderKeyMapping,
   headers: Record<string, string | string[] | undefined>,
   body: Buffer,
@@ -2749,7 +2762,7 @@ function validateAndSwapApiKey(
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
       if (currentValue === provider.fakeKey) {
-        headers[headerName] = provider.realKey;
+        injectRealKey(headers, provider);
         // API-key helpers can send the same sentinel in both auth headers.
         // Keep the configured header authoritative: a leftover bearer sentinel
         // makes gateways that prefer Authorization reject the real API key.
@@ -2763,7 +2776,7 @@ function validateAndSwapApiKey(
     case 'bearer': {
       const authHeader = headers['authorization'];
       if (authHeader === `Bearer ${provider.fakeKey}`) {
-        headers['authorization'] = `Bearer ${provider.realKey}`;
+        injectRealKey(headers, provider);
         return true;
       }
       return false;
