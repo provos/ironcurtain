@@ -30,17 +30,21 @@ import type { DockerProxy } from '../../src/docker/code-mode-proxy.js';
 import type { MitmProxy, MitmProxyOptions } from '../../src/docker/mitm-proxy.js';
 import type { ContainerRuntime } from '../../src/docker/types.js';
 import type { AgentImageResolution } from '../../src/docker/docker-infrastructure.js';
-import type {
-  DockerWorkloadAdmissionOptions,
-  DockerWorkloadBundleHandle,
+import {
+  admitDockerWorkloadBundle,
+  type DockerWorkloadAdmissionOptions,
+  type DockerWorkloadBundleHandle,
 } from '../../src/docker-workload/infrastructure.js';
+import { DOCKER_WORKLOAD_STALE_HEARTBEAT_MS } from '../../src/docker-workload/watchdog-policy.js';
 import type { SelectedAgentArtifact } from '../../src/docker/selected-agent-artifact.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { resolveDockerWorkloadConfig } from '../../src/docker-workload/config.js';
 import {
+  getBundleHostOnlyDir,
   getBundlePackageEgressSocketPath,
   getBundleRegistryEgressSocketPath,
   getBundleRuntimeRoot,
+  getDockerWorkloadLeasesRoot,
 } from '../../src/config/paths.js';
 import type { BundleId } from '../../src/session/types.js';
 import { createMockAdapter, createMockCA, createMockMitmProxy, createMockProxy } from '../helpers/docker-mocks.js';
@@ -49,6 +53,8 @@ import {
   createFakeClock,
   createFakeSupervisor,
   useDockerWorkloadHome,
+  WATCHDOG_ENTRYPOINT_PATH,
+  WATCHDOG_TEMPLATE_PATH,
   type EventRuntime,
   type FakeClock,
   type FakeSupervisor,
@@ -282,6 +288,7 @@ beforeEach(() => {
       async start() {
         if (socketPath?.endsWith('/registry-egress.sock')) seam.lifecycle.push('bind-registry');
         if (socketPath !== undefined) writeFileSync(socketPath, '');
+        if (controlSocketPath !== undefined) writeFileSync(controlSocketPath, '');
         return { socketPath, controlSocketPath };
       },
       async stop() {
@@ -408,6 +415,65 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
     expect(supervisor.calls.stopRequested).toBe(1);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
     expect(seam.stops).toEqual({ proxy: 1, mitm: 2, public: 0 });
+  });
+
+  it('starts the egress listeners after recovering a stale lease for the same bundle', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const workspaceRoot = join(getHome(), 'workspace');
+    mkdirSync(workspaceRoot);
+    const stale = await admitDockerWorkloadBundle({
+      runtime: runtime.runtime,
+      runtimeKind: 'apple-container',
+      bundleId: BUNDLE_ID,
+      workspaceRoot,
+      configuration: resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'packages' }),
+      watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
+      watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
+    });
+    mkdirSync(getBundleRuntimeRoot(BUNDLE_ID), { recursive: true });
+    clock.advance(DOCKER_WORKLOAD_STALE_HEARTBEAT_MS + 1);
+
+    await expect(prepare('packages')).rejects.toThrow('scripted post-attestation failure');
+
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('closed');
+    expect(admittedHandle().leaseId).not.toBe(stale.leaseId);
+    expect(supervisor.calls.launched).toBe(1);
+    expect(seam.registrySocketMode).toBe(0o666);
+    expect(seam.publicSocketMode).toBe(0o666);
+  });
+
+  it('rejects an invalid socket directory before provisioning images or recording a lease', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const buildImage = vi.spyOn(runtime.runtime, 'buildImage');
+    mkdirSync(getBundleRuntimeRoot(BUNDLE_ID), { recursive: true });
+    const hostOnlyDir = getBundleHostOnlyDir(BUNDLE_ID);
+    writeFileSync(hostOnlyDir, 'existing file');
+
+    await expect(prepare('packages')).rejects.toThrow('exists but is not a directory');
+
+    expect(buildImage).not.toHaveBeenCalled();
+    expect(seam.prepareArtifactCalls).toBe(0);
+    expect(existsSync(getDockerWorkloadLeasesRoot())).toBe(false);
+    expect(existsSync(hostOnlyDir)).toBe(true);
+  });
+
+  it('does not record a lease if a socket directory becomes invalid during image setup', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const hostOnlyDir = getBundleHostOnlyDir(BUNDLE_ID);
+    const adapter = failFastAdapter();
+    seam.adapter = {
+      ...adapter,
+      getImage() {
+        rmSync(hostOnlyDir, { recursive: true });
+        writeFileSync(hostOnlyDir, 'replacement file');
+        return adapter.getImage();
+      },
+    };
+
+    await expect(prepare('packages')).rejects.toThrow('exists but is not a directory');
+
+    expect(existsSync(getDockerWorkloadLeasesRoot())).toBe(false);
+    expect(existsSync(hostOnlyDir)).toBe(true);
   });
 
   it('stops both constructed listeners when package listener binding fails', async () => {

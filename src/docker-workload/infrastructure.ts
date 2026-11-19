@@ -172,6 +172,8 @@ export interface DockerWorkloadAdmissionOptions {
   readonly workspaceRoot: string;
   /** Complete resolved configuration recorded in the admission audit event. */
   readonly configuration: ResolvedDockerWorkloadConfig;
+  /** Create the bundle's socket directories after stale lease recovery and before recording the new lease. */
+  readonly prepareRuntimeDirectories?: () => void;
   readonly watchdogPolicyTemplatePath: string;
   readonly watchdogSupervisorEntrypointPath: string;
   readonly leaseId?: string;
@@ -271,6 +273,9 @@ export async function admitDockerWorkloadBundle(
     // broken or incomplete install must fail without accumulating empty
     // lease/state directories on every retry.
     const template = loadFrozenWatchdogPolicyTemplate(options.watchdogPolicyTemplatePath);
+    // Recovery can remove the runtime directory for this same bundle ID.
+    // Prepare it here so a directory error cannot strand a new lease.
+    options.prepareRuntimeDirectories?.();
     const leaseDir = getDockerWorkloadLeaseDir(leaseId);
     const stateRoot = getDockerWorkloadStateRoot(leaseId);
     createStateRootSubtree(stateRoot);
