@@ -1147,7 +1147,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
-    const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
+    const swappedKey = validateAndSwapApiKey(modifiedHeaders, provider);
 
     // Route-level negotiation is stable whether statistics are enabled or
     // disabled, so toggling local observation cannot change provider output.
@@ -1316,7 +1316,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // unauthenticated requests should not have credentials injected on retry.
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
     // 401 retry only makes sense when we swapped our own managed credential
-    const canRetryAuth = keyResult.swapped && !!provider.tokenManager;
+    const canRetryAuth = swappedKey && !!provider.tokenManager;
     // Only buffer for retry when the body is absent or small enough (known
     // Content-Length under 1MB). Large or chunked bodies stream through without
     // retry support to avoid memory overhead and 413 rejections on large
@@ -1692,16 +1692,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
      */
     async function processRequest(): Promise<void> {
       // Proactive token refresh: ensure the real key is fresh before forwarding.
-      // Only update headers if the request actually carried the fake key.
+      // Update every sentinel-authenticated request's headers, even if another
+      // request already installed the same refreshed token in the shared mapping.
       if (provider.tokenManager) {
         try {
-          const freshToken = await provider.tokenManager.getValidAccessToken();
-          if (freshToken !== provider.realKey) {
-            provider.realKey = freshToken;
-            if (keyResult.hadKey) {
-              injectRealKey(modifiedHeaders, provider);
-            }
-          }
+          provider.realKey = await provider.tokenManager.getValidAccessToken();
+          if (swappedKey) injectRealKey(modifiedHeaders, provider);
         } catch (err) {
           logger.warn(
             `[mitm-proxy] Proactive token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2738,28 +2734,20 @@ function retryWithRefreshedToken(
     });
 }
 
-/** Result of fake key validation. */
-type KeyValidationResult =
-  | { hadKey: true; swapped: true } // fake key matched -> swapped to real key
-  | { hadKey: true; swapped: false } // key present but not sentinel -> pass through
-  | { hadKey: false; swapped: false }; // no key sent (unauthenticated endpoint)
-
 /**
- * Validates the request's API key header. If the sentinel fake key is
- * present, swaps it for the real key. Non-sentinel keys (the agent's
- * own credentials) are passed through unchanged.
+ * Swaps the sentinel for the real key and returns whether the swap occurred.
+ * Non-sentinel keys (the agent's own credentials) are passed through unchanged.
  */
 function validateAndSwapApiKey(
   headers: Record<string, string | string[] | undefined>,
   provider: ProviderKeyMapping,
-): KeyValidationResult {
+): boolean {
   const { keyInjection } = provider.config;
 
   switch (keyInjection.type) {
     case 'header': {
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
-      if (currentValue === undefined) return { hadKey: false, swapped: false };
       if (currentValue === provider.fakeKey) {
         headers[headerName] = provider.realKey;
         // API-key helpers can send the same sentinel in both auth headers.
@@ -2768,20 +2756,17 @@ function validateAndSwapApiKey(
         if (headers.authorization === `Bearer ${provider.fakeKey}`) {
           delete headers.authorization;
         }
-        return { hadKey: true, swapped: true };
+        return true;
       }
-      // Non-sentinel key present -- agent's own credential, pass through
-      return { hadKey: true, swapped: false };
+      return false;
     }
     case 'bearer': {
       const authHeader = headers['authorization'];
-      if (authHeader === undefined) return { hadKey: false, swapped: false };
       if (authHeader === `Bearer ${provider.fakeKey}`) {
         headers['authorization'] = `Bearer ${provider.realKey}`;
-        return { hadKey: true, swapped: true };
+        return true;
       }
-      // Non-sentinel bearer token -- agent's own credential, pass through
-      return { hadKey: true, swapped: false };
+      return false;
     }
   }
 }

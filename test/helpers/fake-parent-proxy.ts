@@ -49,9 +49,13 @@ export interface FakeParentProxyOptions {
   readonly identity: TlsIdentity;
   /** Handlers keyed by destination hostname; an unrouted authority is refused. */
   readonly routes: Readonly<Record<string, ParentRoute | undefined>>;
+  /** Optional handler for absolute-form HTTP requests. */
+  readonly httpRoute?: ParentRoute;
 }
 
 export interface FakeParentProxy {
+  /** Number of client connections accepted, including refusals. */
+  readonly connections: number;
   /** Every authority the parent was asked to CONNECT to, in order. */
   readonly connectAuthorities: readonly string[];
   close(): Promise<void>;
@@ -64,6 +68,7 @@ export interface FakeParentProxy {
  */
 export async function startFakeParentProxy(options: FakeParentProxyOptions): Promise<FakeParentProxy> {
   const connectAuthorities: string[] = [];
+  let connections = 0;
 
   const inner = http.createServer((request, response) => {
     const hostname = (request.headers.host ?? '').split(':')[0];
@@ -76,7 +81,10 @@ export async function startFakeParentProxy(options: FakeParentProxyOptions): Pro
     route(request, response);
   });
 
-  const outer = http.createServer();
+  const outer = http.createServer(options.httpRoute);
+  outer.on('connection', () => {
+    connections += 1;
+  });
   outer.on('connect', (request: http.IncomingMessage, socket: Socket, head: Buffer) => {
     const authority = request.url ?? '';
     connectAuthorities.push(authority);
@@ -102,6 +110,9 @@ export async function startFakeParentProxy(options: FakeParentProxyOptions): Pro
   });
 
   return {
+    get connections() {
+      return connections;
+    },
     connectAuthorities,
     close: () =>
       new Promise<void>((resolve) => {
