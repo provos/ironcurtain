@@ -14,6 +14,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { unlinkSync, existsSync, readFileSync } from 'node:fs';
+import { loadConfig } from '../../src/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(__dirname, '../..');
@@ -79,7 +80,7 @@ async function detectLLM(): Promise<LLMConfig | null> {
     return {
       baseUrl: envFile.MEMORY_LLM_BASE_URL,
       apiKey: envFile.MEMORY_LLM_API_KEY,
-      model: envFile.MEMORY_LLM_MODEL || 'claude-haiku-4-5-20251001',
+      model: envFile.MEMORY_LLM_MODEL || loadConfig({}).llmModel,
     };
   }
 

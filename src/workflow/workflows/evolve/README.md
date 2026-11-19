@@ -56,7 +56,7 @@ The real budget is `run_spec.budget.max_rounds`, inferred at preflight from your
 ## At a glance
 
 - **Mode:** Docker (`claude-code` agent, `--network=none`, shared container)
-- **Model:** `anthropic:claude-sonnet-4-6`
+- **Model:** `anthropic:claude-sonnet-5-5`
 - **Persona:** `global` for every agent state
 - **Input:** an experiment directory via `--workspace` (evaluator + objective; optional seed/deps/cognition)
 - **Budget:** `max_rounds` inferred at preflight; `maxRounds: 200` is a backstop only

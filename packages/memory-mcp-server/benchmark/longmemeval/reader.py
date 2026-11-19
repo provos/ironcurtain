@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI
 
 from .config import BenchmarkConfig
 
@@ -75,6 +75,7 @@ async def generate_answer(
         question=question,
     )
 
+    is_haiku_55 = config.reader_model.rsplit("/", 1)[-1].replace(".", "-") == "claude-haiku-5-5"
     last_error: Exception | None = None
 
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -85,8 +86,8 @@ async def generate_answer(
                     {"role": "system", "content": READER_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=config.reader_max_tokens,
+                temperature=NOT_GIVEN if is_haiku_55 else 0,
+                max_tokens=max(config.reader_max_tokens, 1024) if is_haiku_55 else config.reader_max_tokens,
             )
             content = response.choices[0].message.content
             return content.strip() if content else ""

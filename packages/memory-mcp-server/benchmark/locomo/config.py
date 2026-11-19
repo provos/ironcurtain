@@ -24,7 +24,7 @@ load_dotenv()
 _DEFAULT_MEMORY_LLM_MODEL = "hadad/LFM2.5-1.2B:Q8_0"
 _DEFAULT_READER_MODEL = "gemma3:27b"
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/v1"
-_DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+_DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
 
 _DATA_URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
 

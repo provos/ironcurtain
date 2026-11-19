@@ -16,8 +16,8 @@ $EDITOR ~/.ironcurtain/config.json
 
 | Field           | Type   | Default                       | Description                                                          |
 | --------------- | ------ | ----------------------------- | -------------------------------------------------------------------- |
-| `agentModelId`  | string | `anthropic:claude-sonnet-4-6` | LLM for the agent. Format: `provider:model-name` or bare model name. |
-| `policyModelId` | string | `anthropic:claude-sonnet-4-6` | LLM for policy compilation.                                          |
+| `agentModelId`  | string | `anthropic:claude-sonnet-5-5` | LLM for the agent. Format: `provider:model-name` or bare model name. |
+| `policyModelId` | string | `anthropic:claude-sonnet-5-5` | LLM for policy compilation.                                          |
 
 Supported providers: `anthropic`, `google`, `openai`.
 
@@ -27,7 +27,7 @@ Supported providers: `anthropic`, `google`, `openai`.
 | -------------------------- | ------- | ---------------------------- | ---------------------------------------------------------------------------- |
 | `escalationTimeoutSeconds` | integer | `300`                        | Seconds to wait for human approval on escalated tool calls. Range: 30–600.   |
 | `autoApprove.enabled`      | boolean | `false`                      | Let an LLM auto-approve escalated tool calls instead of waiting for a human. |
-| `autoApprove.modelId`      | string  | `anthropic:claude-haiku-4-5` | Model used for auto-approval decisions.                                      |
+| `autoApprove.modelId`      | string  | `anthropic:claude-haiku-5-5` | Model used for auto-approval decisions.                                      |
 
 ### Network destination screening
 
@@ -194,7 +194,7 @@ Controls automatic context compaction when the conversation approaches token lim
 | `autoCompact.enabled`            | boolean | `true`                       | Enable automatic compaction.                           |
 | `autoCompact.thresholdTokens`    | integer | `160000`                     | Token count at which compaction triggers.              |
 | `autoCompact.keepRecentMessages` | integer | `10`                         | Number of recent messages preserved during compaction. |
-| `autoCompact.summaryModelId`     | string  | `anthropic:claude-haiku-4-5` | Model used to generate the summary.                    |
+| `autoCompact.summaryModelId`     | string  | `anthropic:claude-haiku-5-5` | Model used to generate the summary.                    |
 
 ## Audit Redaction
 
@@ -396,7 +396,7 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
 ironcurtain mux
 ```
 
-LiteLLM handles model-name translation (e.g. mapping `claude-sonnet-4-6` to your chosen OpenRouter / Bedrock / OpenAI model). One-shot `ironcurtain start "your task"` runs use the same routing when you need a scriptable check. See LiteLLM's docs for sidecar setup.
+LiteLLM handles model-name translation (e.g. mapping `claude-sonnet-5-5` to your chosen OpenRouter / Bedrock / OpenAI model). One-shot `ironcurtain start "your task"` runs use the same routing when you need a scriptable check. See LiteLLM's docs for sidecar setup.
 
 ## Memory
 
@@ -420,8 +420,8 @@ Use the `provider:model-name` format in config and provide the API key for each 
 
 ```json
 {
-  "agentModelId": "anthropic:claude-sonnet-4-6",
-  "policyModelId": "google:gemini-2.5-flash",
+  "agentModelId": "anthropic:claude-sonnet-5-5",
+  "policyModelId": "google:gemini-3.8-flash",
   "googleApiKey": "AIza..."
 }
 ```
@@ -436,8 +436,8 @@ The config file is created with `0600` (owner-only read/write) permissions. A wa
 
 ```json
 {
-  "agentModelId": "anthropic:claude-sonnet-4-6",
-  "policyModelId": "anthropic:claude-sonnet-4-6",
+  "agentModelId": "anthropic:claude-sonnet-5-5",
+  "policyModelId": "anthropic:claude-sonnet-5-5",
   "escalationTimeoutSeconds": 300,
   "resourceBudget": {
     "maxTotalTokens": 1000000,
@@ -450,11 +450,11 @@ The config file is created with `0600` (owner-only read/write) permissions. A wa
     "enabled": true,
     "thresholdTokens": 160000,
     "keepRecentMessages": 10,
-    "summaryModelId": "anthropic:claude-haiku-4-5"
+    "summaryModelId": "anthropic:claude-haiku-5-5"
   },
   "autoApprove": {
     "enabled": false,
-    "modelId": "anthropic:claude-haiku-4-5"
+    "modelId": "anthropic:claude-haiku-5-5"
   },
   "auditRedaction": {
     "enabled": true

@@ -7,7 +7,7 @@ settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
-  model: anthropic:claude-haiku-4-5
+  model: anthropic:claude-haiku-5-5
 
 states:
   author:

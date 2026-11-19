@@ -19,6 +19,6 @@ export function modelFlagMisusedAsAgent(model: string | undefined): string | nul
   return (
     `"${model}" is an agent, not a model. Did you mean --agent ${model}?\n` +
     `--agent selects the agent (${DOCKER_AGENTS.join(', ')}); ` +
-    `--model only overrides the LLM model ID (e.g. --model claude-opus-4-8).`
+    `--model only overrides the LLM model ID (e.g. --model claude-opus-5-5).`
   );
 }

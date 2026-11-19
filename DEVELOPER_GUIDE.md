@@ -105,7 +105,7 @@ Auto-approval is configured in `~/.ironcurtain/config.json`:
 {
   "autoApprove": {
     "enabled": true,
-    "modelId": "anthropic:claude-haiku-4-5"
+    "modelId": "anthropic:claude-haiku-5-5"
   }
 }
 ```

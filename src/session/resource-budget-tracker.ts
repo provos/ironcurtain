@@ -72,11 +72,15 @@ interface ModelPricing {
  * ORDERING MATTERS: more specific matches must come before broader ones
  * (e.g. 'claude-opus-4-5' before 'claude-opus', 'gpt-4.1-nano' before 'gpt-4.1').
  *
- * Last updated: 2026-02-19
+ * Last updated: 2026-11-19
  * Sources: platform.claude.com, openai.com/api/pricing, ai.google.dev/gemini-api/docs/pricing
  */
 const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: ModelPricing }> = [
   // --- Anthropic ---
+  // Claude 5.5 (Haiku uses the higher long-context rate for conservative estimates).
+  { match: 'claude-opus-5-5', pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheReadPerMillion: 0.2 } },
+  { match: 'claude-sonnet-5-5', pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheReadPerMillion: 0.1 } },
+  { match: 'claude-haiku-5-5', pricing: { inputPerMillion: 0.5, outputPerMillion: 2.5, cacheReadPerMillion: 0.05 } },
   // Opus 4.5/4.6 ($5/$25/$0.50)
   { match: 'claude-opus-4-5', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.5 } },
   { match: 'claude-opus-4-6', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.5 } },
@@ -90,6 +94,9 @@ const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: M
   { match: 'claude-haiku', pricing: { inputPerMillion: 0.8, outputPerMillion: 4, cacheReadPerMillion: 0.08 } },
 
   // --- OpenAI ---
+  // GPT-6.2 Sol and GPT-6 Luna (standard short-context rates).
+  { match: 'gpt-6.2-sol', pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheReadPerMillion: 0.1 } },
+  { match: 'gpt-6-luna', pricing: { inputPerMillion: 0.05, outputPerMillion: 0.25, cacheReadPerMillion: 0.005 } },
   // GPT-5.2 Pro ($21/$168)
   { match: 'gpt-5.2-pro', pricing: { inputPerMillion: 21, outputPerMillion: 168, cacheReadPerMillion: 21 } },
   // GPT-5.2 ($1.75/$14/$0.175)
@@ -110,6 +117,8 @@ const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: M
   { match: 'gpt-4o', pricing: { inputPerMillion: 2.5, outputPerMillion: 10, cacheReadPerMillion: 1.25 } },
 
   // --- Google Gemini ---
+  // Gemini 3.8 Flash (post-promotion rate).
+  { match: 'gemini-3.8-flash', pricing: { inputPerMillion: 1.5, outputPerMillion: 7.5, cacheReadPerMillion: 0.15 } },
   // Gemini 3.1 Pro ($2/$12)
   { match: 'gemini-3.1-pro', pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.2 } },
   // Gemini 3 Flash ($0.50/$3)
@@ -148,7 +157,8 @@ const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: M
 const FALLBACK_PRICING: ModelPricing = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 };
 
 function resolvePricing(modelId: string): ModelPricing {
-  const lower = modelId.toLowerCase();
+  // OpenRouter uses a dot for Claude 5.5 where Anthropic uses a hyphen.
+  const lower = modelId.toLowerCase().replace(/(claude-(?:opus|sonnet|haiku)-5)\.5/g, '$1-5');
   for (const entry of MODEL_PRICING) {
     if (lower.includes(entry.match)) return entry.pricing;
   }

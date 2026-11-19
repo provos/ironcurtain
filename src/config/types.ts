@@ -103,7 +103,7 @@ export interface IronCurtainConfig {
   llmLogPath?: string;
   /** Per-session auto-approver LLM log path. When set, auto-approver LLM calls are logged to this JSONL file. */
   autoApproveLlmLogPath?: string;
-  /** AI SDK model ID for the interactive agent (e.g. 'anthropic:claude-sonnet-4-6'). */
+  /** AI SDK model ID for the interactive agent (e.g. 'anthropic:claude-sonnet-5-5'). */
   agentModelId: string;
   /** Escalation timeout in seconds (30-600). Controls how long to wait for human approval. */
   escalationTimeoutSeconds: number;

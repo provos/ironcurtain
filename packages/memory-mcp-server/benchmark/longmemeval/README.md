@@ -48,7 +48,7 @@ uv run longmemeval run+evaluate --variant S --judge-provider anthropic
 uv run longmemeval run+evaluate --variant S --keep-db
 ```
 
-When `--reader-provider` or `--judge-provider` is set to `anthropic`, the model defaults to `claude-haiku-4-5-20251001`. Override with `--reader-model` or `--judge-model`.
+When `--reader-provider` or `--judge-provider` is set to `anthropic`, the model defaults to `claude-haiku-5-5`. Override with `--reader-model` or `--judge-model`.
 
 ## Output
 

@@ -316,7 +316,7 @@ describe('OpenRouter — Goose adapter', () => {
     expect(env.GOOSE_PROVIDER).toBe('openrouter');
     expect(env.OPENROUTER_API_KEY).toBe(FAKE_OPENROUTER_KEY);
     // D2: perAgent.goose wins.
-    expect(env.GOOSE_MODEL).toBe('claude-sonnet-4-20250514');
+    expect(env.GOOSE_MODEL).toBe('claude-sonnet-5-5');
     expect(servedModel(adapter, config, env.GOOSE_MODEL)).toBe('moonshot/kimi-k3');
   });
 
@@ -326,7 +326,7 @@ describe('OpenRouter — Goose adapter', () => {
     const adapter = createGooseAdapter();
     const config = configWithProfile(openrouterProfile());
     const env = adapter.buildEnv(config, openrouterFakeKeys());
-    expect(env.GOOSE_MODEL).toBe('claude-sonnet-4-20250514');
+    expect(env.GOOSE_MODEL).toBe('claude-sonnet-5-5');
     expect(servedModel(adapter, config, env.GOOSE_MODEL)).toBe(DEFAULT_GLM_FLASH_SLUG);
   });
 

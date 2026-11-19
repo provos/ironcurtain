@@ -9,7 +9,7 @@ describe('loadConfig', () => {
     expect(config.embeddingDtype).toBe('q8');
     expect(config.llmBaseUrl).toBeNull();
     expect(config.llmApiKey).toBeNull();
-    expect(config.llmModel).toBe('claude-haiku-4-5-20251001');
+    expect(config.llmModel).toBe('claude-haiku-5-5');
     expect(config.decayThreshold).toBe(0.05);
     expect(config.maintenanceInterval).toBe(50);
     expect(config.compactionMinGroup).toBe(10);

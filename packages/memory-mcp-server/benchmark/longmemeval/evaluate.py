@@ -14,7 +14,7 @@ import os
 import sys
 from collections import defaultdict
 
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI
 from tqdm import tqdm
 
 from .config import BenchmarkConfig
@@ -164,6 +164,7 @@ async def judge_one(
         client = _build_judge_client(config)
     prompt = get_judge_prompt(question_id, question_type, question, answer, hypothesis)
 
+    is_haiku_55 = config.judge_model.rsplit("/", 1)[-1].replace(".", "-") == "claude-haiku-5-5"
     last_error: Exception | None = None
 
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -171,8 +172,8 @@ async def judge_one(
             response = await client.chat.completions.create(
                 model=config.judge_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=10,
+                temperature=NOT_GIVEN if is_haiku_55 else 0,
+                max_tokens=1024 if is_haiku_55 else 10,
             )
             content = response.choices[0].message.content or ""
             return _parse_judge_response(content)

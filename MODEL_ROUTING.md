@@ -94,17 +94,17 @@ Write `~/src/litellm/config.yaml`. The `model_name` entries on the left must mat
 
 ```yaml
 model_list:
-  - model_name: claude-opus-4-7
+  - model_name: claude-opus-5-5
     litellm_params:
       model: openrouter/z-ai/glm-5.1
       api_key: os.environ/OPENROUTER_API_KEY
 
-  - model_name: claude-sonnet-4-6
+  - model_name: claude-sonnet-5-5
     litellm_params:
       model: openrouter/z-ai/glm-5.1
       api_key: os.environ/OPENROUTER_API_KEY
 
-  - model_name: claude-haiku-4-5-20251001
+  - model_name: claude-haiku-5-5
     litellm_params:
       model: openrouter/z-ai/glm-5.1
       api_key: os.environ/OPENROUTER_API_KEY
@@ -136,7 +136,7 @@ curl http://localhost:4000/v1/messages \
   -H 'content-type: application/json' \
   -H 'x-api-key: anything' \
   -H 'anthropic-version: 2023-06-01' \
-  -d '{"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}'
+  -d '{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}'
 ```
 
 You should get an Anthropic-shaped response back.
@@ -158,7 +158,7 @@ Z.ai's docs show `ANTHROPIC_AUTH_TOKEN` (bearer), but their endpoint also accept
 
 **Endpoint allowlist (Docker Agent Mode).** Only `POST /v1/messages` and `/v1/messages/count_tokens` are forwarded to Anthropic-family targets. LiteLLM serves both by default.
 
-**Cost caps bill at the model ID.** `resourceBudget.maxEstimatedCostUsd` uses IronCurtain's cost tables keyed off the model name the agent asked for, not the actual backend. If you route `claude-opus-4-7` to something cheaper, the cost tracker still bills at Opus rates — raise or disable (`null`) the cap accordingly.
+**Cost caps bill at the model ID.** `resourceBudget.maxEstimatedCostUsd` uses IronCurtain's cost tables keyed off the model name the agent asked for, not the actual backend. If you route `claude-opus-5-5` to something cheaper, the cost tracker still bills at Opus rates — raise or disable (`null`) the cap accordingly.
 
 ## Gotchas
 
