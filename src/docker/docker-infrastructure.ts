@@ -1112,16 +1112,20 @@ export async function prepareDockerInfrastructure(
   // `getBundleSocketsDir(bundleId)` / `getBundleHostOnlyDir(bundleId)`
   // (both under `~/.ironcurtain/run/<bid12>/`) so every assembled path
   // stays well under the cap even with a 20-char username.
+  const runtimeRoot = getBundleRuntimeRoot(bundleId);
   const socketsDir = getBundleSocketsDir(bundleId);
   const hostOnlyDir = getBundleHostOnlyDir(bundleId);
   const socketPath = getBundleProxySocketPath(bundleId);
   const prepareRuntimeDirectories = (): void => {
-    // Check the root for symlinks before creating either child directory.
-    ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
+    // A symlink at the runtime root would redirect both child paths.
+    // Validate the root before creating either child directory.
+    ensureSecureBundleDir(runtimeRoot);
     ensureSecureBundleDir(socketsDir);
     ensureSecureBundleDir(hostOnlyDir);
   };
-  if (admitted === undefined) prepareRuntimeDirectories();
+  // Fail before image provisioning if directory setup is unsafe or impossible.
+  // Nested Docker admission repeats this after stale lease recovery.
+  prepareRuntimeDirectories();
 
   const docker = createContainerRuntime(runtimeKind, admittedEnvironment?.dockerEndpoint);
 

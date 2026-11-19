@@ -442,11 +442,33 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
     expect(seam.publicSocketMode).toBe(0o666);
   });
 
-  it('fails before recording a new lease if the socket directories cannot be prepared', async () => {
+  it('rejects an invalid socket directory before provisioning images or recording a lease', async () => {
     installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const buildImage = vi.spyOn(runtime.runtime, 'buildImage');
     mkdirSync(getBundleRuntimeRoot(BUNDLE_ID), { recursive: true });
     const hostOnlyDir = getBundleHostOnlyDir(BUNDLE_ID);
     writeFileSync(hostOnlyDir, 'existing file');
+
+    await expect(prepare('packages')).rejects.toThrow('exists but is not a directory');
+
+    expect(buildImage).not.toHaveBeenCalled();
+    expect(seam.prepareArtifactCalls).toBe(0);
+    expect(existsSync(getDockerWorkloadLeasesRoot())).toBe(false);
+    expect(existsSync(hostOnlyDir)).toBe(true);
+  });
+
+  it('does not record a lease if a socket directory becomes invalid during image setup', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const hostOnlyDir = getBundleHostOnlyDir(BUNDLE_ID);
+    const adapter = failFastAdapter();
+    seam.adapter = {
+      ...adapter,
+      getImage() {
+        rmSync(hostOnlyDir, { recursive: true });
+        writeFileSync(hostOnlyDir, 'replacement file');
+        return adapter.getImage();
+      },
+    };
 
     await expect(prepare('packages')).rejects.toThrow('exists but is not a directory');
 
