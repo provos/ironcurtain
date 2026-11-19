@@ -64,7 +64,7 @@ Adding an LLM enables summarization, direct question answering (`format="answer"
         "MEMORY_DB_PATH": "~/.local/share/memory-mcp/default.db",
         "MEMORY_LLM_API_KEY": "your-api-key",
         "MEMORY_LLM_BASE_URL": "https://openrouter.ai/api/v1",
-        "MEMORY_LLM_MODEL": "anthropic/claude-haiku-4-5-20251001"
+        "MEMORY_LLM_MODEL": "anthropic/claude-haiku-5.5"
       }
     }
   }
@@ -303,7 +303,7 @@ All settings are controlled via environment variables:
 | `MEMORY_RERANKER_MODEL`           | `Xenova/ms-marco-MiniLM-L-6-v2`        | HuggingFace reranker model                                       |
 | `MEMORY_LLM_API_KEY`              | _(none)_                               | API key for LLM (enables enhanced features)                      |
 | `MEMORY_LLM_BASE_URL`             | _(none)_                               | OpenAI-compatible endpoint (must support `/v1/chat/completions`) |
-| `MEMORY_LLM_MODEL`                | `claude-haiku-4-5-20251001`            | LLM model name                                                   |
+| `MEMORY_LLM_MODEL`                | `claude-haiku-5-5`                      | LLM model name                                                   |
 | `MEMORY_DEFAULT_TOKEN_BUDGET`     | `800`                                  | Default token budget for recall                                  |
 | `MEMORY_MAINTENANCE_INTERVAL`     | `50`                                   | Stores between maintenance passes                                |
 | `MEMORY_DECAY_THRESHOLD`          | `0.05`                                 | Vitality below which memories decay                              |

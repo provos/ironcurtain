@@ -120,6 +120,50 @@ describe('createLanguageModel', () => {
     expect(model).toHaveProperty('modelId', 'claude-sonnet-4-6');
   });
 
+  it('uses native structured output for Claude 5.5', async () => {
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    const actual = await vi.importActual<typeof import('@ai-sdk/anthropic')>('@ai-sdk/anthropic');
+    vi.mocked(createAnthropic).mockImplementationOnce(actual.createAnthropic);
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { type: 'error', error: { type: 'invalid_request_error', message: 'test response' } },
+          { status: 400 },
+        ),
+      );
+    vi.stubEnv('ANTHROPIC_BASE_URL', undefined);
+    vi.stubEnv('HTTP_PROXY', undefined);
+    vi.stubEnv('HTTPS_PROXY', undefined);
+    vi.stubGlobal('fetch', fetch);
+
+    try {
+      const model = await createLanguageModelFromEnv('anthropic:claude-sonnet-5-5', 'test-key');
+      await expect(
+        model.doGenerate({
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'Return JSON' }] }],
+          responseFormat: {
+            type: 'json',
+            schema: {
+              type: 'object',
+              properties: { ok: { type: 'boolean' } },
+              required: ['ok'],
+              additionalProperties: false,
+            },
+          },
+        }),
+      ).rejects.toThrow('test response');
+
+      expect(fetch).toHaveBeenCalledOnce();
+      const body = JSON.parse(fetch.mock.calls[0][1]?.body as string) as Record<string, unknown>;
+      expect(body).toMatchObject({ output_config: { format: { type: 'json_schema' } } });
+      expect(body).not.toHaveProperty('tool_choice');
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('creates a Google model with API key from config', async () => {
     const config = createTestUserConfig();
     const model = await createLanguageModel('google:gemini-2.0-flash', config);

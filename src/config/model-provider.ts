@@ -71,7 +71,7 @@ export function resolveHostModelId(qualifiedId: string, config: ResolvedUserConf
  * Resolves the API key from config based on the model's provider,
  * then delegates to createLanguageModelFromEnv().
  *
- * @param qualifiedId - Model specifier like "anthropic:claude-sonnet-4-6"
+ * @param qualifiedId - Model specifier like "anthropic:claude-sonnet-5-5"
  * @param config - Resolved user config for API key lookup
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
@@ -152,7 +152,7 @@ export async function createLanguageModel(
  * Designed for use in the proxy process, which receives the model ID and
  * API key via environment variables.
  *
- * @param qualifiedId - Model specifier like "anthropic:claude-haiku-4-5"
+ * @param qualifiedId - Model specifier like "anthropic:claude-haiku-5-5"
  * @param apiKey - Explicit API key for the model's provider (empty string uses env/default)
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
@@ -174,7 +174,20 @@ export async function createLanguageModelFromEnv(
       // Preserve explicit SDK /v1 bases while deriving it for root overrides.
       const root = (url ?? (process.env.ANTHROPIC_BASE_URL || undefined))?.replace(/\/+$/, '');
       const sdkBaseURL = root === undefined || root.endsWith('/v1') ? root : `${root}/v1`;
-      return createAnthropic({ apiKey: key, baseURL: sdkBaseURL, fetch })(modelId);
+      const model = createAnthropic({ apiKey: key, baseURL: sdkBaseURL, fetch })(modelId);
+      if (root !== undefined && root !== 'https://api.anthropic.com' && root !== 'https://api.anthropic.com/v1') {
+        return model;
+      }
+      if (!/^claude-(?:sonnet|opus|haiku)-5-5$/.test(modelId)) return model;
+
+      // The pinned SDK falls back to a forced tool for unrecognized models.
+      const { defaultSettingsMiddleware, wrapLanguageModel } = await import('ai');
+      return wrapLanguageModel({
+        model,
+        middleware: defaultSettingsMiddleware({
+          settings: { providerOptions: { anthropic: { structuredOutputMode: 'outputFormat' } } },
+        }),
+      });
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');

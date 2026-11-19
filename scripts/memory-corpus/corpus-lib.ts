@@ -164,9 +164,8 @@ export function computeResumeSet(records: readonly ProgressRecord[]): Set<string
  * BEFORE `loadConfig()`. Requires `ANTHROPIC_API_KEY` (we REQUIRE the LLM for the
  * corpus/diagnostic — no silent degrade) and throws a clear error if it's absent.
  *
- * The base URL and default model are pinned here so the two drivers can never
- * drift apart. Determinism vars (db path, maintenance interval, decay threshold)
- * are the build driver's concern and stay there.
+ * The drivers share the model default from the memory server configuration.
+ * Database and maintenance settings are owned by the build driver.
  */
 export function wireMemoryLlmEnv(namespace: string): void {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -178,7 +177,6 @@ export function wireMemoryLlmEnv(namespace: string): void {
   }
   process.env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
   process.env.MEMORY_LLM_API_KEY = apiKey;
-  process.env.MEMORY_LLM_MODEL = process.env.MEMORY_LLM_MODEL ?? 'claude-haiku-4-5-20251001';
   process.env.MEMORY_NAMESPACE = namespace;
   process.env.MEMORY_RERANKER_ENABLED = 'false';
 }

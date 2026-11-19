@@ -154,6 +154,26 @@ describe('ResourceBudgetTracker', () => {
   });
 
   describe('cost estimation', () => {
+    it.each([
+      ['claude-sonnet-5-5', 12],
+      ['anthropic/claude-sonnet-5.5', 12],
+      ['claude-opus-5-5', 24],
+      ['claude-haiku-5-5', 3],
+      ['gpt-6.2-sol', 12],
+      ['gemini-3.8-flash', 9],
+    ])('prices current model %s', (model, expected) => {
+      const tracker = createTracker({ maxTotalTokens: null, maxEstimatedCostUsd: null }, model);
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          outputTokens: 1_000_000,
+          totalTokens: 2_000_000,
+        }),
+      );
+      expect(tracker.getSnapshot().estimatedCostUsd).toBeCloseTo(expected);
+    });
+
     it('estimates cost from token counts and pricing table', () => {
       const tracker = createTracker({ maxEstimatedCostUsd: 10, maxTotalTokens: null, maxSteps: null });
 

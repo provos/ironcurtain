@@ -59,7 +59,7 @@ export function loadConfig(env: EnvSource = process.env): MemoryConfig {
 
     llmBaseUrl: env.MEMORY_LLM_BASE_URL ?? null,
     llmApiKey: env.MEMORY_LLM_API_KEY ?? null,
-    llmModel: env.MEMORY_LLM_MODEL ?? 'claude-haiku-4-5-20251001',
+    llmModel: env.MEMORY_LLM_MODEL ?? 'claude-haiku-5-5',
 
     decayThreshold: envFloat(env, 'MEMORY_DECAY_THRESHOLD', 0.05),
     maintenanceInterval: envInt(env, 'MEMORY_MAINTENANCE_INTERVAL', 50),

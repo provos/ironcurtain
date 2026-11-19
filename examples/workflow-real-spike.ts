@@ -46,7 +46,7 @@ import {
 // Config
 // ---------------------------------------------------------------------------
 
-const HAIKU_MODEL_ID = 'anthropic:claude-haiku-4-5';
+const HAIKU_MODEL_ID = 'anthropic:claude-haiku-5-5';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing

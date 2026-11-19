@@ -31,13 +31,12 @@ engine internals directly — the same pattern as the LoCoMo fixture builder.
   exits with an error if the key is missing (no silent degrade). Load it via
   `--import dotenv/config` from your `.env`, or export it.
 
-The driver sets these `MEMORY_*` vars in-process before `loadConfig()`:
+The driver sets these `MEMORY_*` vars in-process before `loadConfig()`. The memory server supplies the default extraction model (Claude Haiku 5.5), which you can override with `MEMORY_LLM_MODEL`.
 
 | var                           | value                                     | why                                              |
 | ----------------------------- | ----------------------------------------- | ------------------------------------------------ |
 | `MEMORY_LLM_BASE_URL`         | `https://api.anthropic.com/v1/`           | OpenAI-compatible Haiku endpoint                 |
 | `MEMORY_LLM_API_KEY`          | `$ANTHROPIC_API_KEY`                      | extraction auth                                  |
-| `MEMORY_LLM_MODEL`            | `claude-haiku-4-5-20251001` (overridable) | extraction model                                 |
 | `MEMORY_DB_PATH`              | resolved `--db`                           | output DB                                        |
 | `MEMORY_NAMESPACE`            | `--namespace`                             | corpus isolation                                 |
 | `MEMORY_MAINTENANCE_INTERVAL` | `100000000`                               | suppress per-store maintenance (see determinism) |

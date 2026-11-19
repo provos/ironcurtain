@@ -13,6 +13,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadUserConfig,
+  USER_CONFIG_DEFAULTS,
   loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   validateModelId,
@@ -58,13 +59,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Known model options for selection prompts. */
 const KNOWN_MODELS: { value: string; label: string }[] = [
-  { value: 'anthropic:claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { value: 'anthropic:claude-opus-4-6', label: 'Claude Opus 4.6' },
-  { value: 'anthropic:claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-  { value: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-  { value: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-  { value: 'openai:gpt-4o', label: 'GPT-4o' },
-  { value: 'openai:gpt-4o-mini', label: 'GPT-4o Mini' },
+  { value: USER_CONFIG_DEFAULTS.agentModelId, label: 'Claude Sonnet 5.5' },
+  { value: 'anthropic:claude-opus-5-5', label: 'Claude Opus 5.5' },
+  { value: USER_CONFIG_DEFAULTS.prefilterModelId, label: 'Claude Haiku 5.5' },
+  { value: 'google:gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+  { value: 'google:gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
+  { value: 'openai:gpt-6.2-sol', label: 'GPT-6.2 Sol' },
+  { value: 'openai:gpt-6-luna', label: 'GPT-6 Luna' },
 ];
 
 const CUSTOM_MODEL_SENTINEL = '__custom__';

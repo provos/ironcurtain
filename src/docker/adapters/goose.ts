@@ -24,7 +24,7 @@ import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, Orientation
 import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import type { AuthMethod } from '../oauth-credentials.js';
-import type { ResolvedUserConfig, GooseProvider } from '../../config/user-config.js';
+import { DEFAULT_GOOSE_MODEL, type ResolvedUserConfig, type GooseProvider } from '../../config/user-config.js';
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE } from '../runtime-trust.js';
@@ -177,7 +177,7 @@ exec goose run -s -i "$PROMPT_FILE"
  */
 export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapter {
   const gooseProvider: GooseProvider = userConfig?.gooseProvider ?? 'anthropic';
-  const gooseModel: string = userConfig?.gooseModel ?? 'claude-sonnet-4-20250514';
+  const gooseModel: string = userConfig?.gooseModel ?? DEFAULT_GOOSE_MODEL;
 
   const credentialHelpText =
     `No API key found for Goose provider "${gooseProvider}". ` +

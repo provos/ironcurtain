@@ -96,8 +96,8 @@ describe('config-command', () => {
 
   it('model change flows through to disk', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -108,23 +108,26 @@ describe('config-command', () => {
     mocks.select
       .mockResolvedValueOnce('models') // main menu: Models
       .mockResolvedValueOnce('agentModelId') // Models sub: agentModelId
-      .mockResolvedValueOnce('anthropic:claude-opus-4-6') // model selection
+      .mockResolvedValueOnce('anthropic:claude-opus-5-5') // model selection
       .mockResolvedValueOnce('back') // Models sub: Back
       .mockResolvedValueOnce('save'); // main menu: Save & Exit
     mocks.confirm.mockResolvedValueOnce(true); // confirm save
 
     await runConfigCommand();
 
+    expect(mocks.select.mock.calls[2][0].options).toContainEqual(
+      expect.objectContaining({ value: 'anthropic:claude-opus-5-5' }),
+    );
     const onDisk = readConfig(env.testHome);
-    expect(onDisk.agentModelId).toBe('anthropic:claude-opus-4-6');
+    expect(onDisk.agentModelId).toBe('anthropic:claude-opus-5-5');
     // policyModelId should be unchanged
-    expect(onDisk.policyModelId).toBe('anthropic:claude-sonnet-4-6');
+    expect(onDisk.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
   });
 
   it('nullable budget field set to null', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: { ...USER_CONFIG_DEFAULTS.resourceBudget },
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -149,8 +152,8 @@ describe('config-command', () => {
 
   it('cancel discards all changes', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -161,21 +164,21 @@ describe('config-command', () => {
     mocks.select
       .mockResolvedValueOnce('models')
       .mockResolvedValueOnce('agentModelId')
-      .mockResolvedValueOnce('anthropic:claude-opus-4-6')
+      .mockResolvedValueOnce('anthropic:claude-opus-5-5')
       .mockResolvedValueOnce('back')
       .mockResolvedValueOnce('cancel');
 
     await runConfigCommand();
 
     const onDisk = readConfig(env.testHome);
-    expect(onDisk.agentModelId).toBe('anthropic:claude-sonnet-4-6');
+    expect(onDisk.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(mocks.cancel).toHaveBeenCalledWith('Changes discarded.');
   });
 
   it('save with no changes shows appropriate message', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -191,8 +194,8 @@ describe('config-command', () => {
 
   it('Web Search section appears in main menu', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -215,8 +218,8 @@ describe('config-command', () => {
 
   it('Web Search provider selection stores in pending', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -275,8 +278,8 @@ describe('config-command', () => {
 
   it('Model Providers section appears in main menu', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -314,8 +317,8 @@ describe('config-command', () => {
 
   it('adding an openrouter profile writes the whole modelProviders block', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -350,8 +353,8 @@ describe('config-command', () => {
 
   it('setting the default profile persists modelProviders.default', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -419,8 +422,8 @@ describe('config-command', () => {
 
   it('deleting the default-pointed profile re-points default to native (F10)', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       escalationTimeoutSeconds: 300,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -458,8 +461,8 @@ describe('config-command', () => {
 
   it('enables nested Docker from the Docker Agent settings with the simple config shape', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
     });
 
     mocks.select
@@ -510,8 +513,8 @@ describe('config-command', () => {
 
   it('preserves an explicit offline preference while disabled and when re-enabling nested Docker', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       dockerWorkload: { enabled: false, imageIngress: 'preloaded-only' },
     });
 
@@ -536,8 +539,8 @@ describe('config-command', () => {
 
   it('persists offline as the network-access choice', async () => {
     seedConfig(env.testHome, {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      policyModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
       dockerWorkload: { enabled: true },
     });
 
@@ -596,8 +599,8 @@ describe('config-command', () => {
 
 describe('computeDiff', () => {
   const resolved: ResolvedUserConfig = {
-    agentModelId: 'anthropic:claude-sonnet-4-6',
-    policyModelId: 'anthropic:claude-sonnet-4-6',
+    agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+    policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
     anthropicApiKey: '',
     googleApiKey: '',
     openaiApiKey: '',
@@ -613,11 +616,11 @@ describe('computeDiff', () => {
       enabled: true,
       thresholdTokens: 160_000,
       keepRecentMessages: 10,
-      summaryModelId: 'anthropic:claude-haiku-4-5',
+      summaryModelId: USER_CONFIG_DEFAULTS.autoCompact.summaryModelId,
     },
     autoApprove: {
       enabled: false,
-      modelId: 'anthropic:claude-haiku-4-5',
+      modelId: USER_CONFIG_DEFAULTS.autoApprove.modelId,
     },
     webSearch: {
       provider: null,
@@ -652,10 +655,10 @@ describe('computeDiff', () => {
 
   it('detects top-level changes', () => {
     const pending: UserConfig = {
-      agentModelId: 'anthropic:claude-opus-4-6',
+      agentModelId: 'anthropic:claude-opus-5-5',
     };
     const diffs = computeDiff(resolved, pending);
-    expect(diffs).toEqual([['agentModelId', { from: 'anthropic:claude-sonnet-4-6', to: 'anthropic:claude-opus-4-6' }]]);
+    expect(diffs).toEqual([['agentModelId', { from: resolved.agentModelId, to: 'anthropic:claude-opus-5-5' }]]);
   });
 
   it('detects nested changes', () => {
@@ -674,7 +677,7 @@ describe('computeDiff', () => {
 
   it('detects multiple changes across categories', () => {
     const pending: UserConfig = {
-      agentModelId: 'anthropic:claude-opus-4-6',
+      agentModelId: 'anthropic:claude-opus-5-5',
       autoApprove: { enabled: true },
     };
     const diffs = computeDiff(resolved, pending);
@@ -685,7 +688,7 @@ describe('computeDiff', () => {
 
   it('ignores unchanged values in pending', () => {
     const pending: UserConfig = {
-      agentModelId: 'anthropic:claude-sonnet-4-6', // same as resolved
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId, // same as resolved
     };
     expect(computeDiff(resolved, pending)).toEqual([]);
   });

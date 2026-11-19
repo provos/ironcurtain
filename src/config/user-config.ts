@@ -29,10 +29,15 @@ import {
   type ResolvedDockerWorkloadConfig,
 } from '../docker-workload/config.js';
 
+const CLAUDE_SONNET_MODEL = 'claude-sonnet-5-5';
+const DEFAULT_SONNET_MODEL_ID = `anthropic:${CLAUDE_SONNET_MODEL}`;
+export const DEFAULT_GOOSE_MODEL = CLAUDE_SONNET_MODEL;
+const DEFAULT_HAIKU_MODEL_ID = 'anthropic:claude-haiku-5-5';
+
 export const USER_CONFIG_DEFAULTS = {
-  agentModelId: 'anthropic:claude-sonnet-4-6',
-  policyModelId: 'anthropic:claude-sonnet-4-6',
-  prefilterModelId: 'anthropic:claude-haiku-4-5',
+  agentModelId: DEFAULT_SONNET_MODEL_ID,
+  policyModelId: DEFAULT_SONNET_MODEL_ID,
+  prefilterModelId: DEFAULT_HAIKU_MODEL_ID,
   escalationTimeoutSeconds: 300,
   resourceBudget: {
     maxTotalTokens: 1_000_000,
@@ -45,11 +50,11 @@ export const USER_CONFIG_DEFAULTS = {
     enabled: true,
     thresholdTokens: 160_000,
     keepRecentMessages: 10,
-    summaryModelId: 'anthropic:claude-haiku-4-5',
+    summaryModelId: DEFAULT_HAIKU_MODEL_ID,
   },
   autoApprove: {
     enabled: false,
-    modelId: 'anthropic:claude-haiku-4-5',
+    modelId: DEFAULT_HAIKU_MODEL_ID,
   },
   auditRedaction: {
     enabled: true,
@@ -1035,7 +1040,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     serverCredentials: config.serverCredentials ?? {},
     signal: resolveSignalFromUserConfig(config),
     gooseProvider: config.gooseProvider ?? 'anthropic',
-    gooseModel: config.gooseModel ?? 'claude-sonnet-4-20250514',
+    gooseModel: config.gooseModel ?? DEFAULT_GOOSE_MODEL,
     preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
     preferredMode: config.preferredMode ?? USER_CONFIG_DEFAULTS.preferredMode,
     containerRuntime: config.containerRuntime ?? 'auto',

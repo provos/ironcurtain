@@ -118,7 +118,8 @@ export async function checkServerRelevance(
       system: buildPrefilterPrompt(serverName, tools, kind),
       prompt: text || '(no guidance provided)',
       maxRepairAttempts: 1,
-      maxOutputTokens: 256,
+      // Haiku 5.5's output budget includes adaptive thinking.
+      maxOutputTokens: typeof model !== 'string' && /claude-haiku-5[.-]5$/.test(model.modelId) ? 1024 : 256,
     });
     return { serverName, skip: output.skip, reason: output.reason };
   } catch (err) {

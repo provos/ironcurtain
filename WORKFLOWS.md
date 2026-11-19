@@ -38,7 +38,7 @@ ironcurtain workflow start design-and-code \
 # Use a cheaper model for experimentation
 ironcurtain workflow start design-and-code \
   "Build a palindrome checker" \
-  --model anthropic:claude-haiku-4-5
+  --model anthropic:claude-haiku-5-5
 ```
 
 ## Prerequisites
@@ -215,7 +215,7 @@ ironcurtain workflow start <name-or-path> "task description" [options]
 
 Options:
 
-- `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-4-5`)
+- `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-5-5`)
 - `--workspace <path>` -- Use an existing directory instead of creating a new one
 - `--no-lint` -- Skip the pre-flight lint pass
 - `--strict-lint` -- Treat lint warnings as errors
@@ -227,7 +227,7 @@ Examples:
 ```bash
 ironcurtain workflow start design-and-code "Build a REST API"
 ironcurtain workflow start ./my-workflow.yaml "Build a REST API"
-ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5
+ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-5-5
 ```
 
 ### `ironcurtain workflow resume`
@@ -592,7 +592,7 @@ Workflows can pin a specific LLM at two levels. The `model` field accepts three 
 
 Valid IDs depend on which agent is running the workflow:
 
-- **`mode: builtin`** -- any configured provider: `anthropic:claude-opus-4-6`, `openai:gpt-5`, `google:gemini-2.5-pro`, etc.
+- **`mode: builtin`** -- any configured provider: `anthropic:claude-opus-5-5`, `openai:gpt-6.2-sol`, `google:gemini-3.1-pro-preview`, etc.
 - **`dockerAgent: claude-code`** -- the adapter passes the bare model name to the `claude --model` CLI flag. By default that targets Anthropic's API. To run a non-Anthropic model (e.g. an Ollama-served `glm-5.1:cloud`, an OpenRouter model, or any other Anthropic-compatible proxy), set `ANTHROPIC_BASE_URL` in the environment to the proxy endpoint; the same model name is then forwarded to that endpoint.
 - **`dockerAgent: goose`** -- provider is selected at container startup via the user's `gooseProvider` setting, not via the workflow's `model` field. See the Goose caveat below.
 
@@ -604,14 +604,14 @@ name: mixed-models
 settings:
   mode: docker
   dockerAgent: claude-code
-  model: anthropic:claude-sonnet-4-6 # default for every agent state
+  model: anthropic:claude-sonnet-5-5 # default for every agent state
 
 states:
   plan:
     type: agent
     persona: planner
     prompt: 'Plan the work.'
-    model: anthropic:claude-opus-4-6 # overrides workflow default for this state
+    model: anthropic:claude-opus-5-5 # overrides workflow default for this state
     outputs: [plan]
     transitions:
       - to: implement
@@ -636,7 +636,7 @@ states:
 2. State-level `model` in the YAML
 3. Workflow-level `settings.model` in the YAML
 4. `agentModelId` in `~/.ironcurtain/config.json`
-5. Hardcoded default (`anthropic:claude-sonnet-4-6`)
+5. Hardcoded default (`anthropic:claude-sonnet-5-5`)
 
 **Goose caveat.** Per-state switching only takes effect at container spawn for the Goose adapter: Goose reads `GOOSE_MODEL` from its container environment at startup and cannot change models per turn. Claude Code supports per-turn switching via `--model`, so per-state overrides within a single state's multi-round loop work as expected.
 

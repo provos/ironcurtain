@@ -134,7 +134,7 @@ export interface WorkflowSettings {
   readonly unversionedArtifacts?: readonly string[];
   /**
    * Default model ID for all agent states in this workflow.
-   * Format: "provider:model-name" (e.g., "anthropic:claude-sonnet-4-6").
+   * Format: "provider:model-name" (e.g., "anthropic:claude-sonnet-5-5").
    * Can be overridden per state via `states.<name>.model`.
    * Takes precedence over `agentModelId` from user config but is
    * overridden by the `--model` CLI flag.

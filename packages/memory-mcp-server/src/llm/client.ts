@@ -69,6 +69,8 @@ export async function llmComplete(
   const client = getLLMClient(config);
   if (!client) return null;
 
+  const isClaude5 = /(?:^|\/)claude-(?:sonnet|opus|haiku)-5(?:$|[.-])/.test(config.llmModel);
+  const maxTokens = opts?.maxTokens ?? 300;
   try {
     const response = await client.chat.completions.create({
       model: config.llmModel,
@@ -76,8 +78,9 @@ export async function llmComplete(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      max_tokens: opts?.maxTokens ?? 300,
-      temperature: 0,
+      // Claude 5 can spend part of this limit on thinking before returning text.
+      max_tokens: isClaude5 ? Math.max(maxTokens, 1024) : maxTokens,
+      ...(isClaude5 ? {} : { temperature: 0 }),
     });
     return response.choices[0]?.message?.content ?? null;
   } catch (err) {

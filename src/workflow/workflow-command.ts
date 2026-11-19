@@ -160,7 +160,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow list',
     'ironcurtain workflow start design-and-code "Build a REST API"',
     'ironcurtain workflow start ./my-workflow.yaml "Build a REST API"',
-    'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5',
+    'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-5-5',
     'ironcurtain workflow resume wf-abc123 --json',
     'ironcurtain workflow resume /tmp/workflow-runs --workflow-id wf-abc123 --ensure-daemon',
     'ironcurtain workflow resume-standalone /tmp/workflow-runs --state review',

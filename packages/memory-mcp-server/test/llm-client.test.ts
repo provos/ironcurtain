@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { getLLMClient, llmComplete, judgeMemoryRelation } from '../src/llm/client.js';
 import type { MemoryConfig } from '../src/config.js';
 import { loadConfig } from '../src/config.js';
@@ -38,6 +38,26 @@ describe('getLLMClient', () => {
 });
 
 describe('llmComplete', () => {
+  it.each([
+    ['claude-haiku-5-5', false],
+    ['anthropic/claude-sonnet-5.5', false],
+    ['claude-haiku-4-5', true],
+  ])('sets compatible sampling parameters for %s', async (model, hasTemperature) => {
+    const config = { ...configWithoutLLM(), llmApiKey: 'sampling-test', llmModel: model };
+    const client = getLLMClient(config)!;
+    const create = vi.spyOn(client.chat.completions, 'create').mockResolvedValue({
+      choices: [{ message: { content: 'ok' } }],
+    } as never);
+    try {
+      expect(await llmComplete(config, 'system', 'user', { maxTokens: 10 })).toBe('ok');
+      const request = create.mock.calls[0][0];
+      expect('temperature' in request).toBe(hasTemperature);
+      expect(request.max_tokens).toBe(hasTemperature ? 10 : 1024);
+    } finally {
+      create.mockRestore();
+    }
+  });
+
   it('returns null when no LLM configured', async () => {
     const result = await llmComplete(configWithoutLLM(), 'system prompt', 'user prompt');
     expect(result).toBeNull();
