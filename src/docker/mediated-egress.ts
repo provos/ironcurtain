@@ -92,7 +92,8 @@ interface MediatedExchange<A> {
   readonly clientRes: http.ServerResponse;
   readonly config: MediatedEgressConfig<A>;
   readonly lease: MediatedEgressLease | undefined;
-  deadline?: NodeJS.Timeout;
+  readonly startedAt: number;
+  deadline?: { maxDurationMs: number; timer: NodeJS.Timeout };
   upstreamReq?: http.ClientRequest;
   /**
    * Bytes this logical request has already consumed on *earlier* hops (drained
@@ -147,32 +148,46 @@ export function forwardMediatedEgress<A>(clientRes: http.ServerResponse, config:
     }
   }
 
-  const exchange: MediatedExchange<A> = { clientRes, config, lease, consumedBytes: 0, settled: false };
-  exchange.deadline = armMediatedDeadline(exchange, config.describe(authorized).maxDurationMs);
+  const exchange: MediatedExchange<A> = {
+    clientRes,
+    config,
+    lease,
+    startedAt: performance.now(),
+    consumedBytes: 0,
+    settled: false,
+  };
   clientRes.once('close', () => finalizeMediatedExchange(exchange));
-  fetchMediated(exchange, authorized);
+  if (tightenMediatedDeadline(exchange, config.describe(authorized).maxDurationMs)) fetchMediated(exchange, authorized);
 }
 
-/** Absolute per-request wall-clock ceiling: tear down both sides and fail closed. */
-function armMediatedDeadline<A>(exchange: MediatedExchange<A>, maxDurationMs: number): NodeJS.Timeout {
-  const timer = setTimeout(() => {
-    logger.info(`[${exchange.config.label}] exceeded ${maxDurationMs}ms; aborting`);
-    if (exchange.upstreamReq !== undefined) exchange.upstreamReq.destroy();
-    if (!exchange.clientRes.headersSent) {
-      rejectMediatedEgress(exchange.clientRes, 504, `${exchange.config.label}: exceeded the time ceiling`);
-    } else {
-      exchange.clientRes.destroy();
-    }
-  }, maxDurationMs);
+/** Apply an earlier ceiling from the logical request's original start time. */
+function tightenMediatedDeadline<A>(exchange: MediatedExchange<A>, maxDurationMs: number): boolean {
+  const current = exchange.deadline;
+  const durationMs = Math.min(maxDurationMs, current?.maxDurationMs ?? maxDurationMs);
+  const remainingMs = durationMs - (performance.now() - exchange.startedAt);
+  const expire = (): void => {
+    logger.info(`[${exchange.config.label}] exceeded ${durationMs}ms; aborting`);
+    finalizeMediatedExchange(exchange);
+    exchange.upstreamReq?.destroy();
+    rejectMediatedEgress(exchange.clientRes, 504, `${exchange.config.label}: exceeded the time ceiling`);
+  };
+  if (remainingMs <= 0) {
+    expire();
+    return false;
+  }
+  if (current?.maxDurationMs === durationMs) return true;
+  if (current) clearTimeout(current.timer);
+  const timer = setTimeout(expire, remainingMs);
   timer.unref();
-  return timer;
+  exchange.deadline = { maxDurationMs: durationMs, timer };
+  return true;
 }
 
 /** Idempotent teardown: clear the deadline and release the session concurrency slot. */
 function finalizeMediatedExchange<A>(exchange: MediatedExchange<A>): void {
   if (exchange.settled) return;
   exchange.settled = true;
-  if (exchange.deadline !== undefined) clearTimeout(exchange.deadline);
+  if (exchange.deadline !== undefined) clearTimeout(exchange.deadline.timer);
   exchange.lease?.release();
 }
 
@@ -244,13 +259,23 @@ function followMediatedRedirect<A>(
     rejectMediatedEgress(clientRes, 403, messageOf(error, 'redirect target is not authorized'));
     return;
   }
+  const nextSpec = config.describe(next);
+  if (!tightenMediatedDeadline(exchange, nextSpec.maxDurationMs)) return;
   // Drain the redirect body under the byte ceilings before following (F1): the body
   // is never delivered but still consumes bandwidth, so it counts against a tight
   // per-hop redirect cap, the per-request cap *shared with every later hop*, and
   // (when present) the cumulative session ledger. Overflow fails the whole exchange
   // closed; the wall-clock deadline bounds a slow body.
   const session = config.session;
-  const remaining = config.describe(authorized).maxBytes - exchange.consumedBytes;
+  const remaining = nextSpec.maxBytes - exchange.consumedBytes;
+  const rejectByteOverflow = (): void => {
+    upstreamRes.destroy();
+    rejectMediatedEgress(clientRes, 502, `${config.label}: redirect body exceeds a byte ceiling`);
+  };
+  if (remaining < 0) {
+    rejectByteOverflow();
+    return;
+  }
   const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, remaining);
   let drained = 0;
   let aborted = false;
@@ -259,8 +284,7 @@ function followMediatedRedirect<A>(
     drained += chunk.length;
     if (drained > bodyCap || (session !== undefined && !session.addBytes(chunk.length))) {
       aborted = true;
-      upstreamRes.destroy();
-      rejectMediatedEgress(clientRes, 502, `${config.label}: redirect body exceeds a byte ceiling`);
+      rejectByteOverflow();
     }
   });
   upstreamRes.on('error', () => {

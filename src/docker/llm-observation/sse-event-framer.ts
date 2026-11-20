@@ -96,6 +96,9 @@ export class SseEventFramer {
   }
 
   private processText(text: string, sink: (frame: SseEventFrame) => void): void {
+    // The decoder can emit no text for an empty chunk or split UTF-8 sequence.
+    // Keep the pending CRLF state until there is a character to inspect.
+    if (text.length === 0) return;
     let pos = 0;
     if (this.skipLeadingLf) {
       this.skipLeadingLf = false;

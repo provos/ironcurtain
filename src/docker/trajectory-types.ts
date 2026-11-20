@@ -136,9 +136,8 @@ export type ManifestEntry =
       readonly poisoned: boolean;
       readonly poisonReason?: PoisonReason;
       /**
-       * Exchanges lost to an upstream transport truncation (the stream
-       * ended before its terminal event, so no faithful record could be
-       * built). The rest of the session is unaffected and usable; this
+       * Exchanges lost to transport truncation or incomplete provider
+       * output. The rest of the session is unaffected and usable; this
        * counter makes the gap explicit instead of silent. `0` means the
        * session is verifiably gap-free; the field being ABSENT means the
        * manifest predates the counter and gaps are unknown.
@@ -177,8 +176,8 @@ export interface CaptureStats {
    */
   readonly dropped: number;
   /**
-   * Exchanges abandoned before reaching `write()` because their upstream
-   * stream truncated. Bundle-wide counterpart of
+   * Exchanges abandoned before reaching `write()` because upstream output
+   * was incomplete. Bundle-wide counterpart of
    * `session-end.abortedExchanges`.
    */
   readonly abortedExchanges: number;

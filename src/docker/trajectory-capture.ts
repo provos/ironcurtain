@@ -12,9 +12,8 @@
  *   2. Binary session model for CORRECTNESS hazards — a session whose
  *      writer or parser proved untrustworthy (`disk-error`,
  *      `queue-overflow`, `reassembly-failure`) is poisoned wholesale.
- *      An upstream transport truncation is NOT such a hazard: it costs
- *      exactly one exchange, which is dropped and counted in
- *      `abortedExchanges` so the gap is explicit rather than silent.
+ *      Transport truncation or incomplete provider output costs one
+ *      exchange, which is dropped and counted in `abortedExchanges`.
  *      Records are never dropped silently from a healthy session.
  *   3. Crash safety — append-only JSONL, write-time counters, synthetic
  *      session-end on infrastructure teardown.
@@ -59,7 +58,7 @@ interface SessionFileState {
   ended: boolean;
   exchanges: number;
   bytesWritten: number;
-  /** Exchanges lost to an upstream transport truncation (session stays usable). */
+  /** Exchanges lost to incomplete upstream output. */
   abortedExchanges: number;
   poisoned: boolean;
   poisonReason?: PoisonReason;
@@ -125,21 +124,16 @@ export interface TrajectoryCaptureWriter {
    * loop. Reserved for correctness hazards that make the WHOLE session
    * untrustworthy — a parser that failed (`reassembly-failure`), an
    * undecodable body (`unsupported-encoding`), or a writer that cannot
-   * keep up (`disk-error`, `queue-overflow`). A transport-level
-   * truncation is not one of those: use {@link
-   * TrajectoryCaptureWriter.noteAbortedExchange} instead. Idempotent;
+   * keep up (`disk-error`, `queue-overflow`). Use {@link
+   * TrajectoryCaptureWriter.noteAbortedExchange} for incomplete upstream output. Idempotent;
    * first reason wins, and the flip emits a `session-poisoned` manifest
    * entry so the condition is durable immediately.
    */
   markSessionPoisoned(sessionId: SessionId, reason: PoisonReason): void;
   /**
-   * Record that one exchange was lost to an upstream transport
-   * truncation (the stream ended before its terminal event, so no
-   * faithful record could be built). Exchange-scoped on purpose: the
-   * remaining records in the session are unaffected, so the session
-   * keeps capturing and the gap is surfaced as
-   * `session-end.abortedExchanges` instead of poisoning everything that
-   * follows. Idempotence is the caller's business — each call counts.
+   * Record one exchange lost to transport truncation or incomplete provider
+   * output. The session keeps capturing and the gap appears in
+   * `session-end.abortedExchanges`. Each call counts.
    */
   noteAbortedExchange(sessionId: SessionId): void;
   /**

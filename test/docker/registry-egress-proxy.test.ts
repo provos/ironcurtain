@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRegistryEgressGuard,
   handleRegistryEgressRequest,
@@ -454,6 +454,49 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(cdnContacted).toBe(false);
   });
 
+  it.each([false, true])('applies a reviewed mirror cap to the redirect drain after prior hop=%s', async (priorHop) => {
+    const registryHost = 'registry.test';
+    const cdnHost = 'cdn.test';
+    const mirrorHost = 'mirror.test';
+    const path = '/v2/library/app/manifests/1.0';
+    const registry = await startUpstream((_req, res) => {
+      const next = priorHop ? cdnHost : mirrorHost;
+      res.writeHead(307, { location: `https://${next}${path}` }).end('12345');
+    });
+    const cdn = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: `https://${mirrorHost}${path}` }).end();
+    });
+    const mirror = await startUpstream((_req, res) => res.end('mirror'));
+    const attempted: string[] = [];
+    const guard = fixtureGuard({
+      perRequest: { maxBytes: 64, maxDurationMs: 30_000, maxRedirectHops: 2 },
+      additionalOrigins: [
+        {
+          id: 'mirror',
+          destination: { protocol: 'https:', hostname: mirrorHost, port: 443 },
+          operations: ['manifest-pull'],
+          perRequest: { maxBytes: 4, maxDurationMs: 30_000, maxRedirectHops: 2 },
+          requestHeaders: { allow: [] },
+        },
+      ],
+    });
+    const result = await driveThroughSeam({
+      guard,
+      targetHost: registryHost,
+      path,
+      transport: routingTransport(
+        { [registryHost]: registry.port, [cdnHost]: cdn.port, [mirrorHost]: mirror.port },
+        ({ destination }) => attempted.push(destination.hostname),
+      ),
+    });
+    expect(result).toMatchObject({
+      statusCode: 502,
+      body: expect.stringContaining('redirect body exceeds a byte ceiling'),
+    });
+    expect(attempted).toEqual(priorHop ? [registryHost, cdnHost] : [registryHost]);
+    expect(guard.session.activeRequests).toBe(0);
+  });
+
   it('carries a drained redirect body into the terminal response ceiling (one budget per request)', async () => {
     let cdnContacted = false;
     const cdn = await startUpstream((_req, res) => {
@@ -609,6 +652,187 @@ describe('registry-egress over a real fixed-parent transport (nested mode)', () 
   });
 });
 
+describe('registry redirect and credential model', () => {
+  const registry = 'registry.test';
+  const mirror = 'mirror.test';
+  const cdn = 'cdn.test';
+  const shapes = [
+    { route: 'two CDN hops', hosts: [registry, cdn, 'cdn-next.test'] },
+    { route: 'same-origin redirect then CDN', hosts: [registry, registry, cdn] },
+    { route: 'listed mirror then CDN', hosts: [registry, mirror, cdn] },
+    { route: 'CDN then listed mirror', hosts: [registry, cdn, mirror] },
+  ];
+  const budgets = [
+    { budget: 'exact fit', outcome: 'complete' },
+    { budget: 'origin byte ceiling', outcome: 'bytes' },
+    { budget: 'session byte ceiling', outcome: 'bytes' },
+    { budget: 'origin hop ceiling', outcome: 'hops' },
+    { budget: 'mirror byte ceiling', outcome: 'bytes' },
+    { budget: 'mirror hop ceiling', outcome: 'hops' },
+    { budget: 'mirror policy denies the pull', outcome: 'policy' },
+  ] as const;
+  const traces = shapes.flatMap((shape) =>
+    budgets
+      .filter(({ budget }) => {
+        if (budget === 'mirror hop ceiling') return shape.hosts[1] === mirror;
+        return !budget.startsWith('mirror') || shape.hosts.includes(mirror);
+      })
+      .flatMap((budget) => ['anonymous', 'bearer'].map((credential) => ({ ...shape, ...budget, credential }))),
+  );
+
+  it.each([
+    { originMs: 900, mirrorMs: 200 },
+    { originMs: 200, mirrorMs: 900 },
+  ])(
+    'keeps the earliest logical deadline across $originMs ms origin and $mirrorMs ms mirror',
+    async ({ originMs, mirrorMs }) => {
+      const originMayRedirect = createGate();
+      const path = '/v2/library/app/manifests/1.0';
+      const entry = await startUpstream((_req, res) => {
+        void originMayRedirect.promise.then(() => {
+          res.writeHead(307, { location: `https://${mirror}${path}` }).end();
+        });
+      });
+      const target = await startUpstream(() => {
+        /* Keep the final response open until the deadline. */
+      });
+      const entryReceived = firstRequest(entry);
+      const mirrorReceived = firstRequest(target);
+      const guard = fixtureGuard({
+        perRequest: { maxBytes: 64, maxDurationMs: originMs, maxRedirectHops: 2 },
+        additionalOrigins: [
+          {
+            id: 'mirror',
+            destination: { protocol: 'https:', hostname: mirror, port: 443 },
+            operations: ['manifest-pull'],
+            perRequest: { maxBytes: 64, maxDurationMs: mirrorMs, maxRedirectHops: 2 },
+            requestHeaders: { allow: [] },
+          },
+        ],
+      });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+      try {
+        const response = driveThroughSeam({
+          guard,
+          transport: routingTransport({ [registry]: entry.port, [mirror]: target.port }),
+          targetHost: registry,
+          path,
+        });
+        await entryReceived;
+        await vi.advanceTimersByTimeAsync(120);
+        originMayRedirect.resolve();
+        await mirrorReceived;
+        await vi.advanceTimersByTimeAsync(79);
+        expect(guard.session.activeRequests).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(await response).toMatchObject({ statusCode: 504, body: expect.stringContaining('time ceiling') });
+        expect(guard.session.activeRequests).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(traces)(
+    'keeps $credential credentials and $budget across $route',
+    async ({ hosts, budget, outcome, credential }) => {
+      const guard = fixtureGuard({
+        perRequest: {
+          maxBytes: budget === 'origin byte ceiling' ? 11 : 12,
+          maxDurationMs: 30_000,
+          maxRedirectHops: budget === 'origin hop ceiling' ? 1 : 2,
+        },
+        perSession: { maxTotalBytes: budget === 'session byte ceiling' ? 11 : 64, maxConcurrentRequests: 1 },
+        additionalOrigins: [
+          {
+            id: 'mirror',
+            destination: { protocol: 'https:', hostname: mirror, port: 443 },
+            operations: budget === 'mirror policy denies the pull' ? ['api-version'] : ['manifest-pull'],
+            perRequest: {
+              maxBytes: budget === 'mirror byte ceiling' ? 11 : 24,
+              maxDurationMs: 30_000,
+              maxRedirectHops: budget === 'mirror hop ceiling' ? 1 : 3,
+            },
+            requestHeaders: { allow: ['accept'] },
+          },
+        ],
+      });
+      const hops = hosts.map((host, index) => ({ host, path: `/v2/library/app/manifests/tag-${index}` }));
+      const authorization = credential === 'bearer' ? 'Bearer registry-fixture-token' : undefined;
+      const accept = 'application/vnd.oci.image.manifest.v1+json';
+      const attempts: DestinationBoundRequest[] = [];
+      const received: { host: string; path: string | undefined; authorization?: string; accept?: string }[] = [];
+      const routes: Record<string, number> = {};
+
+      for (const host of new Set(hosts)) {
+        const upstream = await startUpstream((request, response) => {
+          received.push({
+            host,
+            path: request.url,
+            authorization: request.headers.authorization,
+            accept: request.headers.accept,
+          });
+          const index = hops.findIndex((hop) => hop.host === host && hop.path === request.url);
+          if (index < 0) {
+            response.writeHead(404).end();
+            return;
+          }
+          const next = hops.at(index + 1);
+          if (next) {
+            const location = next.host === host ? next.path : `https://${next.host}${next.path}`;
+            response.writeHead(307, { location, 'set-cookie': 'hop=fixture' }).end('hop');
+          } else {
+            response.writeHead(200, { 'content-length': '6', 'set-cookie': 'terminal=fixture' }).end('layer!');
+          }
+        });
+        routes[host] = upstream.port;
+      }
+
+      const transport = routingTransport(routes, (request) => attempts.push(request));
+      const headers = { accept, ...(authorization === undefined ? {} : { authorization }) };
+      const result = await driveThroughSeam({ guard, transport, targetHost: registry, path: hops[0].path, headers });
+
+      // The model allocates three bytes per followed redirect and six for the final body.
+      // A hop/operation refusal is decided before draining the response that tried to authorize it.
+      const expectedRequests = outcome === 'hops' ? 2 : outcome === 'policy' ? hosts.indexOf(mirror) : 3;
+      const visited = hops.slice(0, expectedRequests);
+      expect(attempts.map(({ destination, method, path }) => ({ destination, method, path }))).toEqual(
+        visited.map(({ host, path }) => ({
+          destination: { protocol: 'https:', hostname: host, port: 443 },
+          method: 'GET',
+          path,
+        })),
+      );
+      expect(received).toEqual(
+        visited.map((hop, index) => ({
+          ...hop,
+          authorization: index === 0 ? authorization : undefined,
+          accept: index === 0 ? accept : undefined,
+        })),
+      );
+
+      const expectedStatus = { complete: 200, bytes: 502, hops: 403, policy: 403 }[outcome];
+      const expectedBytes = outcome === 'complete' ? 12 : (expectedRequests - 1) * 3;
+      expect(result.statusCode).toBe(expectedStatus);
+      expect(result.headers['set-cookie']).toBeUndefined();
+      expect(guard.session.totalBytes).toBe(expectedBytes);
+      expect(guard.session.activeRequests).toBe(0);
+      if (outcome === 'complete') expect(result.body).toBe('layer!');
+
+      // Seeing a CDN on a previous redirect cannot authorize a new client pull to it.
+      const derived = hops.find(({ host }) => host === cdn)!;
+      const direct = await driveThroughSeam({ guard, transport, targetHost: cdn, path: derived.path, headers });
+      expect(direct.statusCode).toBe(403);
+      expect(direct.body).toMatch(/unlisted host/u);
+      expect(attempts).toHaveLength(expectedRequests);
+      expect(received).toHaveLength(expectedRequests);
+      expect(guard.session.attempts).toBe(2);
+      expect(guard.session.totalBytes).toBe(expectedBytes);
+    },
+  );
+});
+
 // ── Fixtures ──────────────────────────────────────────────────────────
 
 /**
@@ -649,6 +873,7 @@ function digestOf(value: string | Buffer): string {
 interface ManifestOverrides {
   readonly perRequest?: RegistryEgressManifest['origins'][number]['perRequest'];
   readonly perSession?: RegistryEgressManifest['perSession'];
+  readonly additionalOrigins?: RegistryEgressManifest['origins'];
 }
 
 function manifest(overrides: ManifestOverrides = {}): RegistryEgressManifest {
@@ -665,6 +890,7 @@ function manifest(overrides: ManifestOverrides = {}): RegistryEgressManifest {
         perRequest: overrides.perRequest ?? { maxBytes: 8 * 1024 * 1024, maxDurationMs: 30_000, maxRedirectHops: 2 },
         requestHeaders: { allow: ['accept', 'accept-encoding', 'user-agent', 'range'] },
       },
+      ...(overrides.additionalOrigins ?? []),
     ],
     perSession: overrides.perSession ?? { maxTotalBytes: 512 * 1024 * 1024, maxConcurrentRequests: 4 },
     rejectedOperations: ['push', 'delete', 'catalog-enumeration', 'tags-enumeration'],
@@ -685,12 +911,16 @@ function fixtureGuard(overrides: ManifestOverrides = {}): RegistryEgressGuard {
 }
 
 /** A destination-bound transport that dials a loopback upstream per hostname. */
-function routingTransport(routes: Record<string, number>): OutboundTransport {
+function routingTransport(
+  routes: Record<string, number>,
+  observe?: (request: DestinationBoundRequest) => void,
+): OutboundTransport {
   const table = new Map(Object.entries(routes));
   return {
     kind: 'direct',
     addressGuard: 'local-resolver',
     request(request: DestinationBoundRequest, onResponse) {
+      observe?.(request);
       const port = table.get(request.destination.hostname);
       if (port === undefined) throw new Error(`no test route for ${request.destination.hostname}`);
       return http.request(

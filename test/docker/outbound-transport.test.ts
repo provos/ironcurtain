@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as dns from 'node:dns';
 import * as http from 'node:http';
-import type { Socket } from 'node:net';
+import * as https from 'node:https';
+import { Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,12 @@ import {
   isPublicAddress,
   type OutboundTransport,
 } from '../../src/docker/outbound-transport.js';
+import {
+  createTlsIdentity,
+  startFakeParentProxy,
+  type ParentRoute,
+  type TlsIdentity,
+} from '../helpers/fake-parent-proxy.js';
 
 const servers: http.Server[] = [];
 const temporaryDirectories: string[] = [];
@@ -447,14 +454,210 @@ describe('derived-redirect refusal symmetry', () => {
   );
 });
 
+describe('destination policy model', () => {
+  const hostname = 'outbound-model.test';
+  const protocols = ['http:', 'https:'] as const;
+  const privatePolicies = ['approved-private-network', 'trusted-provider-override'] as const;
+  let identity: TlsIdentity;
+
+  beforeAll(() => {
+    identity = createTlsIdentity([hostname]);
+  });
+
+  const deniedDns = [
+    { state: 'private answer', records: '127.0.0.1', error: /non-public/u },
+    {
+      state: 'dual-stack private answers',
+      records: [
+        { address: '127.0.0.1', family: 4 },
+        { address: '::1', family: 6 },
+      ],
+      error: /non-public/u,
+    },
+    { state: 'missing answer', records: undefined, error: /no stub DNS answer/u },
+  ];
+  const directTraces = protocols.flatMap((protocol) =>
+    privatePolicies.flatMap((policy) => deniedDns.map((dnsState) => ({ protocol, policy, dnsState }))),
+  );
+
+  it.each(directTraces)(
+    'keeps the direct $protocol pool isolated after $policy with $dnsState.state',
+    async ({ protocol, policy, dnsState }) => {
+      const received: Socket[] = [];
+      const serve: http.RequestListener = (request, response) => {
+        received.push(request.socket);
+        response.end('direct-ok');
+      };
+      const server =
+        protocol === 'https:'
+          ? https.createServer({ key: identity.keyPem, cert: identity.certPem }, serve)
+          : http.createServer(serve);
+      let connections = 0;
+      server.on('connection', () => {
+        connections += 1;
+      });
+      servers.push(server);
+      const port = await listenTcp(server);
+      const answers: Record<string, string | dns.LookupAddress[] | undefined> = { [hostname]: '127.0.0.1' };
+      const transport = createDirectOutboundTransport({ lookup: stubLookup(answers) });
+      const connect = https.Agent.prototype.createConnection;
+      // Trust only the fixture certificate while keeping the real TLS agent and pool.
+      const trustFixture =
+        protocol === 'https:'
+          ? vi.spyOn(https.Agent.prototype, 'createConnection').mockImplementation(function (
+              this: https.Agent,
+              options,
+              callback,
+            ) {
+              const tlsOptions = { ...options, ca: identity.certPem };
+              return connect.call(this, tlsOptions, callback);
+            })
+          : undefined;
+      const destination = { protocol, hostname, port };
+
+      try {
+        const privateRequest = { destination, addressPolicy: policy, method: 'GET', path: '/private' } as const;
+        await expect(requestBody(transport, privateRequest)).resolves.toBe('direct-ok');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(received).toHaveLength(1);
+        expect(connections).toBe(1);
+
+        answers[hostname] = dnsState.records;
+        await expect(
+          requestBody(transport, { destination, addressPolicy: 'public-only', method: 'GET', path: '/public' }),
+        ).rejects.toThrow(dnsState.error);
+        expect(received).toHaveLength(1);
+        expect(connections).toBe(1);
+
+        answers[hostname] = '127.0.0.1';
+        await expect(requestBody(transport, privateRequest)).resolves.toBe('direct-ok');
+        expect(received).toHaveLength(2);
+        expect(received[1]).toBe(received[0]);
+        expect(connections).toBe(1);
+      } finally {
+        transport.destroy?.();
+        trustFixture?.mockRestore();
+      }
+    },
+  );
+
+  const parentTraces = protocols.flatMap((protocol) =>
+    privatePolicies.flatMap((policy) => ['refuses', 'disappears'].map((fault) => ({ protocol, policy, fault }))),
+  );
+
+  it.each(parentTraces)(
+    'keeps $protocol through the fixed parent under $policy when the parent $fault',
+    async ({ protocol, policy, fault }) => {
+      const directory = mkdtempSync(join(tmpdir(), 'outbound-model-'));
+      temporaryDirectories.push(directory);
+      const socketPath = join(directory, 'parent.sock');
+      const destination = { protocol, hostname, port: protocol === 'https:' ? 443 : 80 };
+      const paths: string[] = [];
+      const serve: ParentRoute = (request, response) => {
+        paths.push(request.url ?? '');
+        response.end('parent-ok');
+      };
+      const routes: Record<string, ParentRoute | undefined> = { [hostname]: serve };
+      const startParent = () =>
+        startFakeParentProxy({
+          socketPath,
+          identity,
+          routes,
+          httpRoute(request, response) {
+            if (routes[hostname] === undefined) {
+              response.writeHead(403).end('parent-refused');
+              return;
+            }
+            serve(request, response);
+          },
+        });
+      let parent: Awaited<ReturnType<typeof startParent>> | undefined = await startParent();
+      const answers: Record<string, string | dns.LookupAddress[]> = { [hostname]: '127.0.0.1' };
+      const transport = createParentProxyOutboundTransport({
+        proxy: { socketPath },
+        ca: identity.certPem,
+        lookup: stubLookup(answers),
+      });
+      const dials: string[] = [];
+      const connect = Socket.prototype.connect;
+      const connectSpy = vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (
+        this: Socket,
+        ...args: unknown[]
+      ) {
+        // net.connect can hand Socket.connect an already-normalized argument tuple.
+        const endpoint: unknown = Array.isArray(args[0]) ? args[0][0] : args[0];
+        if (
+          typeof endpoint !== 'object' ||
+          endpoint === null ||
+          !('path' in endpoint) ||
+          endpoint.path !== socketPath
+        ) {
+          dials.push('direct');
+          throw new Error('unexpected direct connection in the fixed-parent model');
+        }
+        dials.push('parent');
+        return Reflect.apply(connect, this, args) as Socket;
+      });
+
+      try {
+        const request = (addressPolicy: typeof policy | 'public-only') =>
+          requestResponse(transport, { destination, addressPolicy, method: 'GET', path: '/probe' });
+        const expectedPath = protocol === 'http:' ? `http://${hostname}/probe` : '/probe';
+        const success = { status: 200, body: 'parent-ok' };
+        await expect(request(policy)).resolves.toEqual(success);
+        expect(dials).toEqual(['parent']);
+        expect(paths).toEqual([expectedPath]);
+        expect(parent.connectAuthorities).toEqual(protocol === 'https:' ? [`${hostname}:443`] : []);
+
+        // A plausible public answer does not authorize the accompanying private answer.
+        answers[hostname] = [
+          { address: PUBLIC_ADDRESS, family: 4 },
+          { address: '127.0.0.1', family: 4 },
+        ];
+        await expect(request('public-only')).rejects.toThrow(/non-public/u);
+        expect(dials).toEqual(['parent']);
+        expect(parent.connections).toBe(1);
+        expect(paths).toEqual([expectedPath]);
+
+        answers[hostname] = PUBLIC_ADDRESS;
+        await expect(request('public-only')).resolves.toEqual(success);
+        expect(dials).toEqual(['parent', 'parent']);
+        expect(paths).toEqual([expectedPath, expectedPath]);
+
+        if (fault === 'refuses') {
+          delete routes[hostname];
+          if (protocol === 'https:') await expect(request(policy)).rejects.toThrow(/fixed parent proxy refused/u);
+          else await expect(request(policy)).resolves.toEqual({ status: 403, body: 'parent-refused' });
+        } else {
+          await parent.close();
+          parent = undefined;
+          await expect(request(policy)).rejects.toThrow(/ENOENT|ECONNREFUSED/u);
+        }
+        expect(dials).toEqual(['parent', 'parent', 'parent']);
+        expect(paths).toEqual([expectedPath, expectedPath]);
+
+        routes[hostname] = serve;
+        parent ??= await startParent();
+        await expect(request(policy)).resolves.toEqual(success);
+        expect(dials).toEqual(['parent', 'parent', 'parent', 'parent']);
+        expect(paths).toEqual([expectedPath, expectedPath, expectedPath]);
+      } finally {
+        connectSpy.mockRestore();
+        await parent?.close();
+      }
+    },
+  );
+});
+
 describe('address classification', () => {
   it.each([false, true])('screens trailing-dot literals consistently with private access=%s', async (allowPrivate) => {
     for (const hostname of ['169.254.169.254.', '169.254.1.2.', '100.100.100.200.', 'fd00:ec2::254.', 'fe80::1.']) {
       expect(() => assertHostnameIsEligible(hostname, allowPrivate)).toThrow(/not public|not allowed/u);
       // No DNS answer can turn a denied literal into an allowed destination.
-      const resolver = vi.fn(stubLookup({ [hostname]: '8.8.8.8' }));
+      const dnsFixture = { lookup: stubLookup({ [hostname]: '8.8.8.8' }) };
+      const resolver = vi.spyOn(dnsFixture, 'lookup');
       const result = new Promise((resolve, reject) => {
-        createGuardedLookup(resolver, allowPrivate)(hostname, { all: true }, (err, answers) => {
+        createGuardedLookup(dnsFixture.lookup, allowPrivate)(hostname, { all: true }, (err, answers) => {
           if (err) reject(err);
           else resolve(answers);
         });
@@ -523,11 +726,12 @@ describe('address classification', () => {
   });
 
   it('rejects mixed allowed/private and metadata answers', async () => {
-    const resolver = ((_hostname, _options, callback) =>
-      callback(null, [
+    const resolver = stubLookup({
+      'linux.localdomain': [
         { address: '192.168.1.10', family: 4 },
         { address: '169.254.169.254', family: 4 },
-      ])) as typeof dns.lookup;
+      ],
+    });
     const result = new Promise((resolve, reject) => {
       createGuardedLookup(resolver, true)('linux.localdomain', { all: true }, (err, answers) => {
         if (err) reject(err);
@@ -562,28 +766,30 @@ describe('address classification', () => {
   );
 });
 
-/** A routable documentation address; passes the address policy. */
+/** A public DNS fixture answer. The tests use it for screening only. */
 const PUBLIC_ADDRESS = '93.184.216.34';
 /** The cloud metadata service — the canonical SSRF rebinding target. */
 const METADATA_ADDRESS = '169.254.169.254';
 
 /** Resolver stub so a fixture screens a real name without touching real DNS. */
-function stubLookup(answers: Readonly<Record<string, string | undefined>>): typeof dns.lookup {
+function stubLookup(
+  answers: Readonly<Record<string, string | readonly dns.LookupAddress[] | undefined>>,
+): typeof dns.lookup {
   return ((
     hostname: string,
     options: dns.LookupOptions,
     callback: (error: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family?: number) => void,
   ): void => {
-    const address = answers[hostname];
-    if (address === undefined) {
+    const answer = answers[hostname];
+    if (answer === undefined) {
       const error: NodeJS.ErrnoException = new Error(`no stub DNS answer for ${hostname}`);
       error.code = 'ENOTFOUND';
       callback(error, []);
       return;
     }
-    const family = address.includes(':') ? 6 : 4;
-    if (options.all) callback(null, [{ address, family }]);
-    else callback(null, address, family);
+    const records = typeof answer === 'string' ? [{ address: answer, family: answer.includes(':') ? 6 : 4 }] : answer;
+    if (options.all) callback(null, [...records]);
+    else callback(null, records[0]?.address ?? '', records[0]?.family);
   }) as typeof dns.lookup;
 }
 
@@ -608,15 +814,22 @@ async function startCountingParent(prefix: string): Promise<CountingParent> {
   return { socketPath, connections: () => connections };
 }
 
-function requestBody(
+async function requestBody(
   transport: OutboundTransport,
   request: Parameters<OutboundTransport['request']>[0],
 ): Promise<string> {
+  return (await requestResponse(transport, request)).body;
+}
+
+function requestResponse(
+  transport: OutboundTransport,
+  request: Parameters<OutboundTransport['request']>[0],
+): Promise<{ status: number | undefined; body: string }> {
   return new Promise((resolve, reject) => {
     const outgoing = transport.request(request, (response) => {
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer) => chunks.push(chunk));
-      response.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
       response.on('error', reject);
     });
     outgoing.once('error', reject);
