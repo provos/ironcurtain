@@ -454,6 +454,49 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(cdnContacted).toBe(false);
   });
 
+  it.each([false, true])('applies a reviewed mirror cap to the redirect drain after prior hop=%s', async (priorHop) => {
+    const registryHost = 'registry.test';
+    const cdnHost = 'cdn.test';
+    const mirrorHost = 'mirror.test';
+    const path = '/v2/library/app/manifests/1.0';
+    const registry = await startUpstream((_req, res) => {
+      const next = priorHop ? cdnHost : mirrorHost;
+      res.writeHead(307, { location: `https://${next}${path}` }).end('12345');
+    });
+    const cdn = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: `https://${mirrorHost}${path}` }).end();
+    });
+    const mirror = await startUpstream((_req, res) => res.end('mirror'));
+    const attempted: string[] = [];
+    const guard = fixtureGuard({
+      perRequest: { maxBytes: 64, maxDurationMs: 30_000, maxRedirectHops: 2 },
+      additionalOrigins: [
+        {
+          id: 'mirror',
+          destination: { protocol: 'https:', hostname: mirrorHost, port: 443 },
+          operations: ['manifest-pull'],
+          perRequest: { maxBytes: 4, maxDurationMs: 30_000, maxRedirectHops: 2 },
+          requestHeaders: { allow: [] },
+        },
+      ],
+    });
+    const result = await driveThroughSeam({
+      guard,
+      targetHost: registryHost,
+      path,
+      transport: routingTransport(
+        { [registryHost]: registry.port, [cdnHost]: cdn.port, [mirrorHost]: mirror.port },
+        ({ destination }) => attempted.push(destination.hostname),
+      ),
+    });
+    expect(result).toMatchObject({
+      statusCode: 502,
+      body: expect.stringContaining('redirect body exceeds a byte ceiling'),
+    });
+    expect(attempted).toEqual(priorHop ? [registryHost, cdnHost] : [registryHost]);
+    expect(guard.session.activeRequests).toBe(0);
+  });
+
   it('carries a drained redirect body into the terminal response ceiling (one budget per request)', async () => {
     let cdnContacted = false;
     const cdn = await startUpstream((_req, res) => {

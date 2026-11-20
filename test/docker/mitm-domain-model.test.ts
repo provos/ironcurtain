@@ -46,6 +46,7 @@ describe('MITM dynamic domain and tunnel model', () => {
   let tcpServer: net.Server;
   let ports: Record<Protocol, number>;
   let upgrades: 'accept' | 'hold' | 'decline';
+  let declinedSocket: Duplex | undefined;
   const clients = new Set<net.Socket>();
   const upstreamSockets = new Set<net.Socket>();
   let hits: Record<Protocol, number>;
@@ -65,6 +66,7 @@ describe('MITM dynamic domain and tunnel model', () => {
   beforeEach(async () => {
     hits = { HTTP: 0, CONNECT: 0, WebSocket: 0 };
     upgrades = 'accept';
+    declinedSocket = undefined;
     httpServer = http.createServer((_req, res) => {
       hits.HTTP++;
       res.setHeader('Connection', 'close');
@@ -78,6 +80,7 @@ describe('MITM dynamic domain and tunnel model', () => {
         socket.resume();
         if (upgrades === 'decline') {
           // Hold the body open after declining the upgrade.
+          declinedSocket = socket;
           socket.write('HTTP/1.1 403 Forbidden\r\nContent-Length: 10\r\nConnection: close\r\n\r\nwait');
         }
         return;
@@ -243,6 +246,34 @@ describe('MITM dynamic domain and tunnel model', () => {
     { phase: 'missing CONNECT auth', action: 'stop' },
   ] as const;
 
+  function writeUpgradeRequest(client: net.Socket): void {
+    const headers = Object.entries({ ...upgradeHeaders, ...proxyHeaders })
+      .map(([key, value]) => `${key}: ${value}\r\n`)
+      .join('');
+    client.write(`GET http://${domain}:${ports.WebSocket}/echo HTTP/1.1\r\nHost: ${domain}\r\n${headers}\r\n`);
+  }
+
+  it('finishes a refused WebSocket response after the client half-closes', async () => {
+    upgrades = 'decline';
+    expect(proxy.hosts.addHost(domain)).toBe(true);
+    const client = net.createConnection(socketPath);
+    trackSocket(client, clients);
+    await once(client, 'connect');
+    const closed = once(client, 'close');
+    let response = '';
+    client.setEncoding('utf8').on('data', (chunk: string) => {
+      response += chunk;
+    });
+    writeUpgradeRequest(client);
+    await expect.poll(() => response).toContain('\r\n\r\nwait');
+    await new Promise<void>((resolve) => client.end(resolve));
+    // Let the proxy service another request while the refusal stays open.
+    expect((await open('HTTP', domain)).statusCode).toBe(200);
+    declinedSocket?.end(' more!');
+    await closed;
+    expect(response.split('\r\n\r\n')[1]).toBe('wait more!');
+  });
+
   it.each(incompleteUpgrades)('closes an unfinished proxy request on $action ($phase)', async ({ phase, action }) => {
     const denied = phase === 'denied' || phase === 'missing CONNECT auth';
     if (!denied) {
@@ -257,13 +288,10 @@ describe('MITM dynamic domain and tunnel model', () => {
     client.on('data', (chunk: string) => {
       response += chunk;
     });
-    const headers = Object.entries({ ...upgradeHeaders, ...proxyHeaders })
-      .map(([key, value]) => `${key}: ${value}\r\n`)
-      .join('');
     if (phase === 'missing CONNECT auth') {
       client.write(`CONNECT ${domain}:${ports.CONNECT} HTTP/1.1\r\nHost: ${domain}\r\n\r\n`);
     } else {
-      client.write(`GET http://${domain}:${ports.WebSocket}/echo HTTP/1.1\r\nHost: ${domain}\r\n${headers}\r\n`);
+      writeUpgradeRequest(client);
     }
     if (denied) {
       await expect.poll(() => response).toContain(phase === 'denied' ? '403 Forbidden' : '407 Proxy Authentication');

@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createTrajectoryCaptureWriter } from '../../src/docker/trajectory-capture.js';
 import { createReassembler } from '../../src/docker/trajectory-reassembler.js';
 import { beginCaptureExchange } from '../../src/docker/trajectory-tap.js';
-import type { ManifestEntry } from '../../src/docker/trajectory-types.js';
+import type { ExchangeRecord, ManifestEntry } from '../../src/docker/trajectory-types.js';
 import type { SessionId } from '../../src/session/types.js';
 import {
   encodeModelSse,
@@ -82,7 +83,10 @@ const terminals = ['end', 'close after terminal', 'close before terminal', 'malf
 const captureCases = [
   ...[fixtures[1], fixtures[2]].flatMap((fixture) => terminals.map((terminal) => ({ ...fixture, terminal }))),
   { ...fixtures[1], terminal: 'missing tool argument fragment' } as const,
+  { ...fixtures[1], terminal: 'token limit during tool arguments' } as const,
   { ...fixtures[2], terminal: 'missing output item completion' } as const,
+  { ...fixtures[2], terminal: 'recover item from terminal output' } as const,
+  { ...fixtures[2], terminal: 'terminal output identifies a different item' } as const,
   {
     ...fixtures[2],
     name: 'Responses with a bare terminal',
@@ -129,17 +133,24 @@ describe('trajectory reassembly model', () => {
     const sessionId = 'reassembly-session' as SessionId;
     try {
       writer.beginSession({ sessionId });
-      const exchange = beginCaptureExchange({
-        writer,
-        sessionId,
-        host,
-        path: host === anthropic ? '/v1/messages' : '/v1/responses',
-        method: 'POST',
-        requestHeaders: {},
-        requestStartedAt: Date.now(),
-      });
-      exchange.setRequestBody(Buffer.from('{}'));
-      const tap = exchange.attachResponse({ statusCode: 200, headers: { 'content-type': 'text/event-stream' } });
+      async function capture(events: readonly ModelSseEvent[], close = false): Promise<void> {
+        const exchange = beginCaptureExchange({
+          writer,
+          sessionId,
+          host,
+          path: host === anthropic ? '/v1/messages' : '/v1/responses',
+          method: 'POST',
+          requestHeaders: {},
+          requestStartedAt: Date.now(),
+        });
+        exchange.setRequestBody(Buffer.from('{}'));
+        const tap = exchange.attachResponse({ statusCode: 200, headers: { 'content-type': 'text/event-stream' } });
+        const closed = once(tap, 'close');
+        for (const chunk of chunks(encodeModelSse(events), 'uneven')) tap.write(chunk);
+        if (close) tap.destroy();
+        else tap.end();
+        await closed;
+      }
       const malformed =
         host === anthropic
           ? modelSseEvent('content_block_stop', { index: 99 })
@@ -151,30 +162,53 @@ describe('trajectory reassembly model', () => {
           : terminal === 'malformed event'
             ? [...prefix, malformed, ...model.events.slice(-1)]
             : model.events;
-      if (terminal === 'missing tool argument fragment') {
+      if (terminal === 'missing tool argument fragment' || terminal === 'token limit during tool arguments') {
         const missing = events.filter(({ dataUtf8 }) => dataUtf8.includes('"type":"input_json_delta"')).at(-1);
         if (!missing) throw new Error('Fixture has no argument deltas');
         events = events.filter((event) => event !== missing);
+        if (terminal === 'token limit during tool arguments') {
+          const tokenLimit = modelSseEvent('message_delta', {
+            delta: { stop_reason: 'max_tokens', stop_sequence: null },
+            usage: model.usage,
+          });
+          events = events.map((event) => (event.eventType === 'message_delta' ? tokenLimit : event));
+        }
       }
-      if (terminal === 'missing output item completion') {
+      if (
+        terminal === 'missing output item completion' ||
+        terminal === 'recover item from terminal output' ||
+        terminal === 'terminal output identifies a different item'
+      ) {
         const missing = events.find(
           ({ eventType, dataUtf8 }) =>
             eventType === 'response.output_item.done' && dataUtf8.includes('"type":"message"'),
         );
         if (!missing) throw new Error('Fixture has no completed message item');
         events = events.filter((event) => event !== missing);
+        if (terminal !== 'missing output item completion') {
+          const terminalBody =
+            terminal === 'terminal output identifies a different item'
+              ? model.bodyUtf8.replace('"id":"msg_0"', '"id":"unrelated_item"')
+              : model.bodyUtf8;
+          events = [
+            ...events.slice(0, -1),
+            { eventType: 'response.completed', dataUtf8: `{"type":"response.completed","response":${terminalBody}}` },
+          ];
+        }
       }
-      for (const chunk of chunks(encodeModelSse(events), 'uneven')) tap.write(chunk);
-      if (terminal === 'close after terminal' || terminal === 'close before terminal') tap.destroy();
-      else tap.end();
+      const aborts =
+        terminal === 'close before terminal' ||
+        terminal === 'token limit during tool arguments' ||
+        terminal === 'missing output item completion' ||
+        terminal === 'terminal output identifies a different item';
+      if (aborts) await capture(model.events);
+      await capture(events, terminal === 'close after terminal' || terminal === 'close before terminal');
+      if (aborts) await capture(model.events);
       await writer.endSession(sessionId);
 
-      const poisoned =
-        terminal === 'malformed event' ||
-        terminal === 'missing tool argument fragment' ||
-        terminal === 'missing output item completion';
-      const abortedExchanges = terminal === 'close before terminal' ? 1 : 0;
-      const exchanges = poisoned || abortedExchanges > 0 ? 0 : 1;
+      const poisoned = terminal === 'malformed event' || terminal === 'missing tool argument fragment';
+      const abortedExchanges = aborts ? 1 : 0;
+      const exchanges = poisoned ? 0 : aborts ? 2 : 1;
       expect(writer.stats()).toMatchObject({ written: exchanges, abortedExchanges, dropped: 0 });
       assertEndManifest(dir, {
         sessionId,
@@ -183,6 +217,10 @@ describe('trajectory reassembly model', () => {
         poisoned,
         ...(poisoned ? { poisonReason: 'reassembly-failure' } : {}),
       });
+      if (terminal === 'recover item from terminal output') {
+        const record = JSON.parse(readFileSync(join(dir, `${sessionId}.jsonl`), 'utf8')) as ExchangeRecord;
+        expect(record.response.bodyUtf8).toBe(model.bodyUtf8);
+      }
     } finally {
       await writer.close();
       rmSync(dir, { recursive: true, force: true });

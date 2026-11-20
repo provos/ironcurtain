@@ -2396,6 +2396,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     upstreamReq.on('response', (res) => {
+      // A refused upgrade is an ordinary HTTP response. The client can
+      // half-close its write side and still receive the response body.
+      clientSocket.off('end', cancelHandshake);
       res.once('error', () => clientSocket.destroy());
       clientSocket.write(formatRawHttpResponse(res));
       res.pipe(clientSocket);

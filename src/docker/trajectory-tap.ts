@@ -22,7 +22,13 @@ import { randomUUID } from 'node:crypto';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { type Reassembler, redactHeaders } from './trajectory-types.js';
 import type { ExchangeRecord, PoisonReason, ReassemblyResult } from './trajectory-types.js';
-import { createReassembler, providerForHost, ReassemblyError, TruncatedStreamError } from './trajectory-reassembler.js';
+import {
+  createReassembler,
+  IncompleteExchangeError,
+  providerForHost,
+  ReassemblyError,
+  TruncatedStreamError,
+} from './trajectory-reassembler.js';
 import type { SessionId } from '../session/types.js';
 import * as logger from '../logger.js';
 import { BoundedContentDecoder, type ContentDecoderFailure } from './llm-observation/content-decoder.js';
@@ -275,16 +281,16 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         `host=${inputs.host} path=${inputs.path} bytesSeen=${observedBytes}`;
 
       /**
-       * Abandon THIS exchange and nothing else. An upstream stream that
-       * ends before its terminal event is a transport event scoped to a
-       * single request — the agent's SDK simply retries it. It says
-       * nothing about the fidelity of the session's other records, so
-       * the session keeps capturing and the gap is surfaced as
-       * `session-end.abortedExchanges`.
+       * Abandon one exchange when upstream output is incomplete, keeping
+       * the rest of the session usable and recording the gap in the manifest.
        */
       const dropExchange = (err: Error): void => {
         aborted = true;
-        logger.warn(`[trajectory-tap] exchange dropped (mid-stream-abort): ${describeExchange()} — ${err.message}`);
+        const reason =
+          err instanceof IncompleteExchangeError && !(err instanceof TruncatedStreamError)
+            ? 'incomplete-upstream-response'
+            : 'mid-stream-abort';
+        logger.warn(`[trajectory-tap] exchange dropped (${reason}): ${describeExchange()} — ${err.message}`);
         try {
           inputs.writer.noteAbortedExchange(inputs.sessionId);
         } catch {
@@ -349,19 +355,12 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             });
             finishCompletion(true);
           } catch (err) {
-            // Do NOT emit a partial record. Distinguish a transport
-            // truncation (stream ended before the terminal event) from a
-            // genuine reassembly bug (a parse/dispatch/assembly failure):
-            // the former costs one exchange, the latter means the parser
-            // is untrustworthy and poisons the session. A clean `end()`
-            // with no terminal event reaches here e.g. when an upstream
-            // reset is flushed gracefully via `inlet.end()` (the
-            // gzip-tail recovery path).
-            const msg = err instanceof ReassemblyError ? err.message : String(err);
-            if (err instanceof TruncatedStreamError) {
+            // A transport reset or incomplete provider output costs one
+            // exchange. Reassembly failures make the session untrustworthy.
+            if (err instanceof IncompleteExchangeError) {
               dropExchange(err);
             } else {
-              poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
+              poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(String(err)));
             }
           }
         } else {

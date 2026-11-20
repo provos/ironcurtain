@@ -259,14 +259,23 @@ function followMediatedRedirect<A>(
     rejectMediatedEgress(clientRes, 403, messageOf(error, 'redirect target is not authorized'));
     return;
   }
-  if (!tightenMediatedDeadline(exchange, config.describe(next).maxDurationMs)) return;
+  const nextSpec = config.describe(next);
+  if (!tightenMediatedDeadline(exchange, nextSpec.maxDurationMs)) return;
   // Drain the redirect body under the byte ceilings before following (F1): the body
   // is never delivered but still consumes bandwidth, so it counts against a tight
   // per-hop redirect cap, the per-request cap *shared with every later hop*, and
   // (when present) the cumulative session ledger. Overflow fails the whole exchange
   // closed; the wall-clock deadline bounds a slow body.
   const session = config.session;
-  const remaining = config.describe(authorized).maxBytes - exchange.consumedBytes;
+  const remaining = nextSpec.maxBytes - exchange.consumedBytes;
+  const rejectByteOverflow = (): void => {
+    upstreamRes.destroy();
+    rejectMediatedEgress(clientRes, 502, `${config.label}: redirect body exceeds a byte ceiling`);
+  };
+  if (remaining < 0) {
+    rejectByteOverflow();
+    return;
+  }
   const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, remaining);
   let drained = 0;
   let aborted = false;
@@ -275,8 +284,7 @@ function followMediatedRedirect<A>(
     drained += chunk.length;
     if (drained > bodyCap || (session !== undefined && !session.addBytes(chunk.length))) {
       aborted = true;
-      upstreamRes.destroy();
-      rejectMediatedEgress(clientRes, 502, `${config.label}: redirect body exceeds a byte ceiling`);
+      rejectByteOverflow();
     }
   });
   upstreamRes.on('error', () => {

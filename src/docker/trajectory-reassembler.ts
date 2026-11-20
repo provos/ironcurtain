@@ -31,14 +31,16 @@ export class ReassemblyError extends Error {
   }
 }
 
-/**
- * Thrown by `finalize()` when the stream ended before the provider's
- * terminal event was parsed. This is a transport truncation / upstream
- * abort, NOT a reassembly bug — the caller should classify it as
- * `mid-stream-abort` rather than `reassembly-failure` so disconnects don't
- * pollute reassembly-failure metrics.
- */
-export class TruncatedStreamError extends ReassemblyError {
+/** The upstream omitted material required for a faithful record of this exchange. */
+export class IncompleteExchangeError extends ReassemblyError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IncompleteExchangeError';
+  }
+}
+
+/** The stream ended before the provider's terminal event was parsed. */
+export class TruncatedStreamError extends IncompleteExchangeError {
   constructor(message: string) {
     super(message);
     this.name = 'TruncatedStreamError';
@@ -549,6 +551,9 @@ export class AnthropicReassembler extends AbstractSseReassembler {
       try {
         JSON.parse(inputJson);
       } catch {
+        if (this.stopReason === 'max_tokens') {
+          throw new IncompleteExchangeError('anthropic token limit interrupted tool_use input');
+        }
         throw new ReassemblyError('anthropic tool_use input is invalid JSON');
       }
       // The block's openRaw carries id and name; reuse them as raw
@@ -585,7 +590,8 @@ export class AnthropicReassembler extends AbstractSseReassembler {
 
 interface ResponsesItemState {
   outputIndex: number;
-  /** Complete item JSON spliced verbatim from response.output_item.done. */
+  id?: string;
+  /** Complete item JSON from response.output_item.done or the terminal output. */
   doneRaw?: string;
   /** Per-content-index accumulated output_text fragments (cross-check). */
   readonly textChunksByContentIndex: Map<number, string[]>;
@@ -601,17 +607,11 @@ interface ResponsesItemState {
  * chatgpt.com. Named `response.*` events; an item tree addressed by
  * `output_index` (and content parts by `content_index`).
  *
- * The terminal `response.completed` carries the FULL response envelope
- * (~35 fields: status, usage, instructions, tools, ...) but with its
- * `output` array EMPTY. So the final body is the VERBATIM terminal
- * envelope (zero re-encode, all fields preserved) with its empty
- * `"output":[]` spliced to the assembled `response.output_item.done`
- * payloads (each a COMPLETE item JSON object on the wire, spliced
- * VERBATIM, in output_index order). providerRequestId/stopReason/usage
- * derive from that same envelope. The accumulated `output_text` deltas
- * are cross-checked against the item-done text (delta-join must equal
- * the item text) — a mismatch throws so the binary-session model poisons
- * `reassembly-failure` rather than silently trusting item.done.
+ * Codex's terminal envelope can carry an empty `output` array. Splice
+ * complete items into that envelope verbatim in output-index order.
+ * Prefer the item-done events and recover missing items from terminal output
+ * when it supplies the corresponding items. Cross-check accumulated text
+ * deltas against the final item text to detect inconsistent reassembly.
  */
 export class ResponsesReassembler extends AbstractSseReassembler {
   private terminalType?: 'response.completed' | 'response.failed' | 'response.incomplete';
@@ -619,7 +619,7 @@ export class ResponsesReassembler extends AbstractSseReassembler {
   private usageRaw?: string;
   private providerRequestId?: string;
   private modelFingerprint?: string;
-  /** Verbatim `response` envelope from the terminal event (output[] empty). */
+  /** Verbatim `response` envelope from the terminal event. */
   private responseEnvelopeRaw?: string;
   /**
    * Stop reason for the record. Equals `status` for a completed response;
@@ -692,7 +692,8 @@ export class ResponsesReassembler extends AbstractSseReassembler {
     if (outputIndex === undefined) {
       throw new ReassemblyError('response.output_item.added missing output_index');
     }
-    this.getItem(outputIndex);
+    const item = findFieldValueSubstring(data, 'item');
+    this.getItem(outputIndex).id ??= item === undefined ? undefined : peekStringField(item, 'id');
   }
 
   private onOutputTextDelta(data: string): void {
@@ -700,6 +701,7 @@ export class ResponsesReassembler extends AbstractSseReassembler {
     const contentIndex = peekNumberField(data, 'content_index') ?? 0;
     if (outputIndex === undefined) return;
     const item = this.getItem(outputIndex);
+    item.id ??= peekStringField(data, 'item_id');
     const literal = findFieldValueSubstring(data, 'delta');
     if (literal === undefined || !literal.startsWith('"')) return;
     let chunks = item.textChunksByContentIndex.get(contentIndex);
@@ -716,7 +718,9 @@ export class ResponsesReassembler extends AbstractSseReassembler {
     if (outputIndex === undefined) return;
     const text = peekStringField(data, 'text');
     if (text === undefined) return;
-    this.getItem(outputIndex).doneTextByContentIndex.set(contentIndex, text);
+    const item = this.getItem(outputIndex);
+    item.id ??= peekStringField(data, 'item_id');
+    item.doneTextByContentIndex.set(contentIndex, text);
   }
 
   private onOutputItemDone(data: string): void {
@@ -743,7 +747,13 @@ export class ResponsesReassembler extends AbstractSseReassembler {
   }
 
   protected assembleResult(): ReassemblyResult {
+    const missingItem = this.recoverMissingCompletedItems();
     this.crossCheckDeltasAgainstItems();
+    if (missingItem !== undefined) {
+      throw new IncompleteExchangeError(
+        `completed responses stream missing output_item.done and recoverable terminal output for index ${missingItem}`,
+      );
+    }
     const bodyUtf8 = this.assembleBody();
     return {
       bodyUtf8,
@@ -753,6 +763,40 @@ export class ResponsesReassembler extends AbstractSseReassembler {
       usage: this.parseUsage(),
       events: this.events,
     };
+  }
+
+  /**
+   * Some providers supply full output in the terminal envelope. Recover a
+   * missing item only when the envelope supplies the known item at its index.
+   * The usual delta cross-check still runs on recovered text.
+   */
+  private recoverMissingCompletedItems(): number | undefined {
+    if (this.terminalType !== 'response.completed') return undefined;
+    let terminalItems: string[] | undefined;
+    let missingItem: number | undefined;
+    for (const item of this.items.values()) {
+      if (item.doneRaw !== undefined) continue;
+      if (terminalItems === undefined) {
+        const output = findFieldValueSubstring(this.responseEnvelopeRaw ?? '', 'output');
+        terminalItems = output?.startsWith('[') ? splitJsonArrayElements(output) : [];
+      }
+      const candidate = terminalItems[item.outputIndex];
+      if (candidate && item.id !== undefined && peekStringField(candidate, 'id') === item.id) {
+        const status = peekStringField(candidate, 'status');
+        if (
+          peekStringField(candidate, 'type') !== undefined &&
+          (status === undefined || status === 'completed') &&
+          [...item.textChunksByContentIndex.keys()].every(
+            (index) => extractItemContentText(candidate, index) !== undefined,
+          )
+        ) {
+          item.doneRaw = candidate;
+          continue;
+        }
+      }
+      missingItem ??= item.outputIndex;
+    }
+    return missingItem;
   }
 
   /**
@@ -798,12 +842,7 @@ export class ResponsesReassembler extends AbstractSseReassembler {
     const itemParts: string[] = [];
     for (const idx of sorted) {
       const item = this.items.get(idx);
-      if (!item?.doneRaw) {
-        if (this.terminalType === 'response.completed') {
-          throw new ReassemblyError(`completed responses stream missing output_item.done for index ${idx}`);
-        }
-        continue;
-      }
+      if (!item?.doneRaw) continue;
       itemParts.push(item.doneRaw);
     }
     const outputArray = `[${itemParts.join(',')}]`;
